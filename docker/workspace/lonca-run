@@ -1,0 +1,26 @@
+#!/bin/bash
+# lonca-run <dir> <command...>
+# Starts <command> in its own session so an agent run outlives this exec and the
+# Lonca server. stdin comes from <dir>/prompt; stdout and stderr go to
+# <dir>/out.jsonl and <dir>/err.log. <dir>/exit holds the exit code once it ends.
+set -eu
+dir="$1"
+shift
+: > "$dir/out.jsonl"
+: > "$dir/err.log"
+setsid bash -c '
+  trap true TERM INT HUP
+  dir="$1"
+  shift
+  # The detached shell does not inherit set -e. Never run an untracked command.
+  echo "$$" > "$dir/pid" || exit 1
+  "$@" < "$dir/prompt" >> "$dir/out.jsonl" 2>> "$dir/err.log"
+  code=$?
+  echo "$code" > "$dir/exit.tmp" && mv "$dir/exit.tmp" "$dir/exit"
+' lonca-run "$dir" "$@" < /dev/null > /dev/null 2>&1 &
+for _ in $(seq 1 200); do
+  [ -s "$dir/pid" ] && exit 0
+  sleep 0.05
+done
+echo "lonca-run: the agent process did not start" >&2
+exit 1

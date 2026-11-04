@@ -1,0 +1,29 @@
+# When Docker Sandboxes is available, every Lonca workspace runs in a virtual machine built from
+# this image. Docker's base already has git, gh, Node, Python, ripgrep and a Docker engine.
+# To add toolchains for a project, build your own image `FROM` this one and set it in the
+# project's settings.
+FROM docker/sandbox-templates:shell-docker
+
+USER root
+
+ENV DISABLE_AUTOUPDATER=1 \
+    CODEX_DISABLE_UPDATE_CHECK=1 \
+    GIT_TERMINAL_PROMPT=0 \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    LANG=C.UTF-8 \
+    TERM=xterm-256color
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends fd-find tree \
+ && ln -s /usr/bin/fdfind /usr/local/bin/fd \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code @openai/codex \
+ && npm cache clean --force
+
+COPY gitconfig /etc/gitconfig
+COPY --chmod=755 lonca-boot lonca-pty lonca-run /usr/local/bin/
+
+RUN install -d -o agent -g agent -m 755 /var/tmp/lonca
+
+USER agent

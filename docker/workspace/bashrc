@@ -1,0 +1,7 @@
+case $- in *i*) ;; *) return ;; esac
+HISTFILE="$HOME/.bash_history"
+HISTSIZE=5000
+PS1='\u@\h \W % '
+alias ls='ls --color=auto'
+alias ll='ls -la --color=auto'
+alias grep='grep --color=auto'

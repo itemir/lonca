@@ -1,0 +1,14 @@
+#!/bin/bash
+# lonca-pty <tty file> <cols> <rows> <command...>
+# Runs <command> on a pseudo-terminal made here, for a caller that has no terminal of its own to
+# hand `sbx exec -t`. <tty file> holds the terminal's name, which is how it gets resized later.
+set -u
+file="$1"
+cols="$2"
+rows="$3"
+shift 3
+SHELL=/bin/bash script --quiet --return --command \
+  "tty > $(printf %q "$file"); stty cols $(printf %q "$cols") rows $(printf %q "$rows"); exec $(printf '%q ' "$@")" /dev/null
+code=$?
+rm -f "$file"
+exit "$code"

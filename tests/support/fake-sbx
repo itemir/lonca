@@ -1,0 +1,166 @@
+#!/bin/bash
+# Stands in for the `sbx` CLI, so Lonca's whole sandbox path runs in tests without a Docker
+# account: the same commands and output, except that a "sandbox" is a plain Docker container. It
+# can't stand in for the VM itself, its network policy or virtiofs. Those need the real thing:
+# npm run test:sandbox
+set -u
+state="${FAKE_SBX_DIR:?}"
+prefix="lonca-${LONCA_INSTANCE:-}"
+marker="dev.lonca.fake-sbx=1"
+filters=(--filter "label=$marker")
+if [ -n "${LONCA_INSTANCE:-}" ]; then filters+=(--filter "label=dev.lonca.instance=$prefix"); fi
+
+signed_in() {
+  if [ -e "$state/signed-out" ]; then
+    echo 'error: not signed in to Docker' >&2
+    echo '  try: sbx login' >&2
+    exit 1
+  fi
+}
+
+list() {
+  printf '['
+  local separator=''
+  while IFS=$'\t' read -r name status; do
+    [ -n "$name" ] || continue
+    [ "$status" = running ] || status=stopped
+    printf '%s{"name":"%s","agent":"shell","status":"%s","detached":true}' "$separator" "$name" "$status"
+    separator=','
+  done < <(docker ps -a "${filters[@]}" --format '{{.Names}}	{{.State}}')
+  printf ']\n'
+}
+
+run_sandbox() {
+  signed_in
+  local name='' template='' agent='' workdir=''
+  local options=() mounts=() denied=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --detach|-d) shift ;;
+      --name) name=$2; shift 2 ;;
+      --template|-t) template=$2; shift 2 ;;
+      --pull|--skills) shift 2 ;;
+      --memory|-m) options+=(--memory "$2"); shift 2 ;;
+      --cpus) options+=(--cpus "$2"); shift 2 ;;
+      --publish|-p) options+=(--publish "$2"); shift 2 ;;
+      --deny-network) denied+=("$2"); shift 2 ;;
+      -*) echo "error: unknown flag: $1" >&2; exit 1 ;;
+      *)
+        if [ -z "$agent" ]; then
+          agent=$1
+        else
+          # The first workspace is where commands start, as it is for the real one.
+          [ -n "$workdir" ] || workdir=$1
+          mounts+=(--volume "$1:$1")
+        fi
+        shift
+        ;;
+    esac
+  done
+  if [ ${#name} -gt 63 ]; then
+    echo "error: sandbox name cannot exceed 63 characters: $name" >&2
+    exit 1
+  fi
+  if docker inspect "$name" >/dev/null 2>&1; then
+    docker start "$name" >/dev/null
+    echo "$name"
+    return
+  fi
+  if ! grep -qxF "$template" "$state/templates" 2>/dev/null; then
+    echo "error: template $template isn't loaded" >&2
+    exit 1
+  fi
+  # The real one plants placeholders for its proxy to replace, whether or not it holds any secrets.
+  echo "run $name template=$template deny=${denied[*]-} ${options[*]-}" >> "$state/calls.log"
+  docker run -d --init --name "$name" --label "dev.lonca.instance=$prefix" --label "$marker" \
+    --add-host host.docker.internal:host-gateway --user agent --workdir "$workdir" --entrypoint sleep \
+    --env ANTHROPIC_API_KEY=proxy-managed --env OPENAI_API_KEY=proxy-managed --env GH_TOKEN=gho_proxy-managed-placeholder-for-tests00 \
+    ${options[@]+"${options[@]}"} ${mounts[@]+"${mounts[@]}"} "$template" infinity >/dev/null || exit 1
+  echo "$name"
+}
+
+exec_in_sandbox() {
+  signed_in
+  local flags=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --interactive|-i) flags+=(--interactive); shift ;;
+      --user|-u) flags+=(--user "$2"); shift 2 ;;
+      --workdir|-w) flags+=(--workdir "$2"); shift 2 ;;
+      --env=*) flags+=("$1"); shift ;;
+      --env|-e) flags+=(--env "$2"); shift 2 ;;
+      -*) echo "error: unknown flag: $1" >&2; exit 125 ;;
+      *) break ;;
+    esac
+  done
+  local name=$1
+  shift
+  if [ "${1:-}" = '--' ]; then shift; fi
+  local running
+  if ! running=$(docker inspect --format '{{.State.Running}}' "$name" 2>/dev/null); then
+    echo "error: sandbox $name not found" >&2
+    exit 125
+  fi
+  # Like the real one, it starts a stopped sandbox.
+  if [ "$running" != true ]; then
+    local purpose='command'
+    for arg in "$@"; do
+      case "$arg" in lonca-process|follow|lonca-boot|lonca-terminal-ready) purpose=$arg ;; esac
+    done
+    echo "exec-start $name $purpose" >> "$state/calls.log"
+    docker start "$name" >/dev/null || exit 125
+  fi
+  # Like the real one, it gives a command a pipe for stdin even without --interactive.
+  if [[ " ${flags[*]-} " != *" --interactive "* ]]; then
+    exec docker exec --interactive ${flags[@]+"${flags[@]}"} "$name" "$@" < <(:)
+  fi
+  exec docker exec ${flags[@]+"${flags[@]}"} "$name" "$@"
+}
+
+command=${1:-}
+[ $# -eq 0 ] || shift
+case "$command" in
+  version) echo 'sbx version v0.50.1 fake' ;;
+  diagnose)
+    status=$(cat "$state/virtualization" 2>/dev/null || echo pass)
+    printf '{"version":"1.0","checks":[{"name":"Virtualization","status":"%s","message":"not supported here","detail":"","hint":"Turn on hardware virtualization"}]}\n' "$status"
+    ;;
+  ls) signed_in; list ;;
+  run) run_sandbox "$@" ;;
+  exec) exec_in_sandbox "$@" ;;
+  stop) signed_in; docker stop -t 1 "$1" >/dev/null ;;
+  rm)
+    signed_in
+    [ "${1:-}" = --force ] && shift
+    echo "rm $1" >> "$state/calls.log"
+    docker rm -f "$1" >/dev/null
+    ;;
+  policy)
+    signed_in
+    echo "policy $*" >> "$state/calls.log"
+    if [ "${1:-}" = init ] && [ -e "$state/policy" ]; then echo 'error: policy already initialized' >&2; exit 1; fi
+    if [ "${1:-}" = init ]; then echo "$2" > "$state/policy"; fi
+    ;;
+  template)
+    signed_in
+    case "${1:-}" in
+      ls)
+        if [ "${2:-}" = --quiet ] || [ "${2:-}" = -q ]; then
+          cat "$state/templates" 2>/dev/null || true
+          exit 0
+        fi
+        printf '['
+        separator=''
+        while read -r line; do printf '%s{"tag":"%s"}' "$separator" "$line"; separator=','; done < <(cat "$state/templates" 2>/dev/null)
+        printf ']\n'
+        ;;
+      load)
+        output=$(docker load --input "$2") || exit 1
+        echo "$output" | sed -n 's/^Loaded image: //p' >> "$state/templates"
+        echo "$output"
+        ;;
+      *) echo "error: unknown template command" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "error: unknown command: $command" >&2; exit 1 ;;
+esac
