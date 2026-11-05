@@ -151,12 +151,12 @@ it('can delete a workspace whose finished run output cannot be read', async () =
   expect(runtimeRunning(workspace.containerName)).toBeNull();
 });
 
-it.each(['shell', 'setup', 'run'] as const)('does not restart a stopped runtime when a connected %s stream closes', async (kind) => {
+it.each(['shell', 'setup'] as const)('does not restart a stopped runtime when a connected %s stream closes', async (kind) => {
   let terminal: TerminalInfo;
   if (kind === 'shell') terminal = await lonca.api('POST', `/workspaces/${workspace.id}/terminals`);
   else {
-    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { [kind === 'setup' ? 'setupScript' : 'runScript']: 'sleep 600' } });
-    terminal = await lonca.api('POST', `/workspaces/${workspace.id}/scripts/${kind}`);
+    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: 'sleep 600' } });
+    terminal = await lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`);
   }
   const connected = await lonca.openTerminal(terminal.id);
   try {

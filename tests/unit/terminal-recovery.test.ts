@@ -1,5 +1,7 @@
+import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { WebSocket } from 'ws';
 import type { Workspace } from '../../shared/types.ts';
 
 const { state, isContainerRunning, execText, execTty } = vi.hoisted(() => ({
@@ -33,7 +35,102 @@ beforeEach(() => {
 });
 afterEach(() => {
   stream.destroy();
+  vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+function socket(): WebSocket {
+  return Object.assign(new EventEmitter(), {
+    readyState: WebSocket.OPEN,
+    bufferedAmount: 0,
+    send: vi.fn(),
+    close: vi.fn(),
+  }) as unknown as WebSocket;
+}
+
+it('keeps a dismissed window from reclaiming its terminal after a disconnect', async () => {
+  const terminals = await import('../../server/terminals.ts');
+  const terminal = await terminals.createShell(workspace);
+  const first = socket();
+  terminals.attachTerminal(terminal.id, first, 'first-window');
+  first.emit('close');
+  terminals.closeTerminalWindow(terminal.id);
+
+  const reconnect = socket();
+  terminals.attachTerminal(terminal.id, reconnect, 'first-window');
+  expect(reconnect.send).toHaveBeenCalledWith(JSON.stringify({ type: 'window-closed' }));
+  expect(reconnect.close).toHaveBeenCalled();
+  expect(terminal.windowed).toBeUndefined();
+  expect(reconnect.listenerCount('message')).toBe(0);
+
+  // An explicit new window can still take ownership.
+  const next = socket();
+  terminals.attachTerminal(terminal.id, next, 'next-window');
+  expect(terminal.windowed).toBe(true);
+  expect(next.close).not.toHaveBeenCalled();
+  terminals.closeTerminalWindow(terminal.id);
+});
+
+it('keeps an older disconnected window from replacing a newer one', async () => {
+  const terminals = await import('../../server/terminals.ts');
+  const terminal = await terminals.createShell(workspace);
+  const first = socket();
+  terminals.attachTerminal(terminal.id, first, 'first-window');
+  first.emit('close');
+  const next = socket();
+  terminals.attachTerminal(terminal.id, next, 'next-window');
+
+  const reconnect = socket();
+  terminals.attachTerminal(terminal.id, reconnect, 'first-window');
+  expect(reconnect.close).toHaveBeenCalled();
+  expect(next.close).not.toHaveBeenCalled();
+  expect(terminal.windowed).toBe(true);
+  terminals.closeTerminalWindow(terminal.id);
+});
+
+it('lets an undismissed window reconnect after the reload grace period', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const terminals = await import('../../server/terminals.ts');
+  const terminal = await terminals.createShell(workspace);
+  const first = socket();
+  terminals.attachTerminal(terminal.id, first, 'first-window');
+  first.emit('close');
+  vi.advanceTimersByTime(2000);
+  expect(terminal.windowed).toBeUndefined();
+
+  const reconnect = socket();
+  terminals.attachTerminal(terminal.id, reconnect, 'first-window');
+  expect(reconnect.close).not.toHaveBeenCalled();
+  expect(terminal.windowed).toBe(true);
+  terminals.closeTerminalWindow(terminal.id);
+});
+
+it.each(['leader', 'jobs'])('recovers a legacy Run script with %s alive and can close it', async (record) => {
+  state.workspaces.push(workspace);
+  const terminals = await import('../../server/terminals.ts');
+  const { TTY_DIR } = await import('../../server/config.ts');
+  const id = `${workspace.id}-run`;
+  execText.mockResolvedValue(`${TTY_DIR}/${id}.pid\t${record}\n`);
+  await terminals.reconcileTerminals();
+  expect(terminals.listTerminals()).toEqual([expect.objectContaining({
+    id, kind: 'shell', title: 'Recovered run script', status: 'running', disconnected: true,
+    ...(record === 'jobs' ? { jobsOnly: true } : {}),
+  })]);
+  expect(workspace.steps[0].status).toBe('pending');
+
+  execText.mockClear();
+  await terminals.closeTerminal(id);
+  expect(execText).toHaveBeenCalledWith('sandbox:test', expect.arrayContaining(['stop', `${TTY_DIR}/${id}.pid`]), expect.anything());
+  expect(terminals.listTerminals()).toEqual([]);
+});
+
+it('does not adopt another workspace’s legacy Run record', async () => {
+  state.workspaces.push(workspace);
+  const terminals = await import('../../server/terminals.ts');
+  const { TTY_DIR } = await import('../../server/config.ts');
+  execText.mockResolvedValue(`${TTY_DIR}/mnopqrstuvwx-run.pid\tleader\n`);
+  await terminals.reconcileTerminals();
+  expect(terminals.listTerminals()).toEqual([]);
 });
 
 it('does not inspect a new workspace whose live terminals are already tracked', async () => {
@@ -51,9 +148,9 @@ it('recovers preexisting terminals and retires them without exec when their runt
   state.workspaces.push(workspace);
   const terminals = await import('../../server/terminals.ts');
   const { TTY_DIR } = await import('../../server/config.ts');
-  execText.mockResolvedValue(`${TTY_DIR}/abcdefghijkl-run.pid\tleader\n`);
+  execText.mockResolvedValue(`${TTY_DIR}/abcdefghijkl-setup.pid\tleader\n`);
   await terminals.reconcileTerminals();
-  expect(terminals.listTerminals()).toEqual([expect.objectContaining({ id: 'abcdefghijkl-run', status: 'running', disconnected: true })]);
+  expect(terminals.listTerminals()).toEqual([expect.objectContaining({ id: 'abcdefghijkl-setup', status: 'running', disconnected: true })]);
   execText.mockClear();
   isContainerRunning.mockResolvedValue(false);
   await terminals.reconcileTerminals();
@@ -64,7 +161,7 @@ it('recovers preexisting terminals and retires them without exec when their runt
 it.each([false, true])('defers an interrupted terminal check and retains its result with runtime running=%s', async (running) => {
   const terminals = await import('../../server/terminals.ts');
   state.workspaces.push(workspace);
-  const terminal = await terminals.runScript(workspace, 'setup', 'sleep 600');
+  const terminal = await terminals.runSetupScript(workspace, 'sleep 600');
   execText.mockClear();
   // Shutdown closes the exec stream before the runtime stops reporting running.
   stream.end();

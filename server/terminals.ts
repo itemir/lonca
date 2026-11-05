@@ -17,6 +17,8 @@ const MAX_CLIENT_BACKLOG = 4 * 1024 * 1024;
 // Runtime shutdown closes exec streams before the runtime stops reporting running.
 // Let the next recovery pass observe that transition before issuing another exec.
 const DISCONNECT_SETTLE_MS = 5000;
+// A window that's reloading comes straight back, and the panel shouldn't take its terminal meanwhile.
+const WINDOW_RELOAD_MS = 1000;
 
 const RECORD_PID = String.raw`
 set -eu
@@ -37,7 +39,15 @@ class Terminal {
   info: TerminalInfo;
   private chunks: Buffer[] = [];
   private bytes = 0;
+  /** How much of the end of the scrollback arrived with no view attached. */
+  private unseen = 0;
   private clients = new Set<WebSocket>();
+  /** The window this terminal was moved to. One view at a time decides its size and answers its programs. */
+  private window: WebSocket | null = null;
+  /** Stays known while its socket reconnects, so Bring it back can still dismiss it. */
+  private windowId: string | null = null;
+  private dismissedWindows = new Set<string>();
+  private windowLeaving: ReturnType<typeof setTimeout> | undefined;
   private process: TtyProcess | null = null;
   private stream: Duplex | null = null;
   private containerId = '';
@@ -72,6 +82,7 @@ class Terminal {
     while (this.bytes > SCROLLBACK_BYTES && this.chunks.length > 1) {
       this.bytes -= this.chunks.shift()!.length;
     }
+    if (this.clients.size === 0) this.unseen = Math.min(this.unseen + data.length, this.bytes);
     for (const client of this.clients) {
       // A client that can't keep up misses output rather than growing the server's memory.
       if (client.readyState === WebSocket.OPEN && client.bufferedAmount < MAX_CLIENT_BACKLOG) {
@@ -92,6 +103,7 @@ class Terminal {
     this.disconnectedExit = undefined;
     this.chunks = [];
     this.bytes = 0;
+    this.unseen = 0;
     this.info.status = 'running';
     this.info.exitCode = null;
     delete this.info.disconnected;
@@ -164,10 +176,32 @@ exit 1
     }
   }
 
-  attach(socket: WebSocket): void {
+  attach(socket: WebSocket, windowId?: string): void {
+    if (windowId) {
+      if (this.dismissedWindows.has(windowId)) {
+        socket.send(JSON.stringify({ type: 'window-closed' }));
+        socket.close();
+        return;
+      }
+      // A newer window replaces an older one, as a window opened from another browser tab can.
+      this.dismissWindow(windowId);
+      this.windowId = windowId;
+      this.window = socket;
+      this.setWindowed(true);
+    }
     this.clients.add(socket);
-    if (this.chunks.length > 0) socket.send(Buffer.concat(this.chunks), { binary: true });
+    // A view answers what programs ask the terminal, and shouldn't again for what another already has.
+    // What nobody has seen is still waiting for its answers, so that comes after the marker.
+    const replay = Buffer.concat(this.chunks);
+    const seen = replay.length - this.unseen;
+    socket.send(JSON.stringify({ type: 'replay', ...this.size }));
+    if (seen > 0) socket.send(replay.subarray(0, seen), { binary: true });
+    socket.send(JSON.stringify({ type: 'replayed' }));
+    if (this.unseen > 0) socket.send(replay.subarray(seen), { binary: true });
+    this.unseen = 0;
     socket.on('message', (data, isBinary) => {
+      // Anything else still attached can't take the terminal back from its window.
+      if (this.window && this.window !== socket) return;
       if (isBinary) {
         this.stream?.write(data as Buffer);
         return;
@@ -182,7 +216,36 @@ exit 1
         // Ignore malformed control messages.
       }
     });
-    socket.on('close', () => this.clients.delete(socket));
+    socket.on('close', () => {
+      this.clients.delete(socket);
+      if (this.window !== socket) return;
+      this.window = null;
+      this.windowLeaving = setTimeout(() => this.setWindowed(false), WINDOW_RELOAD_MS);
+    });
+  }
+
+  private setWindowed(windowed: boolean): void {
+    if (Boolean(this.info.windowed) === windowed) return;
+    if (windowed) this.info.windowed = true;
+    else delete this.info.windowed;
+    publish({ type: 'terminal', terminal: this.info });
+  }
+
+  /** Tells the window to close, which it can't do by itself just from losing its connection. */
+  private dismissWindow(reconnectingId?: string): void {
+    clearTimeout(this.windowLeaving);
+    if (this.windowId && this.windowId !== reconnectingId) this.dismissedWindows.add(this.windowId);
+    this.windowId = null;
+    const window = this.window;
+    this.window = null;
+    if (window?.readyState !== WebSocket.OPEN) return;
+    window.send(JSON.stringify({ type: 'window-closed' }));
+    window.close();
+  }
+
+  closeWindow(): void {
+    this.dismissWindow();
+    this.setWindowed(false);
   }
 
   recovered(containerId: string, onExit?: (code: number | null) => void): void {
@@ -256,6 +319,7 @@ exit 1
 
   dispose(): void {
     const wasRunning = this.process !== null;
+    this.dismissWindow();
     this.stream?.destroy();
     this.process = null;
     this.stream = null;
@@ -365,11 +429,15 @@ export function listTerminals(): TerminalInfo[] {
   return [...terminals.values()].map((terminal) => terminal.info);
 }
 
-export function attachTerminal(id: string, socket: WebSocket): boolean {
+export function attachTerminal(id: string, socket: WebSocket, windowId?: string): boolean {
   const terminal = terminals.get(id);
   if (!terminal) return false;
-  terminal.attach(socket);
+  terminal.attach(socket, windowId);
   return true;
+}
+
+export function closeTerminalWindow(id: string): void {
+  terminals.get(id)?.closeWindow();
 }
 
 export function createShell(workspace: Workspace): Promise<TerminalInfo> {
@@ -448,44 +516,34 @@ export function closeWorkspaceTerminals(workspace: Workspace): Promise<void> {
   });
 }
 
-export type ScriptKind = 'setup' | 'run';
-
 const scriptQueue = new KeyedQueue();
 
-export function runScript(
-  workspace: Workspace,
-  kind: ScriptKind,
-  script: string,
-): Promise<TerminalInfo> {
+export function runSetupScript(workspace: Workspace, script: string): Promise<TerminalInfo> {
   // One at a time, so pressing play twice can't start a second copy nothing can then stop.
-  return scriptQueue.run(workspace.id, () => startScript(workspace, kind, script));
+  return scriptQueue.run(workspace.id, () => startScript(workspace, script));
 }
 
-async function startScript(
-  workspace: Workspace,
-  kind: ScriptKind,
-  script: string,
-): Promise<TerminalInfo> {
+async function startScript(workspace: Workspace, script: string): Promise<TerminalInfo> {
   const containerId = await runningContainer(workspace);
   if (workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
-  const id = `${workspace.id}-${kind}`;
+  const id = `${workspace.id}-setup`;
   let terminal = terminals.get(id);
   if (terminal) {
     await terminal.stop();
   } else {
-    // A copy can still be running from before a restart, holding the app's port.
+    // A copy can still be running from before a restart.
     await stopPidFile(containerId, `${TTY_DIR}/${id}.pid`);
     terminal = new Terminal({
       id,
       workspaceId: workspace.id,
-      kind,
-      title: kind === 'setup' ? 'Setup' : 'Run',
+      kind: 'setup',
+      title: 'Setup',
       status: 'running',
       exitCode: null,
     });
     terminals.set(id, terminal);
   }
-  const setupStep = kind === 'setup' ? workspace.steps.find((step) => step.id === 'setup') : undefined;
+  const setupStep = workspace.steps.find((step) => step.id === 'setup');
   const updateSetup = (status: 'running' | 'done' | 'error', detail?: string) => {
     if (!setupStep) return;
     setupStep.status = status;
@@ -511,15 +569,15 @@ async function startScript(
   return terminal.info;
 }
 
-export function stopScript(workspace: Workspace, kind: ScriptKind): Promise<void> {
+export function stopSetupScript(workspace: Workspace): Promise<void> {
   return scriptQueue.run(workspace.id, async () => {
-    const id = `${workspace.id}-${kind}`;
+    const id = `${workspace.id}-setup`;
     const terminal = terminals.get(id);
     if (terminal) await terminal.stop();
     else if (await isContainerRunning(runtimeHandle(workspace))) {
       await stopPidFile(runtimeHandle(workspace), `${TTY_DIR}/${id}.pid`);
     }
-    if (kind === 'setup' && !terminal && workspace.steps.find((step) => step.id === 'setup')?.status === 'running') {
+    if (!terminal && workspace.steps.find((step) => step.id === 'setup')?.status === 'running') {
       updateRecoveredSetup(workspace, null);
     }
   });
@@ -598,9 +656,12 @@ async function recoverWorkspace(workspace: Workspace): Promise<void> {
 
 /** Gives back the controls of a terminal an earlier server started. */
 function adopt(workspace: Workspace, containerId: string, id: string, found: 'leader' | 'jobs'): void {
-  const kind = id.endsWith('-setup') ? 'setup' : id.endsWith('-run') ? 'run' : 'shell';
-  if (kind !== 'shell' && id !== `${workspace.id}-${kind}`) return;
-  const title = kind === 'setup' ? 'Setup' : kind === 'run' ? 'Run' : 'Recovered terminal';
+  const script = /-(setup|run)$/.exec(id)?.[1];
+  if (script && id !== `${workspace.id}-${script}`) return;
+  // Run scripts from older versions still own live processes. Give them ordinary terminal
+  // controls so closing or restarting one can stop its whole session after an upgrade.
+  const kind = script === 'setup' ? 'setup' : 'shell';
+  const title = kind === 'setup' ? 'Setup' : script === 'run' ? 'Recovered run script' : 'Recovered terminal';
   const terminal = new Terminal({ id, workspaceId: workspace.id, kind, title, status: 'running', exitCode: null });
   terminals.set(id, terminal);
   if (found === 'jobs') {

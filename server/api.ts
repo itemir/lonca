@@ -18,7 +18,7 @@ import {
   checkClaudeCredential, checkCodexKey, checkSandboxes, clearAgentRejected, rebuildImage, refreshAgents, saveCodexApiKey, signOutCodex, system,
 } from './system.ts';
 import {
-  closeTerminal, createShell, listTerminals, restartShell, runScript, stopScript,
+  closeTerminal, closeTerminalWindow, createShell, listTerminals, restartShell, runSetupScript, stopSetupScript,
 } from './terminals.ts';
 import { sessionSnapshot } from './transcript.ts';
 import { HttpError, errorMessage, newId } from './util.ts';
@@ -70,7 +70,6 @@ const stripSpace = (secret: string) => secret.replace(/\s+/g, '');
 const projectSettingsSchema = z.object({
   defaultBranch: z.string().min(1),
   setupScript: z.string(),
-  runScript: z.string(),
   filesToCopy: z.array(z.string()),
   image: z.string(),
   network: z.enum(['internet', 'host']),
@@ -286,23 +285,25 @@ export function createApi(me: AppState['me']): Router {
     res.status(204).end();
   });
 
+  api.delete('/terminals/:id/window', (req, res) => {
+    closeTerminalWindow(String(req.params.id));
+    res.status(204).end();
+  });
+
   api.get('/workspaces/:id/scripts', async (req, res) => {
-    const workspace = workspaceParam(req);
-    const setup = await configuredSetupScript(workspace);
-    res.json({ setup: Boolean(setup.trim()), run: Boolean(getProject(workspace.projectId)?.settings.runScript.trim()) });
+    const setup = await configuredSetupScript(workspaceParam(req));
+    res.json({ setup: Boolean(setup.trim()) });
   });
 
-  api.post('/workspaces/:id/scripts/:kind', express.json(), async (req, res) => {
+  api.post('/workspaces/:id/scripts/setup', async (req, res) => {
     const workspace = workspaceParam(req);
-    const kind = parse(z.enum(['setup', 'run']), req.params.kind);
-    const project = getProject(workspace.projectId);
-    const script = kind === 'setup' ? await configuredSetupScript(workspace) : project?.settings.runScript;
-    if (!script?.trim()) throw new HttpError(400, `This project has no ${kind} script yet`);
-    res.status(201).json(await runScript(workspace, kind, script));
+    const script = await configuredSetupScript(workspace);
+    if (!script.trim()) throw new HttpError(400, 'This project has no setup script yet');
+    res.status(201).json(await runSetupScript(workspace, script));
   });
 
-  api.delete('/workspaces/:id/scripts/:kind', async (req, res) => {
-    await stopScript(workspaceParam(req), parse(z.enum(['setup', 'run']), req.params.kind));
+  api.delete('/workspaces/:id/scripts/setup', async (req, res) => {
+    await stopSetupScript(workspaceParam(req));
     res.status(204).end();
   });
 

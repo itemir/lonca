@@ -328,7 +328,7 @@ export function RightPanel({ workspace, project, onOpenFile, onOpenDiff, onCreat
       {bottomOpen ? (
         <div className="right-bottom" style={{ height: height.size }}>
           <div className="resize-handle resize-y" onPointerDown={height.onPointerDown} />
-          <BottomPanel workspace={workspace} project={project} onCollapse={() => setBottomOpen(false)} onOpen={() => setBottomOpen(true)} />
+          <BottomPanel workspace={workspace} project={project} onCollapse={() => setBottomOpen(false)} />
         </div>
       ) : (
         <button type="button" className="bottom-reopen" onClick={() => setBottomOpen(true)}>

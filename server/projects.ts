@@ -111,7 +111,6 @@ function defaultProjectSettings(): ProjectSettings {
   return {
     defaultBranch: 'main',
     setupScript: '',
-    runScript: '',
     filesToCopy: [],
     image: '',
     network: 'internet',

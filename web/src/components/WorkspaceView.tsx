@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
-  AlertCircle, Archive, ArchiveRestore, Box, Check, ChevronDown, ChevronRight, Code2, Copy, Diff, File as FileIcon, Folder, GitBranch, Info, MoreHorizontal, PanelLeft,
+  AlertCircle, Archive, ArchiveRestore, Box, Check, ChevronDown, ChevronRight, Code2, Copy, Diff, File as FileIcon, Folder, GitBranch, Globe, Info, MoreHorizontal, PanelLeft,
   PanelRight, Pause, Pencil, Play, Plus, RotateCcw, Settings as SettingsIcon, Trash2, X,
 } from 'lucide-react';
 import type { Project, Session, Workspace, WorkspaceStep } from '../../../shared/types.ts';
@@ -15,6 +15,8 @@ import { Composer } from './Composer.tsx';
 import { DiffTab, FileTab } from './FileViews.tsx';
 import { RightPanel } from './RightPanel.tsx';
 import { Avatar, ConfirmDialog, type ConfirmOptions, IconButton, Menu, Modal, Spinner } from './ui.tsx';
+
+const portUrl = (workspace: Workspace) => `http://localhost:${workspace.port}`;
 
 function copyPath(workspace: Workspace): void {
   void navigator.clipboard.writeText(workspace.path);
@@ -77,6 +79,11 @@ function WorkspaceIntro({ workspace, project }: { workspace: Workspace; project:
         {workspace.status === 'ready' && !hasSetup && (
           <StepRow step={undefined} icon={<Info size={16} />}>
             Optional: <Link to={`/projects/${project.id}`}>add a setup script ↗</Link>
+          </StepRow>
+        )}
+        {workspace.status === 'ready' && (
+          <StepRow step={undefined} icon={<Globe size={16} />}>
+            A server listening on <code>0.0.0.0</code> opens at <a href={portUrl(workspace)} target="_blank" rel="noreferrer">localhost:{workspace.port} ↗</a>. That port is in <code>$LONCA_PORT</code>, and the next nine are published too.
           </StepRow>
         )}
       </ul>
@@ -205,6 +212,7 @@ function WorkspaceHeader({ workspace, project }: { workspace: Workspace; project
           { label: 'Open in VS Code', icon: <Code2 size={14} />, onSelect: () => openInEditor('VS Code', 'vscode') },
           { label: 'Open in Cursor', icon: <Code2 size={14} />, onSelect: () => openInEditor('Cursor', 'cursor') },
           { label: 'Copy path', icon: <Copy size={14} />, onSelect: () => copyPath(workspace) },
+          { label: `Open localhost:${workspace.port}`, icon: <Globe size={14} />, disabled: !running, onSelect: () => window.open(portUrl(workspace), '_blank', 'noopener,noreferrer') },
         ]}
       />
       <IconButton label={rightOpen ? 'Hide the side panel' : 'Show the side panel'} onClick={toggleRight}><PanelRight size={16} /></IconButton>
