@@ -1,0 +1,2 @@
+# Preserve the CLI's raw terminal bytes, including carriage returns.
+*.bin binary

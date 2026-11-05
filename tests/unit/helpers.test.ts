@@ -90,6 +90,10 @@ describe('agent status', () => {
     const payload = Buffer.from(JSON.stringify({ email: 'me@example.com' })).toString('base64url');
     expect(describeCodexSignIn(JSON.stringify({ tokens: { id_token: `h.${payload}.s` } })).summary).toBe('Signed in with ChatGPT as me@example.com');
     expect(describeCodexSignIn(JSON.stringify({ tokens: { id_token: 'nonsense' } })).summary).toBe('Signed in with ChatGPT');
+    // What a browser sign-in leaves when the service also grants a key. Codex still uses the login.
+    expect(describeCodexSignIn(JSON.stringify({ auth_mode: 'chatgpt', OPENAI_API_KEY: 'sk-abcd1234', tokens: { id_token: `h.${payload}.s` } })))
+      .toMatchObject({ summary: 'Signed in with ChatGPT as me@example.com', usesKey: false });
+    expect(describeCodexSignIn(JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-abcd1234' }))).toMatchObject({ summary: 'Using an API key ending in 1234', usesKey: true });
     expect(describeCodexSignIn('not json').summary).toBe('Signed in with ChatGPT');
     expect(describeCodexSignIn(JSON.stringify({ OPENAI_API_KEY: { evil: true } })).summary).toBe('Signed in with ChatGPT');
   });

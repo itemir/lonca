@@ -27,8 +27,4 @@ if [ "$(cat /var/tmp/lonca/boot 2>/dev/null)" != "$boot" ]; then
   echo "$boot" > /var/tmp/lonca/boot
 fi
 
-# `codex login` replaces this link with a private file; keep that login by sharing it.
-auth="$HOME/.codex/auth.json"
-shared=/var/lib/lonca/credentials/codex/auth.json
-if [ -f "$auth" ] && [ ! -L "$auth" ]; then mv -f "$auth" "$shared"; fi
-[ -L "$auth" ] || ln -sfn "$shared" "$auth"
+lonca-share-codex-login /var/lib/lonca/credentials/codex/auth.json

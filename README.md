@@ -74,9 +74,11 @@ Inside a workspace, `LONCA_PORT` is the first of ten ports published on your `lo
 
 Lonca signs in separately from the CLIs on your computer and leaves those logins alone. Sharing one would break them: both CLIs rotate their refresh tokens, so a container refreshing a copy would log your computer out.
 
-- **Claude:** open the sign-in page, approve access and paste the code it gives you. Lonca runs `claude setup-token` out of sight in a container and saves the token it creates, which never reaches the page. This needs a Claude subscription; you can use an Anthropic API key instead.
-- **Codex:** copy the code, open the sign-in page and enter it there. Lonca runs `codex login --device-auth` out of sight in a container and the window closes by itself when you've approved. You can use an OpenAI API key instead. If device code login is off for your account, turn it on in ChatGPT under Settings > Security.
+- **Claude:** open the sign-in page and approve access, and your browser comes back to Lonca by itself. Lonca runs `claude setup-token` out of sight in a container and saves the token it creates, which never reaches the page. This needs a Claude subscription; you can use an Anthropic API key instead.
+- **Codex:** open the sign-in page and approve access, and your browser comes back to Lonca by itself. Lonca runs `codex login` out of sight in a container. Signing in this way, Codex also asks OpenAI for an API key. It doesn't use one with this login, so Lonca doesn't keep it. You can use an OpenAI API key instead.
 - **GitHub:** agents need a token to fetch private repositories, push and open pull requests. Press **Use my gh login** to copy the one from your `gh` CLI, or paste one. Because every workspace can read it, a fine-grained token limited to the repositories you use here is the safer choice.
+
+The sign-in pages send your browser to a port on `localhost`, as they do for the CLIs: 1455 for Codex and one the CLI picks for Claude. Lonca listens there for as long as the sign-in lasts and passes the request to the CLI in its container, so your browser has to be on the computer running Lonca. If it isn't, or the port is taken, the dialog offers a way that doesn't need it: a code to paste for Claude, and a one-time code to enter on the page for Codex (`codex login --device-auth`). If device code login is off for your account, turn it on in ChatGPT under Settings > Security.
 
 The Claude and GitHub tokens are stored in `~/.lonca/secrets.json`, readable only by you, and handed to each process in a workspace as it starts, so they never become part of its definition. Codex's login lives in `~/.lonca/credentials`, a directory all workspaces share and Lonca itself never reads.
 
@@ -98,7 +100,7 @@ The rest is the same for both.
 
 | Boundary | How it's enforced |
 | --- | --- |
-| The Lonca server | Listens on `127.0.0.1` only and requires a token, with checks against DNS rebinding and cross-site requests. The token is kept in the page's per-origin storage, not a cookie, so servers on published ports never see it. |
+| The Lonca server | Listens on `127.0.0.1` only and requires a token, with checks against DNS rebinding and cross-site requests. The token is kept in the page's per-origin storage, not a cookie, so servers on published ports never see it. During a sign-in it also listens on the port the sign-in page comes back to, also on `127.0.0.1`, which passes on only a request with that sign-in's random state. |
 | Host git | After a repository is first imported, Lonca never runs git on it from your computer. Everything happens inside a workspace, so an agent's git hooks and config can't execute outside it. |
 | SSH keys | Agents don't get your SSH agent. A container never has it. Docker Sandboxes 0.50 gives a virtual machine the SSH agent of whoever last ran a command in it, so every command Lonca runs there brings an agent with no keys. On that version, running `sbx exec` on a Lonca virtual machine from a terminal lets it use your keys until Lonca's next command in it. Version 0.51 didn't lend keys this way when tested, but its forwarding setting is still on by default. To rule it out on any version, run `sbx settings set ssh.agentForwardingEnabled false` and `sbx daemon restart`. |
 

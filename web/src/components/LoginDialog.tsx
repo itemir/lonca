@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Check } from 'lucide-react';
-import type { AgentId, LoginFailure, LoginState } from '../../../shared/types.ts';
+import type { AgentId, LoginFailure, LoginMethod, LoginState } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { safeUrl } from '../format.ts';
 import { useStore } from '../store.ts';
@@ -22,14 +22,16 @@ interface FailureCopy {
   showOutput?: boolean;
   /** Trying again won't help until this has been dealt with. */
   turnOn?: { label: string; href: string };
+  /** Codex's one-time code doesn't need the browser to get back. */
+  offerCode?: boolean;
 }
 
 function failureCopy(failure: LoginFailure | undefined, name: string, message?: string): FailureCopy {
   switch (failure) {
     case 'rejected':
-      return { text: 'That code didn’t work. It may have expired or already been used.', action: 'Start again' };
+      return { text: `${name} didn’t accept that sign-in. It may have expired or already been used.`, action: 'Start again' };
     case 'expired':
-      return { text: 'That sign-in has expired.', action: 'Get a new code' };
+      return { text: 'That sign-in has expired.', action: 'Start again' };
     case 'disabled':
       return {
         text: 'Device code login is turned off for your ChatGPT account. Turn it on in ChatGPT under Settings > Security. On a work account, an admin has to do this.',
@@ -44,6 +46,12 @@ function failureCopy(failure: LoginFailure | undefined, name: string, message?: 
       return { text: `${name} approved the sign-in, but Lonca couldn’t finish it${message ? `: ${message}` : '.'}`, action: 'Try again', showOutput: true };
     case 'unavailable':
       return { text: `Lonca couldn’t start the sign-in${message ? `: ${message}` : '.'}`, action: 'Try again' };
+    case 'port-busy':
+      return {
+        text: `The sign-in page comes back to port ${message} on this computer, and something else is using it. Close that and try again, or use a one-time code.`,
+        action: 'Try again',
+        offerCode: true,
+      };
     default:
       return { text: 'Sign-in stopped before it finished.', action: 'Try again', showOutput: true };
   }
@@ -77,6 +85,48 @@ function CopyLink({ url }: { url: string }) {
   return <button type="button" className="link-button" onClick={() => copy(url)}>{copied ? 'Copied' : 'Copy link'}</button>;
 }
 
+/** The sign-in page sends the browser back here by itself, as it does for the CLIs, so there's nothing to copy or type. */
+function BrowserSteps({ login, otherWay, onOtherWay }: {
+  login: LoginState | undefined;
+  otherWay: string | null;
+  onOtherWay: () => void;
+}) {
+  const [opened, setOpened] = useState(false);
+  const url = safeUrl(login?.url);
+  const ending = login?.phase === 'submitting' || login?.phase === 'saving';
+  return (
+    <div className="login-browser">
+      <div className="login-step-title">Approve access in your browser</div>
+      {ending ? (
+        <div className="login-waiting" role="status"><Spinner size={12} /> Finishing up…</div>
+      ) : (
+        <>
+          <div className="login-actions">
+            {url ? (
+              <a
+                className={`button ${opened ? '' : 'button-primary'}`}
+                href={url}
+                target="_blank"
+                rel="noreferrer"
+                onClick={() => setOpened(true)}
+              >
+                {opened ? 'Open again' : 'Open sign-in page'}
+              </a>
+            ) : (
+              <button type="button" className="button button-primary" disabled><Spinner size={12} /> Getting the link…</button>
+            )}
+            {url && <CopyLink url={url} />}
+          </div>
+          {opened
+            ? <div className="login-waiting" role="status"><Spinner size={12} /> Waiting for you to approve. This window closes by itself.</div>
+            : <p className="login-hint">This window closes by itself once you approve.</p>}
+          {otherWay && <p className="login-hint">If the page can’t get back to this computer, <button type="button" className="link-button" onClick={onOtherWay}>{otherWay}</button>.</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
 const ANOTHER_SERVICE_KEY = 'That’s a key for another service. Claude keys start with sk-ant-.';
 
 function ClaudeSteps({ login, code, setCode, codeError, setCodeError, onUseAsKey }: {
@@ -89,7 +139,7 @@ function ClaudeSteps({ login, code, setCode, codeError, setCodeError, onUseAsKey
 }) {
   const [opened, setOpened] = useState(false);
   const input = useRef<HTMLInputElement>(null);
-  const url = safeUrl(login?.url);
+  const url = safeUrl(login?.pasteUrl);
   const working = login?.phase === 'submitting' || login?.phase === 'saving';
   const looksLikeKey = /^sk-/.test(code.trim());
   const someOtherKey = /^sk-(?!ant-)/.test(code.trim());
@@ -338,6 +388,7 @@ function LoginFlow({ agent }: { agent: AgentId }) {
   const name = isClaude ? 'Claude' : 'Codex';
   const [route, setRoute] = useState<'account' | 'key'>(status.rejected && status.usesKey ? 'key' : 'account');
   const [savedKey, setSavedKey] = useState<{ verified: boolean } | null>(null);
+  const [pasting, setPasting] = useState(false);
   const [code, setCode] = useState('');
   const [codeError, setCodeError] = useState<string | null>(null);
   const [keyDraft, setKeyDraft] = useState('');
@@ -351,23 +402,28 @@ function LoginFlow({ agent }: { agent: AgentId }) {
   const lostServer = useRef(false);
   if (!connected) lostServer.current = true;
 
-  const start = useCallback(() => {
+  const start = useCallback((how: LoginMethod) => {
     started.current = true;
     setStarting(true);
     setStartFailure(null);
     setCode('');
     setCodeError(null);
     setOutputOpen(false);
-    api.startLogin(agent).then(
+    api.startLogin(agent, how).then(
       (state) => applyEvent({ type: 'login', agent, login: state }),
       (failure: Error) => setStartFailure(failure.message),
     ).finally(() => setStarting(false));
   }, [agent, applyEvent]);
 
   useEffect(() => {
-    if (route === 'account' && !started.current && !login) start();
+    if (route === 'account' && !started.current && !login) start('browser');
     if (login) started.current = true;
   }, [route, login, start]);
+
+  // The page that comes back couldn't be offered, so the code is the way in.
+  useEffect(() => {
+    if (login?.pasteUrl && !login.url) setPasting(true);
+  }, [login?.pasteUrl, login?.url]);
 
   const close = useCallback(() => {
     void api.cancelLogin(agent).catch(() => {});
@@ -467,6 +523,7 @@ function LoginFlow({ agent }: { agent: AgentId }) {
           onCancel={close}
           onUseAsCode={(value) => {
             setCode(value);
+            setPasting(true);
             setRoute('account');
           }}
         />
@@ -480,11 +537,12 @@ function LoginFlow({ agent }: { agent: AgentId }) {
               </div>
               <div className="login-failure-actions">
                 {'turnOn' in failure && failure.turnOn && <a className="button button-primary" href={failure.turnOn.href} target="_blank" rel="noreferrer">{failure.turnOn.label}</a>}
-                <button type="button" className={`button ${'turnOn' in failure && failure.turnOn ? '' : 'button-primary'}`} onClick={start}>{failure.action}</button>
+                <button type="button" className={`button ${'turnOn' in failure && failure.turnOn ? '' : 'button-primary'}`} onClick={() => start(login?.method ?? 'browser')}>{failure.action}</button>
+                {'offerCode' in failure && failure.offerCode && <button type="button" className="button" onClick={() => start('device')}>Use a one-time code</button>}
                 {'turnOn' in failure && failure.turnOn && <button type="button" className="button" onClick={() => setRoute('key')}>Use an API key</button>}
               </div>
             </div>
-          ) : isClaude ? (
+          ) : isClaude && pasting ? (
             <ClaudeSteps
               login={login}
               code={code}
@@ -498,8 +556,12 @@ function LoginFlow({ agent }: { agent: AgentId }) {
                 setRoute('key');
               }}
             />
-          ) : (
+          ) : isClaude ? (
+            <BrowserSteps login={login} otherWay={login?.pasteUrl ? 'paste a code instead' : null} onOtherWay={() => setPasting(true)} />
+          ) : login?.method === 'device' ? (
             <CodexSteps login={login} />
+          ) : (
+            <BrowserSteps login={login} otherWay={login?.url ? 'use a one-time code instead' : null} onOtherWay={() => start('device')} />
           )}
           <div className="login-footer">
             <button type="button" className="login-output-toggle" aria-expanded={showOutput} onClick={toggleOutput}>

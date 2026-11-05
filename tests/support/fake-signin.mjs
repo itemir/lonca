@@ -1,6 +1,6 @@
-// Fake sign-in services for the real `claude` and `codex` CLIs: Anthropic's OAuth endpoints over
-// TLS and OpenAI's device flow over HTTP. Runs inside the helper container, so the CLIs go
-// through Lonca's real sign-in path and only the far end is pretend.
+// Fake sign-in services for the real `claude` and `codex` CLIs: Anthropic's and OpenAI's OAuth
+// endpoints over TLS and OpenAI's device flow over HTTP. Runs inside the helper container, so the
+// CLIs go through Lonca's real sign-in path and only the far end is pretend.
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
@@ -21,7 +21,10 @@ const claims = {
 };
 
 const handler = (req, res) => {
-  req.resume();
+  let body = '';
+  req.on('data', (chunk) => {
+    body += chunk;
+  });
   req.on('end', () => {
     res.setHeader('content-type', 'application/json');
     // The CLI takes a response without this for a proxy that answered instead of the real service.
@@ -56,6 +59,9 @@ const handler = (req, res) => {
       return reply(200, { authorization_code: 'authcode_fake', code_challenge: 'challenge_fake', code_verifier: 'verifier_fake' });
     }
     if (req.url.includes('/oauth/token')) {
+      if (mode() === 'rejected') return reply(400, { error: 'invalid_grant' });
+      // Having signed in through a browser, Codex also asks for an API key, which it may be given.
+      if (body.includes('requested_token=openai-api-key')) return reply(200, { access_token: 'sk-proj-fake-key-from-the-sign-in' });
       return reply(200, { id_token: jwt(claims), access_token: jwt(claims), refresh_token: 'rt_fake' });
     }
     return reply(200, {});

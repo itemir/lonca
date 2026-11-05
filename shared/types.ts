@@ -237,14 +237,21 @@ export type LoginFailure =
   | 'stopped'
   | 'no-link'
   | 'save-failed'
-  | 'unavailable';
+  | 'unavailable'
+  | 'port-busy';
+
+/** Whether the sign-in page sends the browser back to Lonca, or Codex's one-time code is entered on it. */
+export type LoginMethod = 'browser' | 'device';
 
 /** A sign-in under way. It never includes a credential, so it's safe to send to the browser. */
 export interface LoginState {
   agent: AgentId;
+  method: LoginMethod;
   phase: LoginPhase;
-  /** The page to open in a browser. */
+  /** The page to open in a browser. It sends the browser back to Lonca, unless there's a `code`. */
   url?: string;
+  /** Claude's other page, which shows a code to paste instead, for a browser that can't get back. */
+  pasteUrl?: string;
   /** Codex's one-time code, which the user enters on that page. */
   code?: string;
   failure?: LoginFailure;

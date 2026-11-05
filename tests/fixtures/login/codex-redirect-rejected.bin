@@ -1,0 +1,8 @@
+Starting local login server on http://localhost:1455.
+If your browser did not open, navigate to this URL to authenticate:
+
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&code_challenge=I4gzZGHeciS3hSUVDiDTPD6mGOaeMTnOBM5yMib2dj4&code_challenge_method=S256&state=0bSFJ4hUNKHU73Ndjmpuom6SdcpdxwQ_AMMeLViJR5g&scope=openid+profile+email+offline_access+api.connectors.read+api.connectors.invoke&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=codex_cli_rs
+
+On a remote or headless machine? Use `codex login --device-auth` instead.
+]8;;https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&code_challenge=I4gzZGHeciS3hSUVDiDTPD6mGOaeMTnOBM5yMib2dj4&code_challenge_method=S256&state=0bSFJ4hUNKHU73Ndjmpuom6SdcpdxwQ_AMMeLViJR5g&scope=openid+profile+email+offline_access+api.connectors.read+api.connectors.invoke&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=codex_cli_rs]8;;Token exchange error: token endpoint returned status 400 Bad Request: invalid_grant
+Error logging in: Token exchange failed: token endpoint returned status 400 Bad Request: invalid_grant

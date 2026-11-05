@@ -3,6 +3,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import { type Locator, type Page, expect, test } from '@playwright/test';
 import type { Project, Workspace } from '../../shared/types.ts';
@@ -238,22 +239,85 @@ test.describe('signing in', () => {
     removeFakeSignIn(tools());
   });
 
-  test('Claude: open the page, paste the code, and the window closes by itself', async () => {
+  /** Stands in for a service's sign-in page, whose button sends the browser back where it was told to. */
+  const fakeSignInPage = (pattern: string, query: string) => page.context().route(pattern, (route) => {
+    const url = new URL(route.request().url());
+    const back = `${url.searchParams.get('redirect_uri')}?${query}&state=${url.searchParams.get('state')}`;
+    return route.fulfill({ status: 200, contentType: 'text/html', body: `<a href="${back}">Approve</a>` });
+  });
+
+  /** Opens the sign-in page from the dialog and approves there, and gives back the tab that came back. */
+  async function approveOnPage(dialog: Locator): Promise<Page> {
+    const [tab] = await Promise.all([page.context().waitForEvent('page'), dialog.getByRole('link', { name: 'Open sign-in page' }).click()]);
+    await expect(dialog.getByRole('status')).toContainText('Waiting for you to approve');
+    await shot('login-browser-waiting');
+    await tab.getByRole('link', { name: 'Approve' }).click();
+    return tab;
+  }
+
+  test('Claude: approve on the page, and the browser comes back and the window closes by itself', async () => {
+    setFakeSignIn(tools(), { mode: 'ok' });
+    await fakeSignInPage('https://claude.com/**', 'code=fakecode');
     await page.goto(`${lonca.url}/settings`);
     await expect(agentRow('Claude')).toContainText('Not signed in');
     await shot('settings');
     await agentRow('Claude').getByRole('button', { name: 'Sign in' }).click();
     const dialog = page.getByRole('dialog', { name: 'Sign in to Claude' });
-    const open = dialog.getByRole('link', { name: 'Open sign-in page' });
-    await expect(open).toBeVisible({ timeout: 30000 });
-    await expect(dialog.getByRole('button', { name: 'Continue' })).toBeDisabled();
+    await expect(dialog.getByRole('link', { name: 'Open sign-in page' })).toBeVisible({ timeout: 30000 });
+    await expect(dialog.getByRole('button', { name: 'paste a code instead' })).toBeVisible({ timeout: 30000 });
+    await expect(dialog.getByRole('textbox')).toHaveCount(0);
+    await shot('login-claude-browser');
 
     // Clicking back from the browser tab mustn't lose the sign-in.
     await page.mouse.click(5, 5);
     await expect(dialog).toBeVisible();
 
+    const tab = await approveOnPage(dialog);
+    const signedIn = page.getByRole('dialog', { name: 'Claude is signed in' });
+    await Promise.all([
+      expect(signedIn).toContainText('Signed in with your Claude subscription', { timeout: 30000 }),
+      expect(tab.getByRole('heading', { name: 'You’re signed in' })).toBeVisible({ timeout: 30000 }),
+    ]);
+    expect(await tab.locator('body').innerText()).not.toContain('sk-ant-oat');
+    expect(tab.url()).toMatch(/^http:\/\/localhost:\d+\/callback\?code=fakecode&state=/);
+    await tab.screenshot({ path: path.join(SHOTS, 'login-returned.png') });
+    await tab.close();
+    expect(await page.locator('body').innerText()).not.toContain('sk-ant-oat');
+
+    await expect(signedIn).toBeHidden({ timeout: 5000 });
+    await expect(agentRow('Claude')).toContainText('Signed in with your Claude subscription');
+    await agentRow('Claude').getByRole('button', { name: 'Sign out' }).click();
+    await expect(agentRow('Claude')).toContainText('Not signed in');
+  });
+
+  test('Claude: a refused sign-in says so, in the browser and here', async () => {
+    setFakeSignIn(tools(), { mode: 'rejected' });
+    await agentRow('Claude').getByRole('button', { name: 'Sign in' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Sign in to Claude' });
+    await expect(dialog.getByRole('link', { name: 'Open sign-in page' })).toBeVisible({ timeout: 30000 });
+    const tab = await approveOnPage(dialog);
+    await Promise.all([
+      expect(dialog.getByRole('alert')).toContainText('Claude didn’t accept that sign-in', { timeout: 30000 }),
+      expect(tab.getByRole('heading', { name: 'That sign-in didn’t finish' })).toBeVisible({ timeout: 30000 }),
+    ]);
+    await tab.close();
+    setFakeSignIn(tools(), { mode: 'ok' });
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(agentRow('Claude')).toContainText('Not signed in');
+  });
+
+  test('Claude: where the page can’t come back, paste the code it gives instead', async () => {
+    await agentRow('Claude').getByRole('button', { name: 'Sign in' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Sign in to Claude' });
+    await dialog.getByRole('button', { name: 'paste a code instead' }).click({ timeout: 30000 });
+    const open = dialog.getByRole('link', { name: 'Open sign-in page' });
+    await expect(open).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Continue' })).toBeDisabled();
+    await shot('login-claude');
+
     const href = (await open.getAttribute('href'))!;
-    await page.context().route('https://claude.com/**', (route) => route.fulfill({ status: 200, body: 'approve here' }));
+    expect(new URL(href).searchParams.get('redirect_uri')).toBe('https://platform.claude.com/oauth/code/callback');
     const [tab] = await Promise.all([page.context().waitForEvent('page'), open.click()]);
     await tab.close();
     await expect(dialog.getByRole('link', { name: 'Open again' })).toBeVisible();
@@ -287,12 +351,13 @@ test.describe('signing in', () => {
     setFakeSignIn(tools(), { mode: 'rejected' });
     await agentRow('Claude').getByRole('button', { name: 'Sign in' }).click();
     const dialog = page.getByRole('dialog', { name: 'Sign in to Claude' });
+    await dialog.getByRole('button', { name: 'paste a code instead' }).click({ timeout: 30000 });
     const open = dialog.getByRole('link', { name: 'Open sign-in page' });
-    await expect(open).toBeVisible({ timeout: 30000 });
+    await expect(open).toBeVisible();
     const first = (await open.getAttribute('href'))!;
     await codeBox().fill(`wrong#${new URL(first).searchParams.get('state')}`);
     await dialog.getByRole('button', { name: 'Continue' }).click();
-    await expect(dialog.getByRole('alert')).toContainText('That code didn’t work', { timeout: 30000 });
+    await expect(dialog.getByRole('alert')).toContainText('Claude didn’t accept that sign-in', { timeout: 30000 });
     await shot('login-claude-failed');
 
     await dialog.getByRole('button', { name: 'Show what Claude printed' }).click();
@@ -333,10 +398,67 @@ test.describe('signing in', () => {
     await expect(agentRow('Claude')).toContainText('Not signed in');
   });
 
-  test('Codex: copy the code, approve on the page, and the window moves on by itself', async () => {
+  test('Codex: approve on the page, and the browser comes back and the window closes by itself', async () => {
+    setFakeSignIn(tools(), { mode: 'ok' });
+    await fakeSignInPage('https://auth.openai.com/**', 'code=fakecode');
+    await agentRow('Codex').getByRole('button', { name: 'Sign in' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Sign in to Codex' });
+    await expect(dialog.getByRole('link', { name: 'Open sign-in page' })).toBeVisible({ timeout: 30000 });
+    await shot('login-codex-browser');
+    const tab = await approveOnPage(dialog);
+    const signedIn = page.getByRole('dialog', { name: 'Codex is signed in' });
+    await Promise.all([
+      expect(signedIn).toContainText('Signed in with ChatGPT as probe@example.com', { timeout: 30000 }),
+      expect(tab.getByRole('heading', { name: 'You’re signed in' })).toBeVisible({ timeout: 30000 }),
+    ]);
+    // The CLI redirects to its own page with a token in the address. That stays with the CLI.
+    expect(tab.url()).toMatch(/^http:\/\/127\.0\.0\.1:1455\/auth\/callback\?code=fakecode&state=/);
+    await tab.close();
+    await expect(signedIn).toBeHidden({ timeout: 5000 });
+    await expect(agentRow('Codex')).toContainText('Signed in with ChatGPT as probe@example.com');
+    await agentRow('Codex').getByRole('button', { name: 'Sign out' }).click();
+    await expect(agentRow('Codex')).toContainText('Not signed in');
+  });
+
+  test('Codex: turning it down on the page says so, in the browser and here', async () => {
+    await fakeSignInPage('https://auth.openai.com/**', 'error=access_denied&error_description=The+user+said+no');
+    await agentRow('Codex').getByRole('button', { name: 'Sign in' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Sign in to Codex' });
+    await expect(dialog.getByRole('link', { name: 'Open sign-in page' })).toBeVisible({ timeout: 30000 });
+    const tab = await approveOnPage(dialog);
+    await Promise.all([
+      expect(dialog.getByRole('alert')).toContainText('The sign-in page didn’t approve this', { timeout: 30000 }),
+      expect(tab.getByRole('heading', { name: 'That sign-in didn’t finish' })).toBeVisible({ timeout: 30000 }),
+    ]);
+    await tab.close();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(agentRow('Codex')).toContainText('Not signed in');
+  });
+
+  test('Codex: says when the port is taken, and the one-time code doesn’t need it', async () => {
+    const squatter = net.createServer();
+    await new Promise<void>((resolve) => squatter.listen(1455, '127.0.0.1', resolve));
+    try {
+      setFakeSignIn(tools(), { mode: 'ok', approved: false });
+      await agentRow('Codex').getByRole('button', { name: 'Sign in' }).click();
+      const dialog = page.getByRole('dialog', { name: 'Sign in to Codex' });
+      await expect(dialog.getByRole('alert')).toContainText('port 1455', { timeout: 30000 });
+      await shot('login-codex-port-busy');
+      await dialog.getByRole('button', { name: 'Use a one-time code' }).click();
+      await expect(dialog.locator('.login-code')).toHaveText('FAKE-7CODE', { timeout: 30000 });
+      await dialog.getByRole('button', { name: 'Cancel' }).click();
+      await expect(dialog).toBeHidden();
+    } finally {
+      squatter.close();
+    }
+  });
+
+  test('Codex: where the page can’t come back, copy the code, approve on the page, and the window moves on by itself', async () => {
     setFakeSignIn(tools(), { mode: 'ok', approved: false });
     await agentRow('Codex').getByRole('button', { name: 'Sign in' }).click();
     const dialog = page.getByRole('dialog', { name: 'Sign in to Codex' });
+    await dialog.getByRole('button', { name: 'use a one-time code instead' }).click({ timeout: 30000 });
     await expect(dialog.locator('.login-code')).toHaveText('FAKE-7CODE', { timeout: 30000 });
     await shot('login-codex');
 
@@ -361,6 +483,7 @@ test.describe('signing in', () => {
     setFakeSignIn(tools(), { mode: 'disabled', approved: false });
     await agentRow('Codex').getByRole('button', { name: 'Sign in' }).click();
     const dialog = page.getByRole('dialog', { name: 'Sign in to Codex' });
+    await dialog.getByRole('button', { name: 'use a one-time code instead' }).click({ timeout: 30000 });
     await expect(dialog.getByRole('alert')).toContainText('Device code login is turned off', { timeout: 30000 });
     await expect(dialog.getByRole('link', { name: 'Open ChatGPT settings' })).toBeVisible();
     await shot('login-codex-disabled');
@@ -368,6 +491,25 @@ test.describe('signing in', () => {
     await expect(dialog.getByRole('textbox', { name: 'OpenAI API key' })).toBeFocused();
     await shot('login-codex-key');
     setFakeSignIn(tools(), { mode: 'ok' });
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+  });
+
+  test('Codex: a one-time code stays that way through a reload, and when trying again', async () => {
+    setFakeSignIn(tools(), { mode: 'ok', approved: false });
+    await agentRow('Codex').getByRole('button', { name: 'Sign in' }).click();
+    let dialog = page.getByRole('dialog', { name: 'Sign in to Codex' });
+    await dialog.getByRole('button', { name: 'use a one-time code instead' }).click({ timeout: 30000 });
+    await expect(dialog.locator('.login-code')).toHaveText('FAKE-7CODE', { timeout: 30000 });
+    await page.reload();
+    dialog = page.getByRole('dialog', { name: 'Sign in to Codex' });
+    await expect(dialog.locator('.login-code')).toHaveText('FAKE-7CODE', { timeout: 15000 });
+
+    setFakeSignIn(tools(), { mode: 'denied' });
+    await expect(dialog.getByRole('alert')).toContainText('The sign-in page didn’t approve this', { timeout: 30000 });
+    setFakeSignIn(tools(), { mode: 'ok', approved: false });
+    await dialog.getByRole('button', { name: 'Try again' }).click();
+    await expect(dialog.locator('.login-code')).toHaveText('FAKE-7CODE', { timeout: 30000 });
     await dialog.getByRole('button', { name: 'Cancel' }).click();
     await expect(dialog).toBeHidden();
   });
