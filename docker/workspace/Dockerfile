@@ -39,7 +39,7 @@ RUN userdel -r node 2>/dev/null || true; \
 
 COPY gitconfig /etc/gitconfig
 COPY bashrc /home/lonca/.bashrc
-COPY --chmod=755 lonca-entrypoint lonca-run /usr/local/bin/
+COPY --chmod=755 lonca-entrypoint lonca-run lonca-share-codex-login /usr/local/bin/
 
 # Codex credentials live on a directory shared by all workspaces, so signing in once
 # is enough and a token refresh in one workspace reaches the others. Claude uses a

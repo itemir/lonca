@@ -1087,6 +1087,39 @@ describe('signing in', () => {
     }
   });
 
+  it('doesn’t share an API key the CLI got while signing in to ChatGPT, however the sign-in ended', async () => {
+    const tools = `${lonca.prefix}-tools`;
+    dockerExec(tools, `rm -f ~/.codex/auth.json && printf '{"auth_mode":"chatgpt","OPENAI_API_KEY":"sk-got-while-signing-in","tokens":{"refresh_token":"rt"}}' > ~/.codex/auth.json && chmod 600 ~/.codex/auth.json`);
+    // Any check does this, without a sign-in having finished.
+    await lonca.api('POST', '/agents/refresh');
+    const shared = dockerExec(workspace.containerName, 'jq -c "{auth_mode, OPENAI_API_KEY, refresh: .tokens.refresh_token}" ~/.codex/auth.json');
+    expect(JSON.parse(shared.output)).toEqual({ auth_mode: 'chatgpt', OPENAI_API_KEY: null, refresh: 'rt' });
+    expect(dockerExec(tools, 'stat -L -c %a ~/.codex/auth.json').output).toBe('600');
+
+    // A private file it can't read isn't shared at all.
+    dockerExec(tools, `rm -f ~/.codex/auth.json && printf 'sk-half-written-file' > ~/.codex/auth.json`);
+    await lonca.api('POST', '/agents/refresh');
+    expect(dockerExec(tools, 'test -L ~/.codex/auth.json').code).toBe(0);
+    expect(dockerExec(workspace.containerName, 'grep -c sk-half-written-file ~/.codex/auth.json').code).not.toBe(0);
+    await lonca.api('POST', '/agents/codex/logout');
+    expect((await agents()).codex.signedIn).toBe(false);
+  });
+
+  it('still shares a login made by hand in a workspace whose image has no jq', async () => {
+    const tools = `${lonca.prefix}-tools`;
+    docker('exec', tools, 'mv', '/usr/bin/jq', '/usr/bin/jq.away');
+    try {
+      dockerExec(tools, `rm -f ~/.codex/auth.json && printf '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-not-a-real-key-for-testing"}' > ~/.codex/auth.json`);
+      await lonca.api('POST', '/agents/refresh');
+      expect(dockerExec(tools, 'test -L ~/.codex/auth.json').code).toBe(0);
+      expect(dockerExec(workspace.containerName, 'codex login status 2>&1').output).toMatch(/API key configured/);
+    } finally {
+      docker('exec', tools, 'mv', '/usr/bin/jq.away', '/usr/bin/jq');
+    }
+    await lonca.api('POST', '/agents/codex/logout');
+    expect((await agents()).codex.signedIn).toBe(false);
+  });
+
   it('shares a real Codex login, which replaces the link with a private file', async () => {
     const tools = `${lonca.prefix}-tools`;
     const asLogin = `rm -f ~/.codex/auth.json && printf '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-not-a-real-key-for-testing"}' > ~/.codex/auth.json && chmod 600 ~/.codex/auth.json`;
@@ -1150,7 +1183,17 @@ describe('the real sign-in flows', () => {
     if (current?.phase === 'failed' && phase !== 'failed') throw new Error(`failed: ${current.failure}\n${current.output}`);
     return current?.phase === phase ? current : null;
   }, timeout);
-  let frames: string[];
+    /** The paste page shows up a few seconds into the sign-in, when Claude has got to its prompt. */
+  const readyForCode = () => until('Claude to be ready for a code', async () => {
+    const current = await reached('claude', 'waiting');
+    return current.pasteUrl ? current : null;
+  });
+  /** What a browser is sent to when the sign-in page is done with it. */
+  const comeBack = (link: string, query = 'code=fakecode') => {
+    const url = new URL(link);
+    return `${url.searchParams.get('redirect_uri')}?${query}&state=${url.searchParams.get('state')}`;
+  };
+let frames: string[];
   let events: import('ws').WebSocket;
 
   beforeAll(async () => {
@@ -1172,11 +1215,12 @@ describe('the real sign-in flows', () => {
     setFakeSignIn(tools(), { mode: 'ok' });
     const started = await lonca.api<LoginState>('POST', '/agents/claude/login');
     expect(started.phase).toBe('starting');
-    const waiting = await reached('claude', 'waiting');
+    const waiting = await readyForCode();
     expect(new URL(waiting.url!).hostname).toBe('claude.com');
+    expect(new URL(waiting.pasteUrl!).hostname).toBe('claude.com');
     expect(waiting.url).toContain('state=');
 
-    const state = new URL(waiting.url!).searchParams.get('state');
+    const state = new URL(waiting.pasteUrl!).searchParams.get('state');
     await lonca.api('POST', '/agents/claude/login/code', { code: `fakecode#${state}` });
     const done = await reached('claude', 'done');
     expect(done.url).toBeUndefined();
@@ -1194,11 +1238,48 @@ describe('the real sign-in flows', () => {
     await lonca.api('POST', '/agents/claude/logout');
   });
 
-  it('reports a code the real CLI refuses, and starts over cleanly', async () => {
+  it('signs in to Claude with the browser coming back to the real CLI, and tells it how it went', async () => {
+    setFakeSignIn(tools(), { mode: 'ok' });
+    await lonca.api('POST', '/agents/claude/login');
+    const waiting = await reached('claude', 'waiting');
+    const back = comeBack(waiting.url!);
+    expect(back).toMatch(/^http:\/\/localhost:\d+\/callback\?/);
+
+    // Only the sign-in page knows the state, so nothing else reaches the CLI.
+    const port = new URL(back).port;
+    expect((await fetch(`http://127.0.0.1:${port}/callback?code=fakecode&state=wrong`)).status).toBe(404);
+    expect((await login('claude'))?.phase).toBe('waiting');
+
+    const answer = await fetch(back);
+    expect(answer.status).toBe(200);
+    expect(await answer.text()).toContain('You’re signed in');
+    expect((await login('claude'))?.phase).toBe('done');
+    const token = `sk-ant-oat01-${'FakeTokenForTesting_-'.repeat(4)}zzzzzzzAA`;
+    expect(JSON.parse(fs.readFileSync(path.join(lonca.home, 'secrets.json'), 'utf8')).claudeToken).toBe(token);
+    expect(frames.join('\n')).not.toContain('sk-ant-oat');
+    await expect(fetch(back)).rejects.toThrow();
+    expect(dockerExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
+    await lonca.api('DELETE', '/agents/claude/login');
+    await lonca.api('POST', '/agents/claude/logout');
+  });
+
+  it('tells a browser that came back when the real CLI failed', async () => {
     setFakeSignIn(tools(), { mode: 'rejected' });
     await lonca.api('POST', '/agents/claude/login');
     const waiting = await reached('claude', 'waiting');
-    const state = new URL(waiting.url!).searchParams.get('state');
+    const answer = await fetch(comeBack(waiting.url!));
+    expect(await answer.text()).toContain('didn’t finish');
+    expect((await login('claude'))).toMatchObject({ phase: 'failed', failure: 'rejected' });
+    expect(JSON.parse(fs.readFileSync(path.join(lonca.home, 'secrets.json'), 'utf8')).claudeToken).toBeUndefined();
+    await lonca.api('DELETE', '/agents/claude/login');
+    setFakeSignIn(tools(), { mode: 'ok' });
+  });
+
+  it('reports a code the real CLI refuses, and starts over cleanly', async () => {
+    setFakeSignIn(tools(), { mode: 'rejected' });
+    await lonca.api('POST', '/agents/claude/login');
+    const waiting = await readyForCode();
+    const state = new URL(waiting.pasteUrl!).searchParams.get('state');
     await lonca.api('POST', '/agents/claude/login/code', { code: `wrongcode#${state}` });
     const failed = await reached('claude', 'failed', 30000);
     expect(failed.failure).toBe('rejected');
@@ -1214,7 +1295,7 @@ describe('the real sign-in flows', () => {
 
   it('turns away a code from another sign-in, or a key in the code box', async () => {
     await lonca.api('POST', '/agents/claude/login');
-    await reached('claude', 'waiting');
+    await readyForCode();
     await expect(lonca.api('POST', '/agents/claude/login/code', { code: 'code#from-an-older-tab' })).rejects.toThrow(/earlier sign-in/);
     await expect(lonca.api('POST', '/agents/claude/login/code', { code: 'sk-ant-api03-a-key-pasted-here' })).rejects.toThrow(/a key, not a sign-in code/);
     await expect(lonca.api('POST', '/agents/claude/login/code', { code: 'x\u001b[201~rm -rf /' })).rejects.toThrow(/doesn’t look like a sign-in code/);
@@ -1238,11 +1319,79 @@ describe('the real sign-in flows', () => {
     expect(await login('claude')).toBeUndefined();
   });
 
-  it('signs in to Codex with the real CLI and shares it with every workspace', async () => {
+  it('signs in to Codex with the browser coming back to the real CLI, and shares it with every workspace', async () => {
+    const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
+    const ws = await lonca.waitForWorkspace(created.workspace.id);
+    setFakeSignIn(tools(), { mode: 'ok' });
+    await lonca.api('POST', '/agents/codex/login');
+    const waiting = await reached('codex', 'waiting');
+    expect(new URL(waiting.url!).hostname).toBe('auth.openai.com');
+    const back = comeBack(waiting.url!);
+    expect(back).toMatch(/^http:\/\/127\.0\.0\.1:1455\/auth\/callback\?/);
+
+    // These would end the real CLI's sign-in, the second one by saying it worked.
+    for (const route of ['cancel', 'success']) expect((await fetch(`http://127.0.0.1:1455/${route}`)).status).toBe(404);
+    expect((await login('codex'))?.phase).toBe('waiting');
+    expect(dockerExec(tools(), `pgrep -fc 'codex.real login|codex login'`).code).toBe(0);
+
+    const answer = await fetch(back);
+    expect(await answer.text()).toContain('You’re signed in');
+    expect(answer.url).toBe(back);
+    expect((await login('codex'))?.phase).toBe('done');
+    expect((await lonca.api('GET', '/state')).system.agents.codex).toMatchObject({ signedIn: true, summary: 'Signed in with ChatGPT as probe@example.com' });
+    expect(dockerExec(tools(), 'test -L ~/.codex/auth.json').code).toBe(0);
+    expect(dockerExec(ws.containerName, 'codex login status 2>&1').output).toMatch(/Logged in using ChatGPT/);
+    expect(dockerExec(tools(), `pgrep -fc 'codex.real login|codex login'`).code).not.toBe(0);
+    await expect(fetch(back)).rejects.toThrow();
+
+    // The CLI got an API key while signing in. What's shared with workspaces is what a one-time code leaves.
+    const shared = dockerExec(ws.containerName, 'jq -c "{auth_mode, OPENAI_API_KEY, signedIn: (.tokens.refresh_token != null)}" ~/.codex/auth.json');
+    expect(JSON.parse(shared.output)).toEqual({ auth_mode: 'chatgpt', OPENAI_API_KEY: null, signedIn: true });
+    expect(dockerExec(tools(), 'stat -L -c %a ~/.codex/auth.json').output).toBe('600');
+
+    // Starting another sign-in and cancelling it must not sign every workspace out.
+    await lonca.api('POST', '/agents/codex/login');
+    await reached('codex', 'waiting');
+    await lonca.api('DELETE', '/agents/codex/login');
+    expect(dockerExec(tools(), 'test -L ~/.codex/auth.json').code).toBe(0);
+    expect(dockerExec(ws.containerName, 'codex login status 2>&1').output).toMatch(/Logged in using ChatGPT/);
+    await expect(fetch(back)).rejects.toThrow();
+
+    await lonca.api('POST', '/agents/codex/logout');
+    await lonca.api('DELETE', `/workspaces/${ws.id}`);
+  });
+
+  it('tells Codex’s browser sign-ins apart when they fail, and leaves nobody signed in', async () => {
+    await lonca.api('POST', '/agents/codex/login');
+    let waiting = await reached('codex', 'waiting');
+    expect(await (await fetch(comeBack(waiting.url!, 'error=access_denied&error_description=No'))).text()).toContain('didn’t finish');
+    expect(await login('codex')).toMatchObject({ phase: 'failed', failure: 'denied' });
+
+    setFakeSignIn(tools(), { mode: 'rejected' });
+    await lonca.api('POST', '/agents/codex/login');
+    waiting = await reached('codex', 'waiting');
+    expect(await (await fetch(comeBack(waiting.url!))).text()).toContain('didn’t finish');
+    expect(await login('codex')).toMatchObject({ phase: 'failed', failure: 'rejected' });
+    expect((await lonca.api('GET', '/state')).system.agents.codex.signedIn).toBe(false);
+    await lonca.api('DELETE', '/agents/codex/login');
+    setFakeSignIn(tools(), { mode: 'ok' });
+  });
+
+  it('moves Codex over to the one-time code, without the port or the first CLI left behind', async () => {
+    await lonca.api('POST', '/agents/codex/login');
+    const waiting = await reached('codex', 'waiting');
+    await lonca.api('POST', '/agents/codex/login', { method: 'device' });
+    expect((await reached('codex', 'waiting')).code).toBe('FAKE-7CODE');
+    await expect(fetch(comeBack(waiting.url!))).rejects.toThrow();
+    expect(dockerExec(tools(), `pgrep -fc 'login --device-auth'`).output).toBe('1');
+    await lonca.api('DELETE', '/agents/codex/login');
+  });
+
+  it('signs in to Codex with the one-time code on the real CLI and shares it with every workspace', async () => {
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const ws = await lonca.waitForWorkspace(created.workspace.id);
     setFakeSignIn(tools(), { mode: 'ok', approved: false });
-    await lonca.api('POST', '/agents/codex/login');
+    await lonca.api('POST', '/agents/codex/login', { method: 'device' });
     const waiting = await reached('codex', 'waiting');
     expect(waiting.code).toBe('FAKE-7CODE');
     expect(waiting.url).toBe('http://127.0.0.1:8080/codex/device');
@@ -1259,7 +1408,7 @@ describe('the real sign-in flows', () => {
 
     // Starting another sign-in and cancelling it must not sign every workspace out.
     setFakeSignIn(tools(), { approved: false });
-    await lonca.api('POST', '/agents/codex/login');
+    await lonca.api('POST', '/agents/codex/login', { method: 'device' });
     await reached('codex', 'waiting');
     await lonca.api('DELETE', '/agents/codex/login');
     expect(dockerExec(tools(), `pgrep -fc 'login --device-auth'`).code).not.toBe(0);
@@ -1273,11 +1422,11 @@ describe('the real sign-in flows', () => {
 
   it('explains when Codex device sign-in is off, or the page turns it down', async () => {
     setFakeSignIn(tools(), { mode: 'disabled', approved: false });
-    await lonca.api('POST', '/agents/codex/login');
+    await lonca.api('POST', '/agents/codex/login', { method: 'device' });
     expect((await reached('codex', 'failed')).failure).toBe('disabled');
 
     setFakeSignIn(tools(), { mode: 'denied' });
-    await lonca.api('POST', '/agents/codex/login');
+    await lonca.api('POST', '/agents/codex/login', { method: 'device' });
     expect((await reached('codex', 'failed')).failure).toBe('denied');
     expect((await lonca.api('GET', '/state')).system.agents.codex.signedIn).toBe(false);
     await lonca.api('DELETE', '/agents/codex/login');

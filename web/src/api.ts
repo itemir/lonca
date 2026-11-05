@@ -1,5 +1,5 @@
 import type {
-  AgentId, Attachment, ChangeSet, Checks, FileContent, FileEntry, LoginState, Project, ProjectSettings, SearchHit, Session,
+  AgentId, Attachment, ChangeSet, Checks, FileContent, FileEntry, LoginMethod, LoginState, Project, ProjectSettings, SearchHit, Session,
   SessionSnapshot, TerminalInfo, UserItem, Workspace, AppState, AppSettings,
 } from '../../shared/types.ts';
 import { accessToken } from './auth.ts';
@@ -92,7 +92,7 @@ export const api = {
   saveClaudeToken: (token: string) => request<{ verified: boolean }>('PUT', '/secrets/claude', { token }),
   saveGithubToken: (token: string) => request<void>('PUT', '/secrets/github', { token }),
   importGithubToken: () => request<void>('POST', '/secrets/github/import'),
-  startLogin: (agent: AgentId) => request<LoginState | null>('POST', `/agents/${agent}/login`),
+  startLogin: (agent: AgentId, method: LoginMethod) => request<LoginState | null>('POST', `/agents/${agent}/login`, { method }),
   cancelLogin: (agent: AgentId) => request<void>('DELETE', `/agents/${agent}/login`),
   submitLoginCode: (agent: AgentId, code: string) => request<void>('POST', `/agents/${agent}/login/code`, { code }),
   loginOutput: (agent: AgentId) => request<string>('GET', `/agents/${agent}/login/output`),

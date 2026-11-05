@@ -1876,6 +1876,11 @@ a.home-row:hover { background: var(--panel); }
   margin-top: 8px;
 }
 
+.login-browser { margin-top: 18px; }
+.login-browser .login-step-title { color: var(--text); font-weight: 500; }
+.login-browser .login-waiting { margin-top: 10px; }
+.login-browser .login-hint { margin-top: 10px; }
+
 .login-actions .link-button, .login-key-help + .link-button { font-size: 13px; }
 .login-actions .link-button { margin-left: auto; }
 

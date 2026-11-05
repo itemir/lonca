@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AgentId, AgentStatus, Catalog, ModelOption, SystemStatus } from '../shared/types.ts';
-import { LONCA_HOME, PREFIX } from './config.ts';
+import type { AgentId, AgentStatus, Catalog, LoginMethod, ModelOption, SystemStatus } from '../shared/types.ts';
+import { IMAGE_CONTEXT, LONCA_HOME, PREFIX } from './config.ts';
 import { CONTAINER_CREDENTIALS, ensureContainer } from './containers.ts';
 import {
   type ExecResult, buildImage, docker, exec, execText, imageExists, imageTag, removeContainer, sandboxImageTag, saveImage,
@@ -216,16 +216,15 @@ export function secretEnv(): string[] {
 // `codex login` and `logout` unlink auth.json rather than writing through it, which turns the
 // link to the shared directory into a private file: one workspace signed in, the rest not.
 // Token refreshes do write through the link. Runs inline so it works on workspaces from any image.
+//
+// Signing in with a browser also asks the service for an API key. Codex doesn't use one with this
+// login, every workspace can read what's shared, and a key outlives signing out, so it isn't shared.
+// Startup uses the same script, and it also removes keys an older image already shared.
 const SHARED_CODEX_LOGIN = `${CONTAINER_CREDENTIALS}/codex/auth.json`;
-const SHARE_CODEX_LOGIN = String.raw`
-auth="$HOME/.codex/auth.json"
-shared=${SHARED_CODEX_LOGIN}
-if [ -f "$auth" ] && [ ! -L "$auth" ]; then mv -f "$auth" "$shared"; fi
-[ -L "$auth" ] || ln -sfn "$shared" "$auth"
-`;
+const SHARE_CODEX_LOGIN = fs.readFileSync(path.join(IMAGE_CONTEXT, 'lonca-share-codex-login'), 'utf8');
 
 export async function shareCodexLogin(containerId: string): Promise<void> {
-  await execText(containerId, ['bash', '-c', SHARE_CODEX_LOGIN], { timeoutMs: 10000 });
+  await execText(containerId, ['bash', '-c', SHARE_CODEX_LOGIN, 'lonca-share-codex-login', SHARED_CODEX_LOGIN], { timeoutMs: 10000 });
 }
 
 export function parseClaudeStatus(output: string): boolean {
@@ -249,8 +248,9 @@ export function describeClaudeSignIn(credential: string | undefined): Pick<Agent
 /** Reads auth.json, which any workspace can write to, so nothing in it is relied on. */
 export function describeCodexSignIn(authJson: string): Pick<AgentStatus, 'summary' | 'usesKey'> {
   try {
-    const auth = JSON.parse(authJson) as { OPENAI_API_KEY?: unknown; tokens?: { id_token?: unknown } };
-    if (typeof auth.OPENAI_API_KEY === 'string') {
+    const auth = JSON.parse(authJson) as { auth_mode?: unknown; OPENAI_API_KEY?: unknown; tokens?: { id_token?: unknown } };
+    // A key beside a ChatGPT login isn't what Codex uses. See SHARE_CODEX_LOGIN.
+    if (auth.auth_mode !== 'chatgpt' && typeof auth.OPENAI_API_KEY === 'string') {
       return { summary: `Using an API key ending in ${auth.OPENAI_API_KEY.slice(-4)}`, usesKey: true };
     }
     const payload = typeof auth.tokens?.id_token === 'string' ? auth.tokens.id_token.split('.')[1] : undefined;
@@ -405,8 +405,9 @@ export async function refreshCatalog(): Promise<void> {
   publishSystem();
 }
 
-export function agentLoginCommand(agent: AgentId): string[] {
-  return agent === 'claude' ? ['claude', 'setup-token'] : ['codex', 'login', '--device-auth'];
+export function agentLoginCommand(agent: AgentId, method: LoginMethod): string[] {
+  if (agent === 'claude') return ['claude', 'setup-token'];
+  return method === 'device' ? ['codex', 'login', '--device-auth'] : ['codex', 'login'];
 }
 
 export async function signOutCodex(): Promise<void> {

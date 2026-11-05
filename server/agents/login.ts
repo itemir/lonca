@@ -45,8 +45,42 @@ export class LoginScreen {
   }
 }
 
+/** A sign-in page that sends the browser back to a listener on `localhost`, and what it'll come back to. */
+export interface RedirectLink {
+  url: string;
+  port: number;
+  path: string;
+  state: string;
+}
+
+function readRedirectLink(url: string): RedirectLink | null {
+  try {
+    const params = new URL(url).searchParams;
+    const back = new URL(params.get('redirect_uri') ?? '');
+    const state = params.get('state');
+    if (back.protocol !== 'http:' || !['localhost', '127.0.0.1'].includes(back.hostname) || !back.port || !state) return null;
+    return { url, port: Number(back.port), path: back.pathname, state };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Claude only tells a browser about this one. Codex prints it too. A hyperlink arrives whole, but
+ * a printed link could be cut short by where the output was split until something comes after it.
+ */
+export function findRedirectLink(screen: LoginScreen): RedirectLink | null {
+  for (const link of [...screen.links, ...(screen.text().match(/https?:\/\/\S+(?=\s)/g) ?? [])]) {
+    const redirect = readRedirectLink(link);
+    if (redirect) return redirect;
+  }
+  return null;
+}
+
+/** The page that shows a code to paste, which is the one Claude prints. */
 export function findClaudeLink(screen: LoginScreen): string | null {
-  return screen.links.find((link) => /oauth/i.test(link)) ?? /https:\/\/\S*oauth\S*/.exec(screen.text())?.[0] ?? null;
+  const printed = screen.text().match(/https:\/\/\S*oauth\S*(?=\s)/g) ?? [];
+  return [...screen.links, ...printed].find((link) => /oauth/i.test(link) && !readRedirectLink(link)) ?? null;
 }
 
 // A token the CLI wrapped itself carries on across rows holding nothing else.
@@ -73,12 +107,13 @@ export function isClaudeStuck(text: string): boolean {
   return /Press Enter to retry/i.test(text);
 }
 
-export type CodexFailure = 'disabled' | 'expired' | 'denied' | 'stopped';
+export type CodexFailure = 'disabled' | 'expired' | 'denied' | 'rejected' | 'stopped';
 
 export function classifyCodexFailure(text: string): CodexFailure {
   if (/not enabled/i.test(text)) return 'disabled';
   if (/timed out|expired/i.test(text)) return 'expired';
-  if (/device auth failed/i.test(text)) return 'denied';
+  if (/device auth failed|sign-in failed/i.test(text)) return 'denied';
+  if (/token exchange failed/i.test(text)) return 'rejected';
   return 'stopped';
 }
 

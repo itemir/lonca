@@ -405,8 +405,9 @@ export function createApi(me: AppState['me']): Router {
     res.status(204).end();
   });
 
-  api.post('/agents/:agent/login', async (req, res) => {
-    res.status(201).json(await logins.start(agentParam(req)));
+  api.post('/agents/:agent/login', express.json(), async (req, res) => {
+    const { method } = parse(z.object({ method: z.enum(['browser', 'device']).optional() }), req.body ?? {});
+    res.status(201).json(await logins.start(agentParam(req), method));
   });
 
   api.delete('/agents/:agent/login', async (req, res) => {

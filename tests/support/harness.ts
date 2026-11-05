@@ -325,16 +325,21 @@ export class Lonca {
 
 /** Points the real CLIs in a container at tests/support/fake-signin.mjs instead of the real services. */
 export function installFakeSignIn(container: string): void {
-  dockerExec(container, 'mkdir -p /tmp/fake-signin && openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=platform.claude.com -keyout /tmp/fake-signin/key.pem -out /tmp/fake-signin/cert.pem 2>/dev/null');
+  // Claude is told not to check certificates. Codex does check them, so it gets a CA to trust.
+  dockerExec(container, `mkdir -p /tmp/fake-signin && cd /tmp/fake-signin \
+    && openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=fake-signin -keyout ca-key.pem -out ca.pem 2>/dev/null \
+    && openssl req -newkey rsa:2048 -nodes -subj /CN=auth.openai.com -keyout key.pem -out cert.csr 2>/dev/null \
+    && printf 'subjectAltName=DNS:auth.openai.com,DNS:platform.claude.com,DNS:claude.com,DNS:api.anthropic.com\nbasicConstraints=CA:FALSE\n' > cert.ext \
+    && openssl x509 -req -days 2 -in cert.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -extfile cert.ext -out cert.pem 2>/dev/null`);
   docker('cp', path.join(REPO_ROOT, 'tests', 'support', 'fake-signin.mjs'), `${container}:/tmp/fake-signin/server.mjs`);
   docker('exec', '-d', '--user', 'lonca', container, 'node', '/tmp/fake-signin/server.mjs');
   dockerExec(container, 'for _ in $(seq 1 100); do curl -s -o /dev/null http://127.0.0.1:8080/ && exit 0; sleep 0.1; done; exit 1');
   docker('exec', container, 'bash', '-c', `
-    echo '127.0.0.1 platform.claude.com claude.com api.anthropic.com' >> /etc/hosts
+    echo '127.0.0.1 platform.claude.com claude.com api.anthropic.com auth.openai.com' >> /etc/hosts
     mv /usr/local/bin/claude /usr/local/bin/claude.real
     printf '#!/bin/bash\\nexport NODE_TLS_REJECT_UNAUTHORIZED=0\\nexec /usr/local/bin/claude.real "$@"\\n' > /usr/local/bin/claude
     mv /usr/local/bin/codex /usr/local/bin/codex.real
-    printf '#!/bin/bash\\nif [ "$1 $2" = "login --device-auth" ]; then exec /usr/local/bin/codex.real login --device-auth --experimental_issuer http://127.0.0.1:8080; fi\\nexec /usr/local/bin/codex.real "$@"\\n' > /usr/local/bin/codex
+    printf '#!/bin/bash\\nexport CODEX_CA_CERTIFICATE=/tmp/fake-signin/ca.pem\\nif [ "$1 $2" = "login --device-auth" ]; then exec /usr/local/bin/codex.real login --device-auth --experimental_issuer http://127.0.0.1:8080; fi\\nexec /usr/local/bin/codex.real "$@"\\n' > /usr/local/bin/codex
     chmod +x /usr/local/bin/claude /usr/local/bin/codex
   `);
 }
