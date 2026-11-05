@@ -99,11 +99,12 @@ export function Menu({ trigger, label, entries, align = 'left', className }: {
   );
 }
 
-export function Modal({ title, onClose, children, closeOnBackdrop = true }: {
+export function Modal({ title, onClose, children, closeOnBackdrop = true, className }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   closeOnBackdrop?: boolean;
+  className?: string;
 }) {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -113,7 +114,7 @@ export function Modal({ title, onClose, children, closeOnBackdrop = true }: {
     return () => document.removeEventListener('keydown', handler);
   }, [onClose]);
   return createPortal(
-    <div className="modal-backdrop" onMouseDown={(event) => closeOnBackdrop && event.target === event.currentTarget && onClose()}>
+    <div className={`modal-backdrop ${className ?? ''}`} onMouseDown={(event) => closeOnBackdrop && event.target === event.currentTarget && onClose()}>
       <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
         <header className="modal-header">
           <h2>{title}</h2>
