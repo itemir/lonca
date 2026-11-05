@@ -117,6 +117,19 @@ function projectOf(workspace: Workspace): Project {
 }
 
 /** Observes a workspace's sandbox without waking it for reads or automatic terminals. */
+/** A project's own key is in each VM's Codex login, so a change to it has to reach those running. */
+export async function applyCodexSetup(project: Project): Promise<void> {
+  const { command, stdin } = codexSetup(project);
+  const ready = state.workspaces.filter((workspace) => workspace.projectId === project.id && workspace.status === 'ready');
+  await Promise.all(ready.map(async (workspace) => {
+    try {
+      if (await isSandboxRunning(workspace.sandboxName)) await execText(workspace.sandboxName, command, { stdin });
+    } catch (error) {
+      console.error(`could not update Codex’s key in ${workspace.name}:`, errorMessage(error));
+    }
+  }));
+}
+
 export async function runningSandbox(workspace: Workspace): Promise<string> {
   if (workspace.status !== 'ready') {
     throw new HttpError(409, `${workspace.name} is ${workspace.status}`);

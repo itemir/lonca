@@ -332,6 +332,11 @@ export function secretArgs(sandbox: string, secret: ProxySecret): string[] {
     : ['secret', 'set-custom', ...secret.hosts.flatMap((host) => ['--host', host]), '--placeholder', secret.placeholder, ...source];
 }
 
+export interface SandboxSetup {
+  command: string[];
+  stdin?: string;
+}
+
 export interface SandboxSpec {
   name: string;
   /** Only resolved when the sandbox has to be created. */
@@ -343,8 +348,8 @@ export interface SandboxSpec {
   agentState: string;
   /** Applied before anything runs in the VM, including one that was made before these changed. */
   secrets: ProxySecret[];
-  /** A command to finish preparing the VM once it's booted. */
-  setup?: string[];
+  /** Finishes preparing the VM once it's booted. */
+  setup?: SandboxSetup;
   firstPort?: number;
   network: 'internet' | 'host';
   memoryGb?: number;
@@ -426,8 +431,9 @@ export function ensureSandbox(spec: SandboxSpec, { start = true }: { start?: boo
     }
     forgetListing();
     for (const secret of spec.secrets) await sbx(secretArgs(spec.name, secret));
-    for (const command of [['bash', '-c', SANDBOX_BOOT, 'lonca-boot', spec.agentState], ...(spec.setup ? [spec.setup] : [])]) {
-      const result = await exec(spec.name, command, { timeoutMs: 30000 });
+    const boot: SandboxSetup = { command: ['bash', '-c', SANDBOX_BOOT, 'lonca-boot', spec.agentState] };
+    for (const { command, stdin } of [boot, ...(spec.setup ? [spec.setup] : [])]) {
+      const result = await exec(spec.name, command, { stdin, timeoutMs: 30000 });
       if (result.code !== 0) throw new SandboxError(`The sandbox didn’t finish starting: ${result.stderr.toString('utf8').trim()}`);
     }
     booted.add(spec.name);

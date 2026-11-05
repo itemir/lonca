@@ -237,7 +237,7 @@ describe('moving from where Codex’s sign-in used to be', () => {
 
     await lonca.start();
     expect(fs.existsSync(path.join(old, 'codex', 'auth.json'))).toBe(false);
-    expect(fs.existsSync(path.join(old, 'codex'))).toBe(true);
+    expect(fs.existsSync(old)).toBe(true);
     expect(fs.readFileSync(forProxy('codex'), 'utf8')).toBe(CODEX);
     await lonca.api('POST', '/agents/refresh');
     expect((await state()).system.agents.codex.signedIn).toBe(true);

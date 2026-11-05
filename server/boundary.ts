@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { Project } from '../shared/types.ts';
 import { paths } from './config.ts';
-import type { ProxySecret } from './sandbox.ts';
+import type { ProxySecret, SandboxSetup } from './sandbox.ts';
 import { boundaryValue, getSecrets } from './store.ts';
 
 // A virtual machine never holds a credential. Docker Sandboxes' proxy, on this computer, adds them
@@ -48,18 +48,26 @@ replace() {
   printf '%s\n' "$2" > "$new"
   mv -f "$new" "$1"
 }
-replace "$HOME/.codex/auth.json" "$1"
+replace "$HOME/.codex/auth.json" "$(cat)"
 case "$(cat "$HOME/.codex/config.toml" 2>/dev/null || true)" in
-  ''|"$2"|"$3") replace "$HOME/.codex/config.toml" "$4" ;;
+  ''|"$1"|"$2") replace "$HOME/.codex/config.toml" "$3" ;;
 esac
 `;
 
-/** The command that sets Codex up in a VM, for when it boots and before each Codex turn, since the kind of sign-in can change. */
-export function codexSetup(project: Project): string[] {
+/** A project's own key, which isn't one for the proxy to swap. */
+export function projectCodexKey(project: Project): string | undefined {
   const env = project.settings.env;
-  const usesKey = env.CODEX_API_KEY || env.OPENAI_API_KEY || boundaryValue('codex')?.startsWith('sk-');
-  return [
-    'bash', '-c', CODEX_SETUP, 'lonca-codex-setup',
-    JSON.stringify({ OPENAI_API_KEY: CODEX_PLACEHOLDER }), CODEX_CONFIG, CODEX_CONFIG_CHATGPT, usesKey ? CODEX_CONFIG : CODEX_CONFIG_CHATGPT,
-  ];
+  return env.CODEX_API_KEY || env.OPENAI_API_KEY || undefined;
+}
+
+/** Sets Codex up in a VM, for when it boots and before each Codex turn, since the kind of sign-in can change. */
+export function codexSetup(project: Project): SandboxSetup {
+  const projectKey = projectCodexKey(project);
+  const usesKey = projectKey || boundaryValue('codex')?.startsWith('sk-');
+  return {
+    command: ['bash', '-c', CODEX_SETUP, 'lonca-codex-setup', CODEX_CONFIG, CODEX_CONFIG_CHATGPT, usesKey ? CODEX_CONFIG : CODEX_CONFIG_CHATGPT],
+    // Codex ignores OPENAI_API_KEY in its environment, so a project's key goes in this file. It's
+    // sent this way because anything on this computer can read the arguments of a command.
+    stdin: JSON.stringify({ OPENAI_API_KEY: projectKey ?? CODEX_PLACEHOLDER }),
+  };
 }

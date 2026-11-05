@@ -235,21 +235,65 @@ function shareCodexCredentialWithProxy(): void {
   setBoundaryValue('codex', codexCredential(readCodexLogin())?.value);
 }
 
+const MAX_LOGIN_BYTES = 65536;
+
+/**
+ * A process that opened this directory before it was moved can still change what's in it. So the
+ * file is read all from one opening, which won't follow a link, wait on a pipe or read without end.
+ */
+function readOldLogin(dir: string): string {
+  if (!fs.lstatSync(dir, { throwIfNoEntry: false })?.isDirectory()) return '';
+  let opened: number;
+  try {
+    opened = fs.openSync(path.join(dir, 'auth.json'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch {
+    return '';
+  }
+  try {
+    if (!fs.fstatSync(opened).isFile()) return '';
+    const content = Buffer.alloc(MAX_LOGIN_BYTES + 1);
+    const length = fs.readSync(opened, content);
+    return length <= MAX_LOGIN_BYTES ? content.toString('utf8', 0, length) : '';
+  } finally {
+    fs.closeSync(opened);
+  }
+}
+
 /**
  * Older workspaces have the old directory mounted and can't lose it, so the sign-in moves out from
- * under them, once. Anything appearing there later came from one of them, so it isn't believed.
+ * under them, once. They can put anything there, including a link to elsewhere on this computer,
+ * and change it at any moment. So it's renamed before anything looks at it, which moves a link
+ * rather than following it, to where they can't put another. Anything appearing later goes unread.
  */
-export function moveCodexLogin(): void {
-  const old = path.join(paths.oldCredentials, 'codex', 'auth.json');
-  // Written last, so that being stopped partway retries the move rather than deleting the only copy.
+function leaveOldDirectory(): void {
+  const old = path.join(paths.oldCredentials, 'codex');
+  const taken = path.join(paths.helperCredentials, 'old-codex');
   const moved = path.join(paths.helperCredentials, 'moved');
-  fs.mkdirSync(path.dirname(hostCodexLogin()), { recursive: true, mode: 0o700 });
-  if (fs.existsSync(moved) || fs.existsSync(hostCodexLogin())) {
-    fs.rmSync(old, { force: true });
-  } else if (fs.existsSync(old)) {
-    fs.renameSync(old, hostCodexLogin());
+  // Already there if the last start was stopped partway, and then it can be the only copy.
+  if (!fs.lstatSync(taken, { throwIfNoEntry: false })) {
+    try {
+      fs.renameSync(old, taken);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
   }
+  if (!fs.existsSync(moved) && !fs.existsSync(hostCodexLogin())) {
+    const login = readOldLogin(taken);
+    if (codexCredential(login)) saveCodexLogin(login);
+  }
+  // Only now, so that being stopped before this tries again rather than losing the only copy.
   fs.writeFileSync(moved, '');
+  fs.rmSync(taken, { recursive: true, force: true });
+}
+
+export function moveCodexLogin(): void {
+  fs.mkdirSync(path.dirname(hostCodexLogin()), { recursive: true, mode: 0o700 });
+  // What a workspace left there mustn't be able to stop Lonca starting.
+  try {
+    leaveOldDirectory();
+  } catch (error) {
+    console.error('could not clear the old directory for Codex’s sign-in:', errorMessage(error));
+  }
   // A key kept before they stopped being.
   const login = readCodexLogin();
   if (codexCredential(login) && withoutIncidentalKey(login) !== login) saveCodexLogin(login);

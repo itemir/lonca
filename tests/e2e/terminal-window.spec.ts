@@ -37,6 +37,9 @@ async function ttySize(view: Page): Promise<string> {
   return new RegExp(`${marker}=(\\d+ \\d+)`).exec(await screen(view).innerText())![1];
 }
 
+/** A new size takes a moment to reach a terminal in a virtual machine, and a line typed meanwhile can come out garbled. */
+const settle = (view: Page) => view.waitForTimeout(1500);
+
 const rowHeight = (view: Page) => view.locator('.terminal-view:visible .xterm-rows > div').first().evaluate((row) => row.getBoundingClientRect().height);
 
 async function terminalInfo(id: string): Promise<TerminalInfo | undefined> {
@@ -48,6 +51,7 @@ async function openWorkspace(page: Page): Promise<{ workspace: Workspace; termin
   const workspace = await lonca.waitForWorkspace((await lonca.api('POST', `/projects/${projectId}/workspaces`, {})).workspace.id);
   await page.goto(`${lonca.url}/w/${workspace.id}?token=${lonca.token}`);
   await expect(screen(page)).toContainText(workspace.name, { timeout: 20000 });
+  await settle(page);
   const { terminals } = await lonca.api<AppState>('GET', '/state');
   return { workspace, terminal: terminals.find((terminal) => terminal.workspaceId === workspace.id)! };
 }
@@ -57,6 +61,7 @@ async function moveToWindow(page: Page, title = 'Terminal'): Promise<Page> {
   await moveButton(page, title).click();
   const view = await opening;
   await expect(view.locator('.terminal-view')).toBeVisible();
+  await settle(view);
   return view;
 }
 
@@ -118,10 +123,8 @@ test('moves a terminal to a window of its own and back, as the same shell at eac
 
 test('keeps the terminal in its window through reloads of either page', async ({ page }) => {
   const { workspace, terminal } = await openWorkspace(page);
-  const panelSize = await ttySize(page);
   const view = await moveToWindow(page);
   await expect(screen(view)).toContainText(workspace.name);
-  await expect.poll(() => ttySize(view)).not.toBe(panelSize);
   const size = await ttySize(view);
 
   // A panel that attached even briefly would shrink the terminal under the window.

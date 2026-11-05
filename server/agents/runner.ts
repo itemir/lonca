@@ -647,7 +647,10 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
     const sandbox = await runningSandbox(workspace);
     run.sandbox = sandbox;
     const attachments = item.attachments ?? [];
-    if (session.agent === 'codex') await execText(sandbox, codexSetup(project));
+    if (session.agent === 'codex') {
+      const setup = codexSetup(project);
+      await execText(sandbox, setup.command, { stdin: setup.stdin });
+    }
     await execText(sandbox, ['mkdir', '-p', run.dir, ...(session.work ? [scratchDir(session.id)] : [])]);
     await execText(sandbox, ['bash', '-c', 'cat > "$0"', `${run.dir}/prompt`], {
       stdin: userPrompt([playbookUpdate(session, project), item.context, item.text].filter(Boolean).join('\n\n'), attachments),

@@ -5,7 +5,8 @@ import { z } from 'zod';
 import type { AgentId, AppState, Project, Session, Workspace } from '../shared/types.ts';
 import { playbookFor, resetPlaybook, savePlaybook } from './agents/playbook.ts';
 import { cancelQueued, createLead, createSession, deleteSession, flushQueue, interruptSession, publishSession, sendMessage } from './agents/runner.ts';
-import { closeWorkspaceLead, holdWhenStopped, markRead, stopAgents, switchLead, tryAgain } from './agents/team.ts';
+import { checkButtonCanStart, closeWorkspaceLead, holdWhenStopped, markRead, stopAgents, switchLead, tryAgain, warnOfOtherWriter } from './agents/team.ts';
+import { projectCodexKey } from './boundary.ts';
 import { execText } from './sandbox.ts';
 import {
   getChanges, getChecks, getFileDiff, listDirectory, readWorkspaceFile, safeAttachmentName, searchFiles,
@@ -26,7 +27,7 @@ import { sessionSnapshot } from './transcript.ts';
 import { HttpError, errorMessage, newId } from './util.ts';
 import {
   archiveWorkspace, configuredSetupScript, createWorkspace, deleteWorkspace, publishWorkspace, rebuildWorkspace, restoreWorkspace,
-  retryWorkspace, runningSandbox, startWorkspace, stopWorkspace,
+  applyCodexSetup, retryWorkspace, runningSandbox, startWorkspace, stopWorkspace,
 } from './workspaces.ts';
 
 const execFileAsync = promisify(execFile);
@@ -154,9 +155,11 @@ export function createApi(me: AppState['me']): Router {
   api.patch('/projects/:id', express.json(), (req, res) => {
     const project = projectParam(req);
     const body = parse(z.object({ name: z.string().min(1).optional(), settings: projectSettingsSchema.optional() }), req.body);
+    const keyBefore = projectCodexKey(project);
     if (body.name) project.name = body.name;
     if (body.settings) project.settings = { ...project.settings, ...body.settings };
     publishProject(project);
+    if (projectCodexKey(project) !== keyBefore) void applyCodexSetup(project);
     res.json(project);
   });
 
@@ -412,7 +415,9 @@ export function createApi(me: AppState['me']): Router {
 
   api.post('/sessions/:id/messages', express.json({ limit: '5mb' }), async (req, res) => {
     const body = parse(z.object({ text: z.string().min(1), attachments: z.array(attachmentSchema).default([]) }), req.body);
-    res.status(201).json(await sendMessage(String(req.params.id), body.text, body.attachments));
+    const item = await sendMessage(String(req.params.id), body.text, body.attachments);
+    warnOfOtherWriter(sessionParam(req));
+    res.status(201).json(item);
   });
 
   api.delete('/sessions/:id/queue/:itemId', (req, res) => {
@@ -421,6 +426,7 @@ export function createApi(me: AppState['me']): Router {
   });
 
   api.post('/sessions/:id/queue/flush', async (req, res) => {
+    checkButtonCanStart(sessionParam(req));
     await flushQueue(String(req.params.id));
     res.status(204).end();
   });

@@ -76,14 +76,79 @@ describe('Codex’s sign-in', () => {
     for (const bad of ['', 'not json', '{}', '{"tokens":{"access_token":7}}', '{"OPENAI_API_KEY":{"evil":true}}']) expect(system.codexCredential(bad)).toBeNull();
   });
 
-  it('moves out of the directory older workspaces have mounted, leaving the directory', () => {
+  it('moves out of the directory older workspaces have mounted, which stays for them', () => {
     fs.mkdirSync(path.dirname(oldLogin()), { recursive: true });
     fs.writeFileSync(oldLogin(), login('old-place'));
     system.moveCodexLogin();
     expect(fs.existsSync(oldLogin())).toBe(false);
-    expect(fs.existsSync(path.dirname(oldLogin()))).toBe(true);
+    expect(fs.existsSync(path.join(home, 'credentials'))).toBe(true);
+    expect(fs.existsSync(path.join(home, 'helper-credentials', 'old-codex'))).toBe(false);
+    expect(fs.statSync(newLogin()).mode & 0o777).toBe(0o600);
     expect(JSON.parse(fs.readFileSync(newLogin(), 'utf8')).tokens.access_token).toBe(JSON.parse(login('old-place')).tokens.access_token);
     expect(fs.readFileSync(boundaryFile('codex'), 'utf8')).toBe(JSON.parse(login('old-place')).tokens.access_token);
+  });
+
+  describe('with something an older workspace put in the old directory', () => {
+    const key = JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-on-this-computer' });
+    let elsewhere: string;
+    const elsewhereFile = () => path.join(elsewhere, 'auth.json');
+    const oldDir = () => path.dirname(oldLogin());
+    const plants: Record<string, () => void> = {
+      'the directory as a link': () => fs.symlinkSync(elsewhere, oldDir()),
+      'the file as a link': () => {
+        fs.mkdirSync(oldDir());
+        fs.symlinkSync(elsewhereFile(), oldLogin());
+      },
+      'the directory as a link to a file': () => fs.symlinkSync(elsewhereFile(), oldDir()),
+      'the directory as a file': () => fs.writeFileSync(oldDir(), key),
+      'the file as a directory': () => fs.mkdirSync(oldLogin(), { recursive: true }),
+      'a link inside the directory': () => {
+        fs.mkdirSync(oldDir());
+        fs.symlinkSync(elsewhere, path.join(oldDir(), 'more'));
+      },
+      'the file as a pipe': () => {
+        fs.mkdirSync(oldDir());
+        execFileSync('mkfifo', [oldLogin()]);
+      },
+      'a file too big to be a login': () => {
+        fs.mkdirSync(oldDir());
+        fs.writeFileSync(oldLogin(), JSON.stringify({ OPENAI_API_KEY: 'sk-'.padEnd(70000, 'x') }));
+      },
+    };
+
+    beforeEach(() => {
+      elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'lonca-elsewhere-'));
+      fs.writeFileSync(elsewhereFile(), key);
+      fs.mkdirSync(path.join(home, 'credentials'));
+    });
+    afterEach(() => fs.rmSync(elsewhere, { recursive: true, force: true }));
+
+    for (const [name, plant] of Object.entries(plants)) {
+      for (const first of [true, false]) {
+        it(`${name}, on ${first ? 'the first start' : 'a later start'}: starts, and touches nothing else`, () => {
+          if (!first) {
+            fs.mkdirSync(path.join(home, 'helper-credentials'));
+            fs.writeFileSync(path.join(home, 'helper-credentials', 'moved'), '');
+          }
+          plant();
+          system.moveCodexLogin();
+          expect(fs.readFileSync(elsewhereFile(), 'utf8')).toBe(key);
+          expect(fs.existsSync(newLogin())).toBe(false);
+          expect(fs.existsSync(boundaryFile('codex'))).toBe(false);
+          expect(fs.lstatSync(oldDir(), { throwIfNoEntry: false })).toBeUndefined();
+          expect(fs.existsSync(path.join(home, 'helper-credentials', 'old-codex'))).toBe(false);
+          expect(fs.existsSync(path.join(home, 'helper-credentials', 'moved'))).toBe(true);
+        });
+      }
+    }
+
+    it('picks a login up from where it was taken to, if the last start was stopped before saving it', () => {
+      fs.mkdirSync(path.join(home, 'helper-credentials', 'old-codex'), { recursive: true });
+      fs.writeFileSync(path.join(home, 'helper-credentials', 'old-codex', 'auth.json'), login('old-place'));
+      system.moveCodexLogin();
+      expect(fs.readFileSync(boundaryFile('codex'), 'utf8')).toBe(JSON.parse(login('old-place')).tokens.access_token);
+      expect(fs.existsSync(path.join(home, 'helper-credentials', 'old-codex'))).toBe(false);
+    });
   });
 
   it('finishes a move that was stopped partway, rather than deleting the only copy', () => {
@@ -141,7 +206,7 @@ describe('Codex’s sign-in', () => {
 });
 
 describe('setting Codex up in a VM', () => {
-  const run = (command: string[]) => execFileSync(command[0], command.slice(1), { env: { ...process.env, HOME: home } });
+  const run = ({ command, stdin }: { command: string[]; stdin?: string }) => execFileSync(command[0], command.slice(1), { input: stdin, env: { ...process.env, HOME: home } });
   const config = () => fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
   const auth = () => JSON.parse(fs.readFileSync(path.join(home, '.codex', 'auth.json'), 'utf8'));
   const CHATGPT = 'cli_auth_credentials_store = "file"\nopenai_base_url = "https://chatgpt.com/backend-api/codex"\n';
@@ -163,9 +228,17 @@ describe('setting Codex up in a VM', () => {
     expect(config()).toBe(CHATGPT);
   });
 
-  it('leaves the usual address for a project’s own key', () => {
-    run(boundary.codexSetup(project({ CODEX_API_KEY: 'sk-own' })));
-    expect(config()).toBe(PLAIN);
+  it('uses a project’s own key at the usual address, and goes back when it’s gone', () => {
+    for (const name of ['CODEX_API_KEY', 'OPENAI_API_KEY']) {
+      run(boundary.codexSetup(project({ [name]: 'sk-own' })));
+      expect(config()).toBe(PLAIN);
+      expect(auth()).toEqual({ OPENAI_API_KEY: 'sk-own' });
+      expect(boundary.codexSetup(project({ [name]: 'sk-own' })).command.join(' ')).not.toContain('sk-own');
+      expect(fs.statSync(path.join(home, '.codex', 'auth.json')).mode & 0o777).toBe(0o600);
+      run(boundary.codexSetup(project()));
+      expect(config()).toBe(CHATGPT);
+      expect(auth()).toEqual({ OPENAI_API_KEY: 'oai-oat01-lonca-placeholder' });
+    }
   });
 
   it('replaces the config an older VM has, but not someone’s own', () => {

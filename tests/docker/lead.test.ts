@@ -379,6 +379,114 @@ describe('a Lead and its agents', () => {
   });
 });
 
+describe('one writer at a time, from the buttons', () => {
+  it('refuses Try now and Send now while another writes, and warns about a message typed to one', async () => {
+    const { workspace, lead } = await newWorkspace();
+    mock.limited.add('claude-haiku-5-5');
+    try {
+      await send(lead.id, spawn('Old writer', 'write something', { model: 'claude-haiku-5-5', job: 'implement' }));
+      await until('the limit', async () => (await agents(workspace))[0]?.lastOutcome === 'limit');
+      await settled(lead);
+    } finally {
+      mock.limited.delete('claude-haiku-5-5');
+    }
+    const [oldWriter] = await agents(workspace);
+    // Something for Send now to send.
+    await send(lead.id, tool('message_agent', { id: oldWriter.id, text: 'and this, when you can' }));
+    await waitForTool(lead, (item) => item.title === 'Messaged');
+    await settled(lead);
+    expect((await lonca.session(oldWriter.id)).queue.length).toBe(1);
+
+    // Taking over is allowed, because the first isn't working.
+    await send(lead.id, spawn('New writer', 'SLOW write something else', { job: 'implement' }));
+    await until('its replacement', async () => (await agents(workspace))[1]?.status === 'running');
+    await expect(lonca.api('POST', `/sessions/${oldWriter.id}/retry`)).rejects.toThrow(/409.*New writer is changing files/);
+    await expect(lonca.api('POST', `/sessions/${oldWriter.id}/queue/flush`)).rejects.toThrow(/409.*New writer is changing files/);
+    expect(await lonca.session(oldWriter.id)).toMatchObject({ status: 'idle', lastOutcome: 'limit', held: true, queue: [expect.any(String)] });
+    await settled(lead);
+
+    // With nobody else writing it's let through.
+    await lonca.api('POST', `/sessions/${oldWriter.id}/retry`);
+    await until('it to finish', async () => (await lonca.session(oldWriter.id)).lastOutcome === 'completed', 60000);
+    await settled(lead);
+    const quiet = await lonca.items(oldWriter.id);
+    expect(quiet.some((item) => item.type === 'notice' && item.text.includes('changing files'))).toBe(false);
+
+    await send(lead.id, spawn('Third writer', 'SLOW write a third thing', { job: 'implement' }));
+    await until('the third', async () => (await agents(workspace))[2]?.status === 'running');
+    await send(oldWriter.id, 'change this too');
+    const warned = (await lonca.items(oldWriter.id)).find((item) => item.type === 'notice' && item.level === 'warning');
+    expect(warned).toMatchObject({ text: expect.stringContaining('Third writer is changing files at the same time') });
+    await settled(lead);
+  });
+
+  it('holds a button to the limit on how many work at once', async () => {
+    const { workspace, lead } = await newWorkspace();
+    mock.limited.add('claude-haiku-5-5');
+    try {
+      await send(lead.id, spawn('Stopped', 'look at something', { model: 'claude-haiku-5-5' }));
+      await until('the limit', async () => (await agents(workspace))[0]?.lastOutcome === 'limit');
+      await settled(lead);
+    } finally {
+      mock.limited.delete('claude-haiku-5-5');
+    }
+    const [stopped] = await agents(workspace);
+    await send(lead.id, spawn('Busy', 'SLOW look at something else'));
+    await until('the other', async () => (await agents(workspace))[1]?.status === 'running');
+    await lonca.api('PATCH', '/settings', { leadMaxAgents: 1 });
+    try {
+      await expect(lonca.api('POST', `/sessions/${stopped.id}/retry`)).rejects.toThrow(/409.*most allowed at once/);
+    } finally {
+      await lonca.api('PATCH', '/settings', { leadMaxAgents: 4 });
+    }
+    await settled(lead);
+  });
+});
+
+describe('a project’s own key', () => {
+  it('reaches a running VM when it changes, with no turn to carry it', async () => {
+    const { workspace } = await newWorkspace();
+    const { env } = (await state()).projects.find((entry) => entry.id === project.id)!.settings;
+    const inVm = () => sandboxExec(workspace.sandboxName, 'cat ~/.codex/auth.json').output;
+    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { env: { ...env, OPENAI_API_KEY: 'sk-changed' } } });
+    try {
+      await until('the new key', () => inVm().includes('sk-changed'), 20000);
+    } finally {
+      await lonca.api('PATCH', `/projects/${project.id}`, { settings: { env } });
+    }
+    await until('the key before', () => inVm().includes('sk-mock'), 20000);
+    // Other settings leave it alone.
+    const before = sandboxExec(workspace.sandboxName, 'stat -c %Y%i ~/.codex/auth.json').output;
+    await lonca.api('PATCH', `/projects/${project.id}`, { name: 'still-the-same-key' });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(sandboxExec(workspace.sandboxName, 'stat -c %Y%i ~/.codex/auth.json').output).toBe(before);
+  });
+
+  it('is what the real CLIs send, rather than the placeholder or a sign-in', async () => {
+    const { workspace } = await newWorkspace();
+    await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-oat01-a-sign-in-that-should-lose' });
+    try {
+      // Codex's usual provider, at the mock's address. A config that isn't Lonca's stays as it is.
+      sandboxExec(workspace.sandboxName, `cat > ~/.codex/config.toml <<EOF
+cli_auth_credentials_store = "file"
+openai_base_url = "http://host.docker.internal:${mock.port}/v1"
+EOF`);
+      // What's there from booting isn't what it goes by: each turn sets it again.
+      sandboxExec(workspace.sandboxName, `echo '{"OPENAI_API_KEY":"sk-out-of-date"}' > ~/.codex/auth.json`);
+      const sent = async (agent: string, model: string, marker: string) => {
+        const session = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, { agent, model, effort: 'low' });
+        await send(session.id, marker);
+        await lonca.waitForIdle(session.id);
+        return mock.requests.findLast((request) => request.body.includes(marker))?.auth;
+      };
+      expect(await sent('codex', CODEX_MODEL, 'WHOSE-KEY-CODEX')).toBe('Bearer sk-mock');
+      expect(await sent('claude', 'claude-sonnet-5-5', 'WHOSE-KEY-CLAUDE')).toBe('sk-mock');
+    } finally {
+      await lonca.api('POST', '/agents/claude/logout');
+    }
+  });
+});
+
 describe('usage limits', () => {
   it('wakes the Lead when an agent hits one, and the agent can pick up afterwards', async () => {
     const { workspace, lead } = await newWorkspace();

@@ -73,20 +73,40 @@ function jobArg(args: Record<string, unknown>): AgentJob | undefined {
   return args.job as AgentJob;
 }
 
-/** The limit on how many work at once, for an agent that's about to start a turn. */
-function checkRoom(workspace: Workspace, agent?: Session): void {
-  const working = agentsOf(workspace.id).filter(isWorking);
-  if (agent && working.includes(agent)) return;
-  if (working.length >= state.settings.leadMaxAgents) {
-    throw new ToolError(`${working.length} agents are already working, which is the most allowed at once. End your turn: Lonca wakes you when they finish.`);
-  }
+/** How many are working, if that leaves no room for this agent to start a turn. */
+function fullWith(workspaceId: string, agent?: Session): number {
+  const working = agentsOf(workspaceId).filter(isWorking);
+  return (!agent || !working.includes(agent)) && working.length >= state.settings.leadMaxAgents ? working.length : 0;
 }
 
 /** One agent at a time changes files, so that two don't overwrite each other's work. */
+function otherWriter(workspaceId: string, except?: Session): Session | undefined {
+  return agentsOf(workspaceId).find((agent) => agent !== except && agent.work?.job === 'implement' && isWorking(agent));
+}
+
+function checkRoom(workspace: Workspace, agent?: Session): void {
+  const working = fullWith(workspace.id, agent);
+  if (working) throw new ToolError(`${working} agents are already working, which is the most allowed at once. End your turn: Lonca wakes you when they finish.`);
+}
+
 function checkOneWriter(lead: Session, job: AgentJob | undefined, except?: Session): void {
-  if (job !== 'implement') return;
-  const writer = agentsOf(lead.workspaceId).find((agent) => agent !== except && agent.work?.job === 'implement' && isWorking(agent));
+  const writer = job === 'implement' ? otherWriter(lead.workspaceId, except) : undefined;
   if (writer) throw new ToolError(`${nameOf(writer)} is already changing files, and only one agent can at a time. Wait for it to finish, or give this one a different job.`);
+}
+
+/** Try now and Send now can't know what's started since they appeared, so they answer to the same limits as the Lead. */
+export function checkButtonCanStart(session: Session): void {
+  if (session.role !== 'agent') return;
+  const working = fullWith(session.workspaceId, session);
+  if (working) throw new HttpError(409, `${working} agents are already working, which is the most allowed at once. Try again when one finishes.`);
+  const writer = session.work?.job === 'implement' ? otherWriter(session.workspaceId, session) : undefined;
+  if (writer) throw new HttpError(409, `${writer.title} is changing files, and only one agent can at a time. Try again when it finishes, or stop it first.`);
+}
+
+/** A message typed to an agent is deliberate, so it goes ahead, but not without saying what it risks. */
+export function warnOfOtherWriter(session: Session): void {
+  const writer = session.role === 'agent' && session.work?.job === 'implement' ? otherWriter(session.workspaceId, session) : undefined;
+  if (writer) notice(session.id, undefined, 'warning', `${writer.title} is changing files at the same time, so these two could overwrite each other’s work.`);
 }
 
 function findModel(workspace: Workspace, id: string): { agent: AgentId; efforts: string[]; defaultEffort: string } {
@@ -400,5 +420,7 @@ export function markRead(session: Session): void {
 export async function tryAgain(session: Session): Promise<void> {
   const workspace = getWorkspace(session.workspaceId);
   if (workspace?.status === 'stopped') await startWorkspace(workspace);
+  // After waiting for that, with nothing to wait for before the turn is reserved, so that two clicks can't both pass.
+  checkButtonCanStart(session);
   await retrySession(session, 'lonca');
 }

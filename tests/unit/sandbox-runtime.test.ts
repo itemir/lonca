@@ -27,7 +27,7 @@ case "$1" in
 esac
 `, { mode: 0o700 });
   sandbox = await import('../../server/sandbox.ts');
-  spec = { name: 'test', image: async () => 'image', env: ['LONCA_PORT=12345'], mounts: [], agentState: path.join(root, 'agent-state'), secrets: [{ service: 'github', file: path.join(root, 'github') }], setup: ['true'], network: 'host' };
+  spec = { name: 'test', image: async () => 'image', env: ['LONCA_PORT=12345'], mounts: [], agentState: path.join(root, 'agent-state'), secrets: [{ service: 'github', file: path.join(root, 'github') }], setup: { command: ['true'] }, network: 'host' };
 });
 afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
