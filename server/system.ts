@@ -1,22 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentId, AgentStatus, Catalog, LoginMethod, ModelOption, SystemStatus } from '../shared/types.ts';
-import { IMAGE_CONTEXT, LONCA_HOME, PREFIX } from './config.ts';
-import { CONTAINER_CREDENTIALS, ensureContainer } from './containers.ts';
-import {
-  type ExecResult, buildImage, docker, exec, execText, imageExists, imageTag, removeContainer, sandboxImageTag, saveImage,
-} from './docker.ts';
+import { PREFIX, paths } from './config.ts';
 import { publish } from './events.ts';
-import { detectSandboxes, loadTemplate, templateLoaded } from './sandbox.ts';
-import { getSecrets, saveState, state } from './store.ts';
-import { errorMessage, removeTree } from './util.ts';
+import { SandboxError, buildTemplate, detectSandboxes, ensureSandbox, exec, isSandboxRunning, removeSandbox, templateLoaded, templateTag } from './sandbox.ts';
+import { getSecrets, saveState, setBoundaryValue, state, writeAtomic } from './store.ts';
+import { errorMessage } from './util.ts';
 
 const LOG_LIMIT = 20000;
 
 export const system: SystemStatus = {
-  docker: { ok: false },
   sandbox: { state: 'checking' },
-  image: { tag: imageTag(), state: 'unknown', log: '' },
+  image: { tag: templateTag(), state: 'unknown', log: '' },
   agents: { claude: { signedIn: false }, codex: { signedIn: false } },
   agentsChecked: false,
 };
@@ -25,33 +20,20 @@ function publishSystem(): void {
   publish({ type: 'system', system, catalog: state.catalog });
 }
 
-export async function checkDocker(): Promise<boolean> {
-  const wasOk = system.docker.ok;
-  try {
-    const version = await docker.version();
-    system.docker = { ok: true, version: version.Version };
-  } catch (error) {
-    system.docker = { ok: false, error: errorMessage(error) };
-  }
-  if (wasOk !== system.docker.ok) publishSystem();
-  return system.docker.ok;
-}
-
 let checkingSandboxes: Promise<void> | null = null;
 let sandboxesReadyListener: () => void = () => {};
 
-/** Called when workspaces can have VMs, having not been able to a moment ago. */
+/** Called when workspaces can run, having not been able to a moment ago. */
 export function onSandboxesReady(listener: () => void): void {
   sandboxesReadyListener = listener;
 }
 
-/** Finds out whether new workspaces can have a VM. Safe to call often. */
+/** Finds out whether workspaces can run. Safe to call often. */
 export function checkSandboxes(): Promise<void> {
   checkingSandboxes ??= detectSandboxes().then((sandbox) => {
     const changed = JSON.stringify(sandbox) !== JSON.stringify(system.sandbox);
     const nowReady = sandbox.state === 'ready' && system.sandbox.state !== 'ready';
     system.sandbox = sandbox;
-    if (system.image.state !== 'building') system.image.tag = shownImageTag();
     if (changed) publishSystem();
     if (nowReady) sandboxesReadyListener();
   }).finally(() => {
@@ -59,9 +41,6 @@ export function checkSandboxes(): Promise<void> {
   });
   return checkingSandboxes;
 }
-
-/** The image new workspaces use, which is the one to build a custom image from. */
-const shownImageTag = () => (system.sandbox.state === 'ready' ? sandboxImageTag() : imageTag());
 
 function imageLog(): (text: string) => void {
   let lastPublish = 0;
@@ -75,168 +54,115 @@ function imageLog(): (text: string) => void {
 }
 
 function imageBuilding(): void {
-  system.image = { tag: shownImageTag(), state: 'building', log: '' };
+  system.image = { tag: templateTag(), state: 'building', log: '' };
   publishSystem();
 }
 
 function imageReady(): void {
-  system.image = { tag: shownImageTag(), state: 'ready', log: '' };
+  system.image = { tag: templateTag(), state: 'ready', log: '' };
   publishSystem();
 }
 
 function imageFailed(error: unknown): void {
-  system.image = { tag: shownImageTag(), state: 'error', log: system.image.log, error: errorMessage(error) };
+  system.image = { tag: templateTag(), state: 'error', log: system.image.log, error: errorMessage(error) };
   publishSystem();
 }
 
 let building: Promise<string> | null = null;
 
-async function runBuild(options: { fresh?: boolean }): Promise<string> {
-  const tag = imageTag();
-  imageBuilding();
-  try {
-    await buildImage(tag, options, imageLog());
-    imageReady();
-    // Containers from the previous image keep running; only the helper moves over now.
-    await shareCodexLogin(TOOLS_CONTAINER).catch(() => {});
-    await removeContainer(TOOLS_CONTAINER);
-    return tag;
-  } catch (error) {
-    imageFailed(error);
-    throw error;
-  }
-}
-
-/** Returns the container image, building it the first time. The helper uses it whichever way workspaces run. */
-export async function ensureImage(): Promise<string> {
-  const tag = imageTag();
-  if (await imageExists(tag)) {
-    if (system.image.state !== 'ready' && !buildingSandbox) imageReady();
-    return tag;
-  }
-  building ??= runBuild({}).finally(() => {
+function runBuild(options: { fresh?: boolean }): Promise<string> {
+  building ??= (async () => {
+    const tag = templateTag();
+    imageBuilding();
+    try {
+      await buildTemplate(tag, options, imageLog());
+      imageReady();
+      // The helper moves to the new template the next time it's needed.
+      await removeSandbox(HELPER);
+      state.catalogTemplate = undefined;
+      void refreshCodexCatalog();
+      return tag;
+    } catch (error) {
+      imageFailed(error);
+      throw error;
+    }
+  })().finally(() => {
     building = null;
   });
   return building;
 }
 
-let buildingSandbox: Promise<string> | null = null;
-
-async function runSandboxBuild(options: { fresh?: boolean }): Promise<string> {
-  const tag = sandboxImageTag();
-  imageBuilding();
-  const staging = fs.mkdtempSync(path.join(LONCA_HOME, 'image-'));
-  try {
-    const onLog = imageLog();
-    if (options.fresh || !(await imageExists(tag))) await buildImage(tag, { ...options, dockerfile: 'Dockerfile.sandbox' }, onLog);
-    onLog('\nCopying the image to Docker Sandboxes…\n');
-    const file = path.join(staging, 'image.tar');
-    await saveImage(tag, file);
-    await loadTemplate(file);
-    imageReady();
-    return tag;
-  } catch (error) {
-    imageFailed(error);
-    throw error;
-  } finally {
-    await removeTree(staging);
-  }
-}
-
-/** Returns the image sandboxes start from, building it and loading it into Docker Sandboxes the first time. */
+/** Returns the template sandboxes start from, building it the first time. */
 export async function ensureSandboxImage(): Promise<string> {
-  const tag = sandboxImageTag();
-  if (!buildingSandbox && (await templateLoaded(tag))) {
+  const tag = templateTag();
+  if (!building && (await templateLoaded(tag))) {
     if (system.image.state !== 'ready') imageReady();
     return tag;
   }
-  buildingSandbox ??= runSandboxBuild({}).finally(() => {
-    buildingSandbox = null;
-  });
-  return buildingSandbox;
+  return runBuild({});
 }
 
-/** Loads a project's own image into Docker Sandboxes, which can't see the images Docker has. */
+/** A project's own template has to be one Docker Sandboxes already has. */
 export async function ensureCustomTemplate(image: string): Promise<string> {
   if (await templateLoaded(image)) return image;
-  const staging = fs.mkdtempSync(path.join(LONCA_HOME, 'image-'));
-  try {
-    const file = path.join(staging, 'image.tar');
-    await saveImage(image, file);
-    await loadTemplate(file);
-    return image;
-  } finally {
-    await removeTree(staging);
-  }
+  throw new SandboxError(`Docker Sandboxes has no template called ${image}. \`sbx template ls\` lists the ones it has, and the README says how to make one.`);
 }
 
 /** Rebuilds from scratch to pick up new versions of the agent CLIs. */
 export function rebuildImage(): Promise<string> {
-  building ??= runBuild({ fresh: true }).finally(() => {
-    building = null;
-  });
-  if (system.sandbox.state !== 'ready') return building;
-  return building.then(() => {
-    buildingSandbox ??= runSandboxBuild({ fresh: true }).finally(() => {
-      buildingSandbox = null;
-    });
-    return buildingSandbox;
-  });
+  return runBuild({ fresh: true });
 }
 
-// A small always-on container for work that doesn't belong to a workspace: signing in,
-// checking sign-in status and reading the Codex model catalog. It stays a container when
-// workspaces are VMs because agents never run in it.
-const TOOLS_CONTAINER = `${PREFIX}-tools`;
+// A small sandbox for what doesn't belong to a workspace: signing in, trying a key, and renewing
+// Codex's sign-in. It's the only place credentials reach outside this server, for as long as one
+// of those takes. Agents never run in it, and it has no proxy secrets because the CLIs here need
+// the real thing. Nothing of the server's is mounted.
+const HELPER = `${PREFIX}-tools`;
 
-export async function toolsContainer(): Promise<string> {
-  const image = await ensureImage();
-  return ensureContainer({
-    name: TOOLS_CONTAINER,
-    hostname: 'lonca-tools',
-    image: async () => image,
-    env: [],
+export function helperSandbox(): Promise<string> {
+  return ensureSandbox({
+    name: HELPER,
+    image: ensureSandboxImage,
+    // Only for tests, to renew a made-up sign-in without going to the real service.
+    env: process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE ? [`CODEX_REFRESH_TOKEN_URL_OVERRIDE=${process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE}`] : [],
+    mounts: [],
+    agentState: paths.agentState('helper'),
+    secrets: [],
     network: 'internet',
+    memoryGb: 1,
+    cpus: 1,
   });
 }
 
-function claudeEnv(credential: string): string[] {
+export function helperRunning(): Promise<boolean> {
+  return isSandboxRunning(HELPER).catch(() => false);
+}
+
+function claudeEnv(credential: string | undefined): string[] {
+  if (!credential) return [];
   return [`${credential.startsWith('sk-ant-oat') ? 'CLAUDE_CODE_OAUTH_TOKEN' : 'ANTHROPIC_API_KEY'}=${credential}`];
 }
 
-/** Secrets exposed to agents and terminals, and to status checks. */
-export function secretEnv(): string[] {
-  const secrets = getSecrets();
-  return [
-    ...(secrets.claudeToken ? claudeEnv(secrets.claudeToken) : []),
-    ...(secrets.githubToken ? [`GH_TOKEN=${secrets.githubToken}`] : []),
-  ];
-}
-
-// `codex login` and `logout` unlink auth.json rather than writing through it, which turns the
-// link to the shared directory into a private file: one workspace signed in, the rest not.
-// Token refreshes do write through the link. Runs inline so it works on workspaces from any image.
-//
 // Signing in with a browser also asks the service for an API key. Codex doesn't use one with this
-// login, every workspace can read what's shared, and a key outlives signing out, so it isn't shared.
-// Startup uses the same script, and it also removes keys an older image already shared.
-const SHARED_CODEX_LOGIN = `${CONTAINER_CREDENTIALS}/codex/auth.json`;
-const SHARE_CODEX_LOGIN = fs.readFileSync(path.join(IMAGE_CONTEXT, 'lonca-share-codex-login'), 'utf8');
-
-export async function shareCodexLogin(containerId: string): Promise<void> {
-  await execText(containerId, ['bash', '-c', SHARE_CODEX_LOGIN, 'lonca-share-codex-login', SHARED_CODEX_LOGIN], { timeoutMs: 10000 });
+// login, and a key outlives signing out, so it isn't kept.
+function withoutIncidentalKey(authJson: string): string {
+  const auth = JSON.parse(authJson) as { auth_mode?: unknown; OPENAI_API_KEY?: unknown };
+  return auth.auth_mode === 'chatgpt' && auth.OPENAI_API_KEY != null ? JSON.stringify({ ...auth, OPENAI_API_KEY: null }) : authJson;
 }
 
-export function parseClaudeStatus(output: string): boolean {
-  try {
-    return Boolean((JSON.parse(output) as { loggedIn?: boolean }).loggedIn);
-  } catch {
-    return false;
-  }
+// Only this server writes the login. A CLI that needs it gets a copy, so that nothing it does
+// meanwhile, or leaves behind, can undo signing out or replace something newer.
+function saveCodexLogin(authJson: string): void {
+  fs.mkdirSync(path.dirname(hostCodexLogin()), { recursive: true, mode: 0o700 });
+  writeAtomic(hostCodexLogin(), withoutIncidentalKey(authJson), 0o600);
+  shareCodexCredentialWithProxy();
 }
 
-export function parseCodexStatus(output: string, code: number | null): boolean {
-  return code === 0 && !/not logged in/i.test(output.trim().split('\n')[0] ?? '');
+/** After `codex login` has finished. A file that isn't a whole login isn't taken for one. */
+export function adoptCodexLogin(authJson: string): boolean {
+  if (!codexCredential(authJson)) return false;
+  saveCodexLogin(authJson);
+  return true;
 }
 
 export function describeClaudeSignIn(credential: string | undefined): Pick<AgentStatus, 'summary' | 'usesKey'> {
@@ -245,11 +171,11 @@ export function describeClaudeSignIn(credential: string | undefined): Pick<Agent
   return { summary: `Using an API key ending in ${credential.slice(-4)}`, usesKey: true };
 }
 
-/** Reads auth.json, which any workspace can write to, so nothing in it is relied on. */
+/** Reads auth.json, whose format belongs to the CLI, so nothing in it is relied on. */
 export function describeCodexSignIn(authJson: string): Pick<AgentStatus, 'summary' | 'usesKey'> {
   try {
     const auth = JSON.parse(authJson) as { auth_mode?: unknown; OPENAI_API_KEY?: unknown; tokens?: { id_token?: unknown } };
-    // A key beside a ChatGPT login isn't what Codex uses. See SHARE_CODEX_LOGIN.
+    // A key beside a ChatGPT login isn't what Codex uses. See withoutIncidentalKey.
     if (auth.auth_mode !== 'chatgpt' && typeof auth.OPENAI_API_KEY === 'string') {
       return { summary: `Using an API key ending in ${auth.OPENAI_API_KEY.slice(-4)}`, usesKey: true };
     }
@@ -271,35 +197,132 @@ async function checkAgents(): Promise<void> {
   }
 }
 
+const hostCodexLogin = () => path.join(paths.helperCredentials, 'codex', 'auth.json');
+
+function readCodexLogin(): string {
+  try {
+    return fs.readFileSync(hostCodexLogin(), 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+/** What the proxy should send for Codex, and when that stops working if it's a sign-in rather than a key. */
+export function codexCredential(authJson: string): { value: string; expiresAt?: number } | null {
+  try {
+    const auth = JSON.parse(authJson) as { auth_mode?: unknown; OPENAI_API_KEY?: unknown; tokens?: { access_token?: unknown } };
+    // A browser sign-in can leave a key beside its tokens, and the sign-in is what was asked for.
+    if (auth.auth_mode !== 'chatgpt' && typeof auth.OPENAI_API_KEY === 'string' && auth.OPENAI_API_KEY) return { value: auth.OPENAI_API_KEY };
+    const token = auth.tokens?.access_token;
+    if (typeof token !== 'string' || !token) return null;
+    return { value: token, expiresAt: tokenExpiry(token) };
+  } catch {
+    return null;
+  }
+}
+
+/** A token of a kind this can't read still has to reach the proxy, so that isn't an error. */
+function tokenExpiry(token: string): number | undefined {
+  try {
+    const { exp } = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')) as { exp?: unknown };
+    return typeof exp === 'number' ? exp * 1000 : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function shareCodexCredentialWithProxy(): void {
+  setBoundaryValue('codex', codexCredential(readCodexLogin())?.value);
+}
+
+/**
+ * Older workspaces have the old directory mounted and can't lose it, so the sign-in moves out from
+ * under them, once. Anything appearing there later came from one of them, so it isn't believed.
+ */
+export function moveCodexLogin(): void {
+  const old = path.join(paths.oldCredentials, 'codex', 'auth.json');
+  // Written last, so that being stopped partway retries the move rather than deleting the only copy.
+  const moved = path.join(paths.helperCredentials, 'moved');
+  fs.mkdirSync(path.dirname(hostCodexLogin()), { recursive: true, mode: 0o700 });
+  if (fs.existsSync(moved) || fs.existsSync(hostCodexLogin())) {
+    fs.rmSync(old, { force: true });
+  } else if (fs.existsSync(old)) {
+    fs.renameSync(old, hostCodexLogin());
+  }
+  fs.writeFileSync(moved, '');
+  // A key kept before they stopped being.
+  const login = readCodexLogin();
+  if (codexCredential(login) && withoutIncidentalKey(login) !== login) saveCodexLogin(login);
+  shareCodexCredentialWithProxy();
+}
+
+// A sign-in lasts about ten days. A CLI inside a workspace can't renew one it never had, so one in
+// the helper does, on a copy it's given and prints back, through its own protocol, which leaves
+// how that's done to the CLI.
+const RENEW_WITHIN_MS = 2 * 24 * 60 * 60 * 1000;
+const RENEW_CODEX_LOGIN = String.raw`
+import json, os, signal, subprocess, sys, tempfile
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
+with tempfile.TemporaryDirectory() as home:
+    auth = os.path.join(home, 'auth.json')
+    with open(auth, 'w') as file:
+        file.write(sys.stdin.read())
+    with open(os.path.join(home, 'config.toml'), 'w') as file:
+        file.write('cli_auth_credentials_store = "file"\n')
+    codex = subprocess.Popen(['codex', 'app-server'], env={**os.environ, 'CODEX_HOME': home}, start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        for message in [
+            {'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'lonca', 'version': '1'}}},
+            {'method': 'initialized', 'params': {}},
+            {'id': 2, 'method': 'account/read', 'params': {'refreshToken': True}},
+        ]:
+            codex.stdin.write(json.dumps(message) + '\n')
+            codex.stdin.flush()
+        for line in codex.stdout:
+            if json.loads(line).get('id') == 2:
+                break
+    finally:
+        # The whole group, since the command is a launcher with the real CLI as its child.
+        os.killpg(codex.pid, signal.SIGKILL)
+        codex.wait()
+    with open(auth) as file:
+        sys.stdout.write(file.read())
+`;
+
+async function renewCodexLogin(): Promise<void> {
+  const current = readCodexLogin();
+  const login = codexCredential(current);
+  if (!login?.expiresAt || login.expiresAt - Date.now() > RENEW_WITHIN_MS || system.sandbox.state !== 'ready') return;
+  try {
+    const result = await exec(await helperSandbox(), ['timeout', '60', 'python3', '-I', '-c', RENEW_CODEX_LOGIN], { stdin: current, timeoutMs: 70000 });
+    const renewed = result.stdout.toString('utf8');
+    const after = codexCredential(renewed);
+    if (result.code !== 0 || !after) throw new Error(result.stderr.toString('utf8').trim());
+    // Signing out or in while this ran counts for more.
+    if (readCodexLogin() === current) saveCodexLogin(renewed);
+    if (after.expiresAt === login.expiresAt) throw new Error('it still runs out when it did');
+  } catch (error) {
+    console.error('could not renew the Codex sign-in:', errorMessage(error));
+  }
+}
+
+/** What's saved here decides this. The CLIs' own status commands only read the same things. */
 async function readAgentStatus(): Promise<void> {
-  const id = await toolsContainer();
-  await shareCodexLogin(id);
-  const [claude, codex, codexAuth] = await Promise.allSettled([
-    exec(id, ['claude', 'auth', 'status'], { env: secretEnv(), timeoutMs: 30000 }),
-    exec(id, ['codex', 'login', 'status'], { timeoutMs: 30000 }),
-    exec(id, ['head', '-c', '65536', SHARED_CODEX_LOGIN], { timeoutMs: 10000 }),
-  ]);
-  // A status check that couldn't run or hit its time limit says nothing, so the last answer stands.
-  const answered = (check: PromiseSettledResult<ExecResult>): check is PromiseFulfilledResult<ExecResult> => (
-    check.status === 'fulfilled' && check.value.code !== 124 && check.value.code !== 137
-  );
-  if (answered(claude)) {
-    const signedIn = parseClaudeStatus(claude.value.stdout.toString('utf8'));
-    system.agents.claude = {
-      signedIn,
-      ...(signedIn ? describeClaudeSignIn(getSecrets().claudeToken) : {}),
-      rejected: signedIn ? system.agents.claude.rejected : undefined,
-    };
-  }
-  if (answered(codex)) {
-    const signedIn = parseCodexStatus(codex.value.stdout.toString('utf8') + codex.value.stderr.toString('utf8'), codex.value.code);
-    const auth = codexAuth.status === 'fulfilled' ? codexAuth.value.stdout.toString('utf8') : '';
-    system.agents.codex = {
-      signedIn,
-      ...(signedIn ? describeCodexSignIn(auth) : {}),
-      rejected: signedIn ? system.agents.codex.rejected : undefined,
-    };
-  }
+  await renewCodexLogin();
+  shareCodexCredentialWithProxy();
+  const token = getSecrets().claudeToken;
+  system.agents.claude = {
+    signedIn: Boolean(token),
+    ...describeClaudeSignIn(token),
+    rejected: token ? system.agents.claude.rejected : undefined,
+  };
+  const login = readCodexLogin();
+  const signedIn = codexCredential(login) !== null;
+  system.agents.codex = {
+    signedIn,
+    ...(signedIn ? describeCodexSignIn(login) : {}),
+    rejected: signedIn ? system.agents.codex.rejected : undefined,
+  };
 }
 
 let checking: Promise<void> | null = null;
@@ -341,12 +364,11 @@ const CHECKS_DISABLED = process.env.LONCA_SKIP_CREDENTIAL_CHECK === '1';
 /** Tries a key for real, the way an agent would use it, so "signed in" means it works. */
 export async function checkClaudeCredential(credential: string): Promise<CredentialCheck> {
   if (CHECKS_DISABLED) return 'accepted';
-  const id = await toolsContainer();
   const prompt = 'Reply with the word ok.';
-  const result = await exec(id, [
+  const result = await helperSandbox().then((helper) => exec(helper, [
     'claude', '-p', prompt, '--model', 'claude-haiku-5-5', '--output-format', 'json', '--tools', '',
     '--no-session-persistence', '--system-prompt', prompt,
-  ], { env: claudeEnv(credential), workdir: '/tmp', timeoutMs: 60000 }).catch(() => null);
+  ], { env: claudeEnv(credential), workdir: '/tmp', timeoutMs: 60000 })).catch(() => null);
   if (!result) return 'unknown';
   try {
     const outcome = JSON.parse(result.stdout.toString('utf8')) as { is_error?: boolean; result?: string };
@@ -359,15 +381,12 @@ export async function checkClaudeCredential(credential: string): Promise<Credent
 
 export async function checkCodexKey(key: string): Promise<CredentialCheck> {
   if (CHECKS_DISABLED) return 'accepted';
-  const id = await toolsContainer();
-  const result = await exec(
-    id,
-    ['bash', '-c', 'curl -s -o /dev/null -m 20 -w "%{http_code}" -H "Authorization: Bearer $KEY" https://api.openai.com/v1/models'],
-    { env: [`KEY=${key}`], timeoutMs: 30000 },
-  ).catch(() => null);
-  const status = result?.stdout.toString('utf8').trim();
-  if (status === '401') return 'refused';
-  return status && status !== '000' ? 'accepted' : 'unknown';
+  try {
+    const response = await fetch('https://api.openai.com/v1/models', { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(20000) });
+    return response.status === 401 ? 'refused' : response.ok ? 'accepted' : 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 export function parseCodexCatalog(output: string): ModelOption[] {
@@ -392,17 +411,23 @@ export function parseCodexCatalog(output: string): ModelOption[] {
     }));
 }
 
-/** The picker offers what the CLI in the image actually supports. */
-export async function refreshCatalog(): Promise<void> {
-  const id = await toolsContainer();
-  const result = await exec(id, ['codex', 'debug', 'models'], { timeoutMs: 30000 });
-  if (result.code !== 0) return;
-  const models = parseCodexCatalog(result.stdout.toString('utf8'));
-  if (models.length === 0) return;
-  const catalog: Catalog = { ...state.catalog, codex: { label: 'Codex', models } };
-  state.catalog = catalog;
-  saveState();
-  publishSystem();
+/** The picker offers what the CLI in the template actually supports, which only changes with the template. */
+export async function refreshCodexCatalog(): Promise<void> {
+  const template = templateTag();
+  if (state.catalogTemplate === template) return;
+  try {
+    const result = await exec(await helperSandbox(), ['codex', 'debug', 'models'], { timeoutMs: 60000 });
+    if (result.code !== 0) throw new Error(result.stderr.toString('utf8').trim());
+    const models = parseCodexCatalog(result.stdout.toString('utf8'));
+    if (models.length === 0) throw new Error('it listed none');
+    const catalog: Catalog = { ...state.catalog, codex: { label: 'Codex', models } };
+    state.catalog = catalog;
+    state.catalogTemplate = template;
+    saveState();
+    publishSystem();
+  } catch (error) {
+    console.error('could not read Codex’s models:', errorMessage(error));
+  }
 }
 
 export function agentLoginCommand(agent: AgentId, method: LoginMethod): string[] {
@@ -410,15 +435,11 @@ export function agentLoginCommand(agent: AgentId, method: LoginMethod): string[]
   return method === 'device' ? ['codex', 'login', '--device-auth'] : ['codex', 'login'];
 }
 
-export async function signOutCodex(): Promise<void> {
-  const id = await toolsContainer();
-  await shareCodexLogin(id);
-  await execText(id, ['rm', '-f', SHARED_CODEX_LOGIN]);
+export function signOutCodex(): void {
+  fs.rmSync(hostCodexLogin(), { force: true });
+  shareCodexCredentialWithProxy();
 }
 
-export async function saveCodexApiKey(key: string): Promise<void> {
-  const id = await toolsContainer();
-  const result = await exec(id, ['codex', 'login', '--with-api-key'], { stdin: key });
-  if (result.code !== 0) throw new Error(result.stderr.toString('utf8').trim() || 'Codex rejected the API key');
-  await shareCodexLogin(id);
+export function saveCodexApiKey(key: string): void {
+  saveCodexLogin(JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: key }));
 }

@@ -1,10 +1,13 @@
 import { useEffect, useRef } from 'react';
 import { ArrowUp, Paperclip, Plus, Square, X } from 'lucide-react';
 import { create } from 'zustand';
+import { canRun } from '../../../shared/lead.ts';
 import type { Attachment, Session, Workspace } from '../../../shared/types.ts';
 import { api } from '../api.ts';
+import { isTouch } from '../hooks.ts';
 import { attempt, useStore } from '../store.ts';
 import { type ModelChoice, ModelPicker } from './ModelPicker.tsx';
+import { LockedModel } from './Team.tsx';
 import { IconButton, Spinner } from './ui.tsx';
 
 interface Draft {
@@ -23,7 +26,7 @@ const updateDraft = (sessionId: string, update: (draft: Draft) => Draft) => {
 export function Composer({ session, workspace }: { session: Session; workspace: Workspace }) {
   const catalog = useStore((store) => store.catalog);
   const agentStatus = useStore((store) => store.system.agents[session.agent]);
-  const agentsChecked = useStore((store) => store.system.agentsChecked);
+  const cantRun = useStore((store) => !canRun(session.agent, store.system, store.projects.find((entry) => entry.id === workspace.projectId)));
   const setLoginAgent = useStore((store) => store.setLoginAgent);
   // A sign-in error at the end of the chat already says this, right above.
   const justAsked = useStore((store) => {
@@ -38,14 +41,16 @@ export function Composer({ session, workspace }: { session: Session; workspace: 
   const blocked = ['archived', 'archiving', 'error', 'deleting', 'stopping'].includes(workspace.status);
 
   useEffect(() => {
-    textarea.current?.focus();
+    // Focusing would bring up an on-screen keyboard for someone who only wants to read.
+    if (!isTouch()) textarea.current?.focus();
   }, [session.id]);
 
   useEffect(() => {
     const element = textarea.current;
     if (!element) return;
     element.style.height = 'auto';
-    element.style.height = `${Math.min(element.scrollHeight, 320)}px`;
+    const tallest = isTouch() ? Math.min(320, window.innerHeight * 0.3) : 320;
+    element.style.height = `${Math.min(element.scrollHeight, tallest)}px`;
   }, [text]);
 
   const updateText = (value: string) => {
@@ -99,15 +104,23 @@ export function Composer({ session, workspace }: { session: Session; workspace: 
   };
 
   const agentLabel = catalog[session.agent].label;
+  const locked = session.role === 'agent' || (session.role === 'lead' && Boolean(workspace.leadLockedAt));
   const placeholder = ['creating', 'restoring', 'rebuilding', 'starting'].includes(workspace.status)
     ? 'Write now, and this sends once the workspace is ready'
-    : session.status === 'running'
-      ? 'Send a follow-up for when this turn finishes'
-      : `Ask ${agentLabel} to do something in ${workspace.name}`;
+    : session.role === 'agent'
+      ? 'Message this agent directly. The Lead is told.'
+      : session.status === 'running'
+        ? 'Send a follow-up for when this turn finishes'
+        : session.role === 'lead'
+          ? session.hasMessages ? 'Ask or tell the Lead something' : `Tell the Lead what you want done in ${workspace.name}`
+          : `Ask ${agentLabel} to do something in ${workspace.name}`;
 
   return (
     <div className="composer-wrap">
-      {agentsChecked && (!agentStatus.signedIn || agentStatus.rejected) && !justAsked && (
+      {session.role === 'lead' && !locked && (
+        <div className="composer-hint">The Lead’s model locks when you send the first message.</div>
+      )}
+      {cantRun && !justAsked && (
         <div className="composer-hint">
           {agentStatus.rejected ? `${agentLabel} stopped accepting this sign-in.` : `${agentLabel} isn’t signed in yet.`}
           <button type="button" className="link-button" onClick={() => setLoginAgent(session.agent)}>
@@ -153,19 +166,22 @@ export function Composer({ session, workspace }: { session: Session; workspace: 
           onChange={(event) => updateText(event.target.value)}
           onPaste={onPaste}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+            // An on-screen keyboard has no Shift-Enter, so its Enter starts a new line and the button sends.
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !isTouch()) {
               event.preventDefault();
               void send();
             }
           }}
         />
         <div className="composer-bar">
-          <ModelPicker
-            catalog={catalog}
-            value={{ agent: session.agent, model: session.model, effort: session.effort }}
-            lockAgent={session.hasMessages}
-            onChange={changeModel}
-          />
+          {locked ? <LockedModel session={session} /> : (
+            <ModelPicker
+              catalog={catalog}
+              value={{ agent: session.agent, model: session.model, effort: session.effort }}
+              lockAgent={session.hasMessages}
+              onChange={changeModel}
+            />
+          )}
           <span className="spacer" />
           <input
             ref={fileInput}

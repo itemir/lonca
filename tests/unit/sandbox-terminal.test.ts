@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 vi.mock('../../server/ssh-agent.ts', () => ({ emptyAgent: async () => '' }));
 
 let root: string;
-let tty: Awaited<ReturnType<typeof import('../../server/sandbox.ts').sandboxTty>>;
+let tty: Awaited<ReturnType<typeof import('../../server/sandbox.ts').execTty>>;
 beforeEach(async () => {
   vi.resetModules();
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'lonca-tty-test-'));
@@ -32,8 +32,8 @@ case "$1" in
     ;;
 esac
 `, { mode: 0o700 });
-  const { sandboxTty } = await import('../../server/sandbox.ts');
-  tty = await sandboxTty('test', ['bash'], {});
+  const { execTty } = await import('../../server/sandbox.ts');
+  tty = await execTty('test', ['bash'], {});
   tty.stream.resume();
   await vi.waitFor(() => expect(fs.existsSync(path.join(root, 'started'))).toBe(true));
 });

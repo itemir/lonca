@@ -1,14 +1,23 @@
 #!/bin/bash
-# Stands in for the `sbx` CLI, so Lonca's whole sandbox path runs in tests without a Docker
-# account: the same commands and output, except that a "sandbox" is a plain Docker container. It
-# can't stand in for the VM itself, its network policy or virtiofs. Those need the real thing:
+# Stands in for the `sbx` CLI, so Lonca's whole path runs in tests without a Docker account: the
+# same commands and output, except that a "sandbox" is a plain Docker container. It can't stand in
+# for the VM itself, its network policy, its proxy or virtiofs. Those need the real thing:
 # npm run test:sandbox
 set -u
 state="${FAKE_SBX_DIR:?}"
 prefix="lonca-${LONCA_INSTANCE:-}"
 marker="dev.lonca.fake-sbx=1"
+template_marker="dev.lonca.fake-sbx-template=1"
+base=docker/sandbox-templates:shell-docker
 filters=(--filter "label=$marker")
 if [ -n "${LONCA_INSTANCE:-}" ]; then filters+=(--filter "label=dev.lonca.instance=$prefix"); fi
+
+# A test can cut one server off from Docker Sandboxes, leaving its sandboxes running and the test's
+# own commands, which don't name an instance, working.
+if [ -n "${LONCA_INSTANCE:-}" ] && [ -e "$state/offline-$LONCA_INSTANCE" ]; then
+  echo 'error: cannot connect to sandboxd' >&2
+  exit 125
+fi
 
 signed_in() {
   if [ -e "$state/signed-out" ]; then
@@ -23,11 +32,17 @@ list() {
   local separator=''
   while IFS=$'\t' read -r name status; do
     [ -n "$name" ] || continue
-    [ "$status" = running ] || status=stopped
+    # A paused one still says it's running, but can't be reached.
+    [ "$status" = running ] || [ "$status" = paused ] || status=stopped
+    [ "$status" != paused ] || status=running
     printf '%s{"name":"%s","agent":"shell","status":"%s","detached":true}' "$separator" "$name" "$status"
     separator=','
   done < <(docker ps -a "${filters[@]}" --format '{{.Names}}	{{.State}}')
   printf ']\n'
+}
+
+templates() {
+  docker images --filter "label=$template_marker" --format '{{.Repository}}:{{.Tag}}'
 }
 
 run_sandbox() {
@@ -62,19 +77,20 @@ run_sandbox() {
     exit 1
   fi
   if docker inspect "$name" >/dev/null 2>&1; then
+    [ ! -e "$state/slow-start" ] || sleep 2
     docker start "$name" >/dev/null
     echo "$name"
     return
   fi
-  if ! grep -qxF "$template" "$state/templates" 2>/dev/null; then
-    echo "error: template $template isn't loaded" >&2
+  if [ "$template" != "$base" ] && ! templates | grep -qxF "$template"; then
+    echo "error: cannot create sandbox: image \"$template\" is not cached locally and pull_policy=never" >&2
     exit 1
   fi
-  # The real one plants placeholders for its proxy to replace, whether or not it holds any secrets.
+  # The real one plants a placeholder for its proxy to replace, whether or not it holds any secrets.
   echo "run $name template=$template deny=${denied[*]-} ${options[*]-}" >> "$state/calls.log"
-  docker run -d --init --name "$name" --label "dev.lonca.instance=$prefix" --label "$marker" \
+  docker run -d --init --name "$name" --hostname "${name:0:63}" --label "dev.lonca.instance=$prefix" --label "$marker" \
     --add-host host.docker.internal:host-gateway --user agent --workdir "$workdir" --entrypoint sleep \
-    --env ANTHROPIC_API_KEY=proxy-managed --env OPENAI_API_KEY=proxy-managed --env GH_TOKEN=gho_proxy-managed-placeholder-for-tests00 \
+    --env GH_TOKEN=gho_proxy-managed-placeholder-for-tests00 \
     ${options[@]+"${options[@]}"} ${mounts[@]+"${mounts[@]}"} "$template" infinity >/dev/null || exit 1
   echo "$name"
 }
@@ -101,6 +117,10 @@ exec_in_sandbox() {
     echo "error: sandbox $name not found" >&2
     exit 125
   fi
+  if [ "$(docker inspect --format '{{.State.Paused}}' "$name")" = true ]; then
+    echo "error: sandbox $name isn't responding" >&2
+    exit 125
+  fi
   # Like the real one, it starts a stopped sandbox.
   if [ "$running" != true ]; then
     local purpose='command'
@@ -120,7 +140,7 @@ exec_in_sandbox() {
 command=${1:-}
 [ $# -eq 0 ] || shift
 case "$command" in
-  version) echo 'sbx version v0.50.1 fake' ;;
+  version) echo 'sbx version v0.51.0 fake' ;;
   diagnose)
     status=$(cat "$state/virtualization" 2>/dev/null || echo pass)
     printf '{"version":"1.0","checks":[{"name":"Virtualization","status":"%s","message":"not supported here","detail":"","hint":"Turn on hardware virtualization"}]}\n' "$status"
@@ -135,29 +155,44 @@ case "$command" in
     echo "rm $1" >> "$state/calls.log"
     docker rm -f "$1" >/dev/null
     ;;
+  cp) signed_in; docker cp "$@" ;;
+  secret)
+    signed_in
+    echo "secret $*" >> "$state/calls.log"
+    ;;
   policy)
     signed_in
     echo "policy $*" >> "$state/calls.log"
     if [ "${1:-}" = init ] && [ -e "$state/policy" ]; then echo 'error: policy already initialized' >&2; exit 1; fi
     if [ "${1:-}" = init ]; then echo "$2" > "$state/policy"; fi
     ;;
+  settings) signed_in; echo true ;;
   template)
     signed_in
     case "${1:-}" in
       ls)
         if [ "${2:-}" = --quiet ] || [ "${2:-}" = -q ]; then
-          cat "$state/templates" 2>/dev/null || true
+          templates
           exit 0
         fi
         printf '['
         separator=''
-        while read -r line; do printf '%s{"tag":"%s"}' "$separator" "$line"; separator=','; done < <(cat "$state/templates" 2>/dev/null)
+        while read -r line; do printf '%s{"tag":"%s"}' "$separator" "$line"; separator=','; done < <(templates)
         printf ']\n'
         ;;
-      load)
-        output=$(docker load --input "$2") || exit 1
-        echo "$output" | sed -n 's/^Loaded image: //p' >> "$state/templates"
-        echo "$output"
+      save)
+        # Like the real one, it won't save a running sandbox.
+        if [ "$(docker inspect --format '{{.State.Running}}' "$2" 2>/dev/null)" = true ]; then
+          echo 'error: stdin is not a terminal; run this command in a terminal to answer the prompt' >&2
+          exit 1
+        fi
+        docker commit --change "LABEL ${template_marker%%=*}=1" "$2" "$3" >/dev/null || exit 1
+        echo "Saved template $3"
+        ;;
+      rm)
+        shift
+        [ "${1:-}" = --force ] && shift
+        docker rmi --force "$1" >/dev/null 2>&1 || true
         ;;
       *) echo "error: unknown template command" >&2; exit 1 ;;
     esac

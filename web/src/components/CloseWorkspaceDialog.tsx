@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { useMatch, useNavigate } from 'react-router-dom';
 import type { Workspace } from '../../../shared/types.ts';
 import { api } from '../api.ts';
-import { runtimeName } from '../format.ts';
 import { attempt, useStore } from '../store.ts';
 import { Modal } from './ui.tsx';
 
@@ -38,9 +37,8 @@ export function CloseWorkspaceDialog({ workspace, onClose }: { workspace: Worksp
   const agentWorking = useStore((store) => store.sessions.some((session) => session.workspaceId === workspace.id && session.status === 'running'));
   const [uncommitted, setUncommitted] = useState<number | null>(null);
   const ready = workspace.status === 'ready';
-  const runtime = runtimeName(workspace);
 
-  // The dialog doesn't wait for this: a busy runtime can be slow to answer, and a stopped one isn't woken just to ask.
+  // The dialog doesn't wait for this: a busy sandbox can be slow to answer, and a stopped one isn't woken just to ask.
   useEffect(() => {
     if (!ready) return;
     api.changes(workspace.id).then((changes) => setUncommitted(changes.uncommitted), () => {});
@@ -67,12 +65,12 @@ export function CloseWorkspaceDialog({ workspace, onClose }: { workspace: Worksp
         {workspace.status === 'archived' ? (
           <p>Its chat and branch are removed, including commits that were never pushed.</p>
         ) : deletes(workspace) ? (
-          <p>Its {runtime}, checkout, chat and branch are removed, including commits that were never pushed.</p>
+          <p>Its virtual machine, checkout, chat and branch are removed, including commits that were never pushed.</p>
         ) : (
           <>
             <div>
               {agentWorking && <p className="close-warning">An agent is working here and will be stopped.</p>}
-              <p>Its {runtime} and checkout are removed, along with any git-ignored files and attachments.</p>
+              <p>Its virtual machine and checkout are removed, along with any git-ignored files and attachments.</p>
               <p className={uncommitted ? 'close-warning' : undefined}>{uncommittedLine(uncommitted)}</p>
             </div>
             <p>Its branch and chat are kept, so you can restore it later or delete it for good from the archived list in the sidebar.</p>

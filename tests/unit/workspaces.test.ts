@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Project, Session, Workspace } from '../../shared/types.ts';
-import { createWorkspace, runtimeName } from '../../server/workspaces.ts';
+import { createWorkspace, sandboxNameFor } from '../../server/workspaces.ts';
 import { projectLifecycle } from '../../server/projects.ts';
 
 const { state, ports } = vi.hoisted(() => ({
@@ -24,12 +24,10 @@ vi.mock('../../server/store.ts', () => ({
 
 vi.mock('../../server/system.ts', () => ({
   checkSandboxes: async () => {},
-  system: { sandbox: { state: 'off' } },
-  // Keep provisioning waiting on its image; this test exercises allocation, without Docker.
-  ensureImage: () => new Promise<string>(() => {}),
-  ensureSandboxImage: vi.fn(),
+  system: { sandbox: { state: 'ready' } },
+  // Keep provisioning waiting on its template; this test exercises allocation, without sandboxes.
+  ensureSandboxImage: () => new Promise<string>(() => {}),
   ensureCustomTemplate: vi.fn(),
-  secretEnv: () => [],
 }));
 
 vi.mock('node:net', () => ({
@@ -69,7 +67,7 @@ describe('workspace allocation', () => {
     expect(workspaces[0].name).not.toBe(workspaces[1].name);
     expect(workspaces[0].branch).not.toBe(workspaces[1].branch);
     expect(new Set(workspaces.map((workspace) => workspace.path)).size).toBe(3);
-    expect(new Set(workspaces.map((workspace) => workspace.containerName)).size).toBe(3);
+    expect(new Set(workspaces.map((workspace) => workspace.sandboxName)).size).toBe(3);
     expect(new Set(workspaces.map((workspace) => workspace.port)).size).toBe(3);
     expect(state.workspaces).toHaveLength(3);
   });
@@ -113,25 +111,25 @@ describe('workspace allocation', () => {
 
 describe('naming a workspace’s container or sandbox', () => {
   it('keeps the plain name when it fits', () => {
-    expect(runtimeName('lonca', 'saillogger', 'milan', 'abcdefabcdef')).toBe('lonca-saillogger-milan');
+    expect(sandboxNameFor('lonca', 'saillogger', 'milan', 'abcdefabcdef')).toBe('lonca-saillogger-milan');
   });
 
   it('stays within the 63 characters Docker Sandboxes allows, and apart from similar projects', () => {
     const long = 'a-repository-whose-name-goes-on-and-on-for-quite-a-while';
-    const first = runtimeName('lonca', long, 'wellington', 'abcdefabcdef');
-    const second = runtimeName('lonca', `${long}-too`, 'wellington', 'abcdefabcdef');
+    const first = sandboxNameFor('lonca', long, 'wellington', 'abcdefabcdef');
+    const second = sandboxNameFor('lonca', `${long}-too`, 'wellington', 'abcdefabcdef');
     for (const name of [first, second]) {
       expect(name.length).toBeLessThanOrEqual(63);
       expect(name).toMatch(/^lonca-a-repository-.*-wellington$/);
       expect(name).not.toMatch(/--/);
     }
     expect(first).not.toBe(second);
-    expect(runtimeName('lonca-operation-recovery-sandbox', 'lonca-fixture-neir3f', 'wellington', 'abcdefabcdef').length).toBeLessThanOrEqual(63);
+    expect(sandboxNameFor('lonca-operation-recovery-sandbox', 'lonca-fixture-neir3f', 'wellington', 'abcdefabcdef').length).toBeLessThanOrEqual(63);
   });
 
   it('falls back to the workspace’s ID, and refuses a prefix too long for even that', () => {
     const prefix = `lonca-${'x'.repeat(40)}`;
-    expect(runtimeName(prefix, 'project', 'cape-town-12', 'abcdefabcdef')).toBe(`${prefix}-abcdefabcdef`);
-    expect(() => runtimeName(`lonca-${'x'.repeat(60)}`, 'project', 'milan', 'abcdefabcdef')).toThrow(/LONCA_INSTANCE/);
+    expect(sandboxNameFor(prefix, 'project', 'cape-town-12', 'abcdefabcdef')).toBe(`${prefix}-abcdefabcdef`);
+    expect(() => sandboxNameFor(`lonca-${'x'.repeat(60)}`, 'project', 'milan', 'abcdefabcdef')).toThrow(/LONCA_INSTANCE/);
   });
 });

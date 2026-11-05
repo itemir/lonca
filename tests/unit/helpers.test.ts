@@ -3,7 +3,7 @@ import { isClaudeCredential } from '../../server/store.ts';
 import { normalizeCheck, parseNameStatus, parseNumstat, safeAttachmentName, safeRelativePath } from '../../server/inspect.ts';
 import { pickWorkspaceName } from '../../server/names.ts';
 import { normalizeRemoteUrl, parseGithubOwner, repoNameFromUrl, stripUrlCredentials } from '../../server/projects.ts';
-import { describeClaudeSignIn, describeCodexSignIn, parseClaudeStatus, parseCodexCatalog, parseCodexStatus } from '../../server/system.ts';
+import { describeClaudeSignIn, describeCodexSignIn, parseCodexCatalog } from '../../server/system.ts';
 import { KeyedQueue, slugify } from '../../server/util.ts';
 
 describe('paths from clients', () => {
@@ -69,23 +69,11 @@ describe('repository URLs', () => {
 });
 
 describe('agent status', () => {
-  it('reads Claude’s JSON status', () => {
-    expect(parseClaudeStatus('{"loggedIn":true,"authMethod":"claude.ai"}')).toBe(true);
-    expect(parseClaudeStatus('{"loggedIn":false}')).toBe(false);
-    expect(parseClaudeStatus('oops')).toBe(false);
-  });
-
-  it('reads Codex’s text status', () => {
-    expect(parseCodexStatus('Logged in using ChatGPT\n', 0)).toBe(true);
-    expect(parseCodexStatus('API key configured - sk-***\n', 0)).toBe(true);
-    expect(parseCodexStatus('Not logged in\n', 0)).toBe(false);
-    expect(parseCodexStatus('Not logged in\n', 1)).toBe(false);
-  });
-
   it('describes how each agent is signed in, in plain words', () => {
     expect(describeClaudeSignIn('sk-ant-oat01-abcdefgh')).toMatchObject({ summary: 'Signed in with your Claude subscription', usesKey: false });
     expect(describeClaudeSignIn('sk-ant-api03-abcdefgh')).toMatchObject({ summary: 'Using an API key ending in efgh', usesKey: true });
     expect(describeClaudeSignIn(undefined)).toEqual({});
+    expect(describeCodexSignIn(JSON.stringify({ auth_mode: 'chatgpt', OPENAI_API_KEY: 'sk-beside-it' }))).toMatchObject({ usesKey: false });
     expect(describeCodexSignIn(JSON.stringify({ OPENAI_API_KEY: 'sk-abcd1234' }))).toMatchObject({ summary: 'Using an API key ending in 1234', usesKey: true });
     const payload = Buffer.from(JSON.stringify({ email: 'me@example.com' })).toString('base64url');
     expect(describeCodexSignIn(JSON.stringify({ tokens: { id_token: `h.${payload}.s` } })).summary).toBe('Signed in with ChatGPT as me@example.com');

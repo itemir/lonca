@@ -4,18 +4,17 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import type { Workspace } from '../../shared/types.ts';
 
-const { state, isContainerRunning, execText, execTty } = vi.hoisted(() => ({
+const { state, isSandboxRunning, execText, execTty } = vi.hoisted(() => ({
   state: { workspaces: [] as Workspace[] },
-  isContainerRunning: vi.fn(), execText: vi.fn(), execTty: vi.fn(),
+  isSandboxRunning: vi.fn(), execText: vi.fn(), execTty: vi.fn(),
 }));
-vi.mock('../../server/containers.ts', () => ({ isContainerRunning, stopContainer: vi.fn() }));
-vi.mock('../../server/docker.ts', () => ({ execText, execTty }));
+vi.mock('../../server/sandbox.ts', () => ({ isSandboxRunning, stopSandbox: vi.fn(), execText, execTty }));
 vi.mock('../../server/env.ts', () => ({ execEnv: () => [] }));
 vi.mock('../../server/events.ts', () => ({ publish: vi.fn() }));
 vi.mock('../../server/store.ts', () => ({ state, flushState: vi.fn(), getProject: vi.fn() }));
 vi.mock('../../server/system.ts', () => ({ system: { sandbox: { state: 'ready' } } }));
 vi.mock('../../server/workspaces.ts', () => ({
-  publishWorkspace: vi.fn(), runningContainer: async () => 'sandbox:test', runtimeHandle: () => 'sandbox:test',
+  publishWorkspace: vi.fn(), runningSandbox: async () => 'test',
 }));
 
 let workspace: Workspace;
@@ -27,8 +26,8 @@ beforeEach(() => {
   now = Date.now();
   vi.spyOn(Date, 'now').mockImplementation(() => now);
   state.workspaces = [];
-  workspace = { id: 'abcdefghijkl', runtime: 'sandbox', status: 'ready', steps: [{ id: 'setup', status: 'pending' }] } as Workspace;
-  isContainerRunning.mockResolvedValue(true);
+  workspace = { id: 'abcdefghijkl', sandboxName: 'test', status: 'ready', steps: [{ id: 'setup', status: 'pending' }] } as Workspace;
+  isSandboxRunning.mockResolvedValue(true);
   execText.mockResolvedValue('');
   stream = new PassThrough();
   execTty.mockResolvedValue({ stream, resize: async () => {}, exitCode: async () => 137 });
@@ -120,7 +119,7 @@ it.each(['leader', 'jobs'])('recovers a legacy Run script with %s alive and can 
 
   execText.mockClear();
   await terminals.closeTerminal(id);
-  expect(execText).toHaveBeenCalledWith('sandbox:test', expect.arrayContaining(['stop', `${TTY_DIR}/${id}.pid`]), expect.anything());
+  expect(execText).toHaveBeenCalledWith('test', expect.arrayContaining(['stop', `${TTY_DIR}/${id}.pid`]), expect.anything());
   expect(terminals.listTerminals()).toEqual([]);
 });
 
@@ -138,10 +137,10 @@ it('does not inspect a new workspace whose live terminals are already tracked', 
   state.workspaces.push(workspace);
   await terminals.createShell(workspace);
   execText.mockClear();
-  isContainerRunning.mockClear();
+  isSandboxRunning.mockClear();
   await terminals.reconcileTerminals();
   expect(execText).not.toHaveBeenCalled();
-  expect(isContainerRunning).not.toHaveBeenCalled();
+  expect(isSandboxRunning).not.toHaveBeenCalled();
 });
 
 it('recovers preexisting terminals and retires them without exec when their runtime stops', async () => {
@@ -152,7 +151,7 @@ it('recovers preexisting terminals and retires them without exec when their runt
   await terminals.reconcileTerminals();
   expect(terminals.listTerminals()).toEqual([expect.objectContaining({ id: 'abcdefghijkl-setup', status: 'running', disconnected: true })]);
   execText.mockClear();
-  isContainerRunning.mockResolvedValue(false);
+  isSandboxRunning.mockResolvedValue(false);
   await terminals.reconcileTerminals();
   expect(terminals.listTerminals()[0].status).toBe('exited');
   expect(execText).not.toHaveBeenCalled();
@@ -171,7 +170,7 @@ it.each([false, true])('defers an interrupted terminal check and retains its res
   expect(execText).not.toHaveBeenCalled();
 
   now += 6000;
-  isContainerRunning.mockResolvedValue(running);
+  isSandboxRunning.mockResolvedValue(running);
   const { TTY_DIR } = await import('../../server/config.ts');
   execText.mockResolvedValue(`${TTY_DIR}/${terminal.id}.pid\tdead\n`);
   await terminals.reconcileTerminals();

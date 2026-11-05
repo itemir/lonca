@@ -1,4 +1,4 @@
-// Drives the real web app in a browser against a real server, real containers and the
+// Drives the real web app in a browser against a real server, real sandboxes and the
 // real agent CLIs. Only the model behind the CLIs is scripted; see tests/support/mock-llm.ts.
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -7,9 +7,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { type Locator, type Page, expect, test } from '@playwright/test';
 import type { Project, Workspace } from '../../shared/types.ts';
-import {
-  FAKE_SBX, FAKE_SBX_DIR, Lonca, REPO_ROOT, dockerExec, installFakeSignIn, makeFixtureRepo, removeFakeSignIn, setFakeSignIn, until,
-} from '../support/harness.ts';
+import { FAKE_SBX, FAKE_SBX_DIR, Lonca, REPO_ROOT, sandboxExec, installFakeSignIn, makeFixtureRepo, removeFakeSignIn, setFakeSignIn, until, git } from '../support/harness.ts';
 import { type MockLlm, startMockLlm } from '../support/mock-llm.ts';
 
 const SHOTS = path.join(REPO_ROOT, 'test-results', 'shots');
@@ -39,7 +37,7 @@ async function currentWorkspace(): Promise<Workspace> {
 async function waitForReady(): Promise<Workspace> {
   const workspace = await currentWorkspace();
   const ready = await lonca.waitForWorkspace(workspace.id);
-  await expect(page.locator('[data-step="container"]')).toContainText('Running in its own container');
+  await expect(page.locator('[data-step="sandbox"]')).toContainText('Running in its own virtual machine');
   return ready;
 }
 
@@ -57,7 +55,7 @@ async function waitForTurn(): Promise<void> {
 }
 
 function useMock(workspace: Workspace): void {
-  dockerExec(workspace.containerName, `cat > ~/.codex/config.toml <<EOF
+  sandboxExec(workspace.sandboxName, `cat > ~/.codex/config.toml <<EOF
 cli_auth_credentials_store = "file"
 model_provider = "mock"
 [model_providers.mock]
@@ -142,9 +140,9 @@ test('removes the token from the address bar and keeps it from other ports', asy
 
 test('first run guides you through setup', async () => {
   await expect(page.getByRole('heading', { name: 'Get set up' })).toBeVisible();
-  await expect(page.getByText(/Docker .* is running/)).toBeVisible();
-  await expect(page.getByText('The workspace image is ready')).toBeVisible({ timeout: 300000 });
-  await expect(page.getByText('Docker ready')).toBeVisible();
+  await expect(page.getByText(/Each workspace gets its own virtual machine, using Docker Sandboxes/)).toBeVisible({ timeout: 60000 });
+  await expect(page.getByText('The workspace template is ready')).toBeVisible({ timeout: 300000 });
+  await expect(page.getByText('VMs ready')).toBeVisible();
   await expect(page.getByText('Sign in to Claude')).toBeVisible({ timeout: 60000 });
   await shot('home-first-run');
 });
@@ -172,27 +170,27 @@ test('creates a workspace in one click and shows how it boots', async () => {
   const workspace = await waitForReady();
   await expect(page.getByText(`Branched ${workspace.branch} from origin/main`)).toBeVisible();
   await expect(page.locator('[data-step="files"]')).toContainText('and copied 1 file');
-  await expect(page.locator('[data-step="container"]')).toContainText(workspace.containerName);
+  await expect(page.locator('[data-step="sandbox"]')).toContainText(workspace.sandboxName);
   await expect(page.getByRole('link', { name: new RegExp(workspace.name) })).toBeVisible();
   await expect(page.getByRole('button', { name: 'README.md' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'src' })).toBeVisible();
   await shot('workspace-ready');
 });
 
-test('opens a working terminal inside the container', async () => {
+test('opens a working terminal inside the sandbox', async () => {
   const workspace = await currentWorkspace();
-  await expect(terminalText()).toContainText(`lonca@${workspace.name}`, { timeout: 20000 });
+  await expect(terminalText()).toContainText(`${workspace.name}$`, { timeout: 20000 });
   await page.locator('.terminal-view:visible .xterm-screen').click();
   await page.keyboard.type('echo "in=$(hostname)" && git branch --show-current\n');
-  await expect(terminalText()).toContainText(`in=${workspace.name}`);
+  await expect(terminalText()).toContainText(`in=${workspace.sandboxName}`);
   await expect(terminalText()).toContainText(workspace.branch);
 
   await page.getByRole('button', { name: 'New terminal' }).click();
   await expect(page.getByRole('tab', { name: 'Terminal 2' })).toBeVisible();
-  await expect(terminalText()).toContainText(`lonca@${workspace.name}`);
+  await expect(terminalText()).toContainText(`${workspace.name}$`);
   await page.getByRole('button', { name: 'Close Terminal 2' }).click();
   await expect(page.getByRole('tab', { name: 'Terminal 2' })).toBeHidden();
-  await expect(terminalText()).toContainText(`in=${workspace.name}`);
+  await expect(terminalText()).toContainText(`in=${workspace.sandboxName}`);
 });
 
 test('browses files and searches them', async () => {
@@ -219,7 +217,7 @@ test('shows when an agent isn’t signed in and goes straight to signing in', as
   const dialog = page.getByRole('dialog', { name: 'Sign in to Claude' });
   // The real CLI, out of sight, produces a real link.
   const open = dialog.getByRole('link', { name: 'Open sign-in page' });
-  await expect(open).toHaveAttribute('href', /^https:\/\/claude\.com\//, { timeout: 30000 });
+  await expect(open).toHaveAttribute('href', /^https:\/\/claude\.com\//, { timeout: 120000 });
   await shot('login-claude');
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(dialog).toBeHidden();
@@ -231,7 +229,8 @@ test.describe('signing in', () => {
   const codeBox = () => page.getByRole('textbox', { name: 'Sign-in code' });
   const agentRow = (name: 'Claude' | 'Codex') => page.locator('.settings-row').filter({ hasText: name });
 
-  test.beforeAll(() => {
+  test.beforeAll(async () => {
+    await lonca.startHelper();
     installFakeSignIn(tools());
   });
 
@@ -557,7 +556,7 @@ test.describe('with agents connected', () => {
     await expect(command).toBeVisible();
     await expect(page.locator('.result-row').last()).toContainText(/Finished in/);
     await expect(page.getByRole('link', { name: /THINK first/ })).toBeVisible();
-    await expect(page.getByRole('tab', { name: /THINK first/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: 'Lead' })).toBeVisible();
 
     await command.locator('.tool-head').click();
     await expect(command.locator('.tool-command')).toContainText('echo from-claude');
@@ -634,7 +633,7 @@ test.describe('with agents connected', () => {
   test('picks up a running turn after the server restarts', async () => {
     await send('SLOW restart the server');
     await expect(page.locator('.working-row')).toBeVisible();
-    await until('the agent to start', () => dockerExec(workspace.containerName, 'pgrep -f "claude -p"').code === 0, 10000);
+    await until('the agent to start', () => sandboxExec(workspace.sandboxName, 'pgrep -f "claude -p"').code === 0, 10000);
     await lonca.kill();
     await expect(page.getByText('Lost the connection to the Lonca server')).toBeVisible();
     await shot('disconnected');
@@ -651,11 +650,14 @@ test.describe('with agents connected', () => {
     await expect(page.locator('.composer .attachment-chip')).toContainText('notes.txt');
     await sendAndWait('see attached');
     await expect(page.locator('.user-message').last().locator('.attachment-chip')).toContainText('notes.txt');
-    const found = dockerExec(workspace.containerName, `cat ${workspace.path}/.context/attachments/*/notes.txt`).output;
+    const found = sandboxExec(workspace.sandboxName, `cat ${workspace.path}/.context/attachments/*/notes.txt`).output;
     expect(found).toBe('remember this');
   });
 
   test('lists both agents in the model picker and locks a started conversation to one', async () => {
+    await page.getByRole('button', { name: 'New conversation' }).click();
+    await expect(page.getByText('This conversation is your own')).toBeVisible();
+    await sendAndWait('starting this conversation');
     await page.locator('.model-button').click();
     await shot('model-picker');
     await expect(page.locator('.model-popover')).toContainText('Opus 5.5');
@@ -691,7 +693,7 @@ test.describe('with agents connected', () => {
     await page.getByRole('link', { name: 'Create', exact: true }).click();
     await page.getByRole('combobox', { name: 'Project' }).selectOption({ label: 'agents-demo' });
     await page.locator('.model-button').click();
-    await page.getByRole('button', { name: 'Opus 5.5' }).click();
+    await page.getByRole('button', { name: 'Opus 5.5', exact: true }).click();
     await page.keyboard.press('Escape');
     await expect(page.locator('.model-button')).toContainText('Opus 5.5');
     await page.getByRole('textbox', { name: 'First message (optional)' }).fill('RUN: echo first-message > first.txt');
@@ -718,7 +720,7 @@ test.describe('with agents connected', () => {
     await page.getByRole('button', { name: 'Close Codex work' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Close tab' }).click();
     await expect(page.getByRole('tab', { name: /Codex work/ })).toHaveCount(0);
-    await expect(page.locator('.session-tab.active')).toContainText('THINK first');
+    await expect(page.locator('.session-tab.active')).toContainText('Lead');
   });
 
   test('searches across workspaces with the keyboard', async () => {
@@ -756,7 +758,7 @@ test.describe('with agents connected', () => {
     await expect(page.getByRole('button', { name: 'Hide terminals' })).toBeInViewport();
 
     await page.getByRole('tab', { name: 'Terminal', exact: true }).click();
-    await expect(terminalText()).toContainText(`lonca@${fresh.name}`, { timeout: 20000 });
+    await expect(terminalText()).toContainText(`:${fresh.name}$`, { timeout: 20000 });
     await page.locator('.terminal-view:visible .xterm-screen').click();
     await page.keyboard.type('python3 -m http.server $LONCA_PORT --bind 0.0.0.0\n');
     await expect(terminalText()).toContainText(/Serving HTTP/, { timeout: 15000 });
@@ -788,10 +790,16 @@ test.describe('with agents connected', () => {
 
   test('wakes a stopped workspace, then archives and restores it', async () => {
     await lonca.api('POST', `/workspaces/${workspace.id}/stop`);
-    await expect(page.locator('.workspace-banner')).toContainText('container is stopped');
+    await expect(page.locator('.workspace-banner')).toContainText('virtual machine is stopped');
     await shot('stopped');
+    // Slowed down to see what starting looks like.
+    const slowStart = path.join(FAKE_SBX_DIR, 'slow-start');
+    fs.writeFileSync(slowStart, '');
     await page.locator('.workspace-banner').getByRole('button', { name: 'Start' }).click();
-    await expect(page.locator('.workspace-banner')).toHaveCount(0);
+    await expect(page.locator('.workspace-banner')).toContainText('Starting');
+    expect((await page.locator('.workspace-banner .spinner').boundingBox())!.width).toBeLessThan(20);
+    fs.rmSync(slowStart);
+    await expect(page.locator('.workspace-banner')).toHaveCount(0, { timeout: 30000 });
     await expect(page.getByRole('button', { name: 'README.md' })).toBeVisible({ timeout: 15000 });
 
     await page.getByRole('button', { name: 'Archive this workspace' }).click();
@@ -802,7 +810,7 @@ test.describe('with agents connected', () => {
 
     await page.getByRole('button', { name: 'Open this workspace elsewhere' }).click();
     await page.getByRole('menuitem', { name: 'Open in VS Code' }).click();
-    await expect(page.getByRole('dialog')).toContainText('outside the container');
+    await expect(page.getByRole('dialog')).toContainText('outside the virtual machine');
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
 
     await page.getByRole('button', { name: 'Archive this workspace' }).click();
@@ -861,7 +869,7 @@ test.describe('how workspaces are isolated', () => {
   // That depends on what's on the machine, so these have a server of their own.
   async function settingsOn(env: Record<string, string>, check: (view: Page) => Promise<void>): Promise<void> {
     const server = new Lonca({ port: 47382, instance: 'e2e-isolation', firstWorkspacePort: 46700 });
-    server.env = { LONCA_RUNTIME: 'auto', LONCA_SBX: FAKE_SBX, ...env };
+    server.env = { LONCA_SBX: FAKE_SBX, ...env };
     await server.start();
     const view = await page.context().newPage();
     try {
@@ -873,21 +881,21 @@ test.describe('how workspaces are isolated', () => {
     }
   }
 
-  const row = (view: Page) => view.locator('.settings-block').filter({ hasText: /Virtual machines|Containers/ }).first();
+  const row = (view: Page) => view.locator('.settings-block').filter({ hasText: 'Virtual machines' }).first();
   const shotOfRow = async (view: Page, name: string) => {
     await row(view).evaluate((element) => element.scrollIntoView({ block: 'center' }));
     await view.screenshot({ path: path.join(SHOTS, `${name}.png`) });
   };
 
-  test('says how to get virtual machines when Docker Sandboxes isn’t installed', async () => {
+  test('says how to get Docker Sandboxes when it isn’t installed', async () => {
     await settingsOn({ LONCA_SBX: '/nonexistent/sbx' }, async (view) => {
-      await expect(row(view)).toContainText('New workspaces run in hardened containers', { timeout: 30000 });
+      await expect(row(view)).toContainText('which isn’t installed', { timeout: 30000 });
       await expect(row(view).locator('.isolation-command')).toContainText('brew install docker/tap/sbx');
       await shotOfRow(view, 'settings-isolation-not-installed');
     });
   });
 
-  test('moves to virtual machines by itself once signed in', async () => {
+  test('says when it’s signed out, and picks up once it’s signed in', async () => {
     const flag = path.join(FAKE_SBX_DIR, 'signed-out');
     fs.writeFileSync(flag, '');
     await settingsOn({}, async (view) => {

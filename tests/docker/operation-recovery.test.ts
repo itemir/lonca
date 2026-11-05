@@ -2,9 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import type { Project, Workspace } from '../../shared/types.ts';
-import { IN_SANDBOX, Lonca, docker, dockerExec, git, makeFixtureRepo, runtimeRunning, until } from '../support/harness.ts';
+import { Lonca, sandboxExec, git, makeFixtureRepo, sandboxRunning, until, asRoot, REAL_SANDBOX, sleep } from '../support/harness.ts';
 
-const lonca = new Lonca({ port: IN_SANDBOX ? 48319 : 48309, instance: `operation-recovery-${IN_SANDBOX ? 'sandbox' : 'container'}`, firstWorkspacePort: IN_SANDBOX ? 52600 : 51600 });
+const lonca = new Lonca({ port: 48319, instance: `operation-recovery-sandbox`, firstWorkspacePort: 52600});
 let fixture: string;
 let project: Project;
 
@@ -38,16 +38,16 @@ async function retry(workspace: Workspace, operation: 'archive' | 'delete' | 'st
     expect(fs.existsSync(workspace.path)).toBe(false);
   } else {
     await lonca.waitForWorkspace(workspace.id, operation === 'stop' ? 'stopped' : 'archived');
-    expect(runtimeRunning(workspace.containerName)).toBe(operation === 'stop' ? false : null);
+    expect(sandboxRunning(workspace.sandboxName)).toBe(operation === 'stop' ? false : null);
   }
 }
 
-it.skipIf(IN_SANDBOX).each(['archive', 'delete', 'stop'] as const)('retries %s after Docker failed before cleanup', async (operation) => {
+it.skipIf(REAL_SANDBOX).each(['archive', 'delete', 'stop'] as const)('retries %s after Docker Sandboxes failed before cleanup', async (operation) => {
   const workspace = await create();
   const edited = 'SECRET=keep-until-requested-cleanup\n';
   fs.writeFileSync(path.join(workspace.path, '.env'), edited);
   await lonca.kill();
-  lonca.env.DOCKER_HOST = 'tcp://127.0.0.1:9';
+  lonca.setOffline(true);
   await lonca.start();
   try {
     await expect(operation === 'delete'
@@ -57,7 +57,7 @@ it.skipIf(IN_SANDBOX).each(['archive', 'delete', 'stop'] as const)('retries %s a
     expect(fs.readFileSync(path.join(workspace.path, '.env'), 'utf8')).toBe(edited);
   } finally {
     await lonca.kill();
-    delete lonca.env.DOCKER_HOST;
+    lonca.setOffline(false);
     await lonca.start();
   }
   expect((await lonca.workspace(workspace.id)).pendingOperation).toBe(operation);
@@ -70,10 +70,10 @@ it.skipIf(IN_SANDBOX).each(['archive', 'delete', 'stop'] as const)('retries %s a
   if (operation !== 'delete') await lonca.api('DELETE', `/workspaces/${workspace.id}`);
 });
 
-it.skipIf(IN_SANDBOX).each(['archive', 'delete'] as const)('reports partial %s cleanup failures and retries the same cleanup', async (operation) => {
+it.skipIf(REAL_SANDBOX).each(['archive', 'delete'] as const)('reports partial %s cleanup failures and retries the same cleanup', async (operation) => {
   const workspace = await create();
   // Fail after deleting checkout files, before pruning worktree metadata or deleting the branch.
-  docker('exec', workspace.containerName, 'bash', '-c', `cat > /usr/local/bin/git <<'GIT'
+  asRoot(workspace.sandboxName, `cat > /usr/local/bin/git <<'GIT'
 #!/bin/bash
 if [ "$3 $4" = 'worktree prune' ] && [ ! -e /tmp/prune-failed ]; then
   touch /tmp/prune-failed
@@ -88,7 +88,7 @@ chmod +x /usr/local/bin/git`);
     : lonca.api('POST', `/workspaces/${workspace.id}/archive`)).rejects.toThrow(/Injected prune failure/);
   expect(await lonca.workspace(workspace.id)).toMatchObject({ status: 'error', pendingOperation: operation });
   expect(fs.readdirSync(workspace.path)).toEqual([]);
-  expect(runtimeRunning(workspace.containerName)).toBe(false);
+  expect(sandboxRunning(workspace.sandboxName)).toBe(false);
   await lonca.kill();
   await lonca.start();
   await retry(workspace, operation);
@@ -100,9 +100,9 @@ chmod +x /usr/local/bin/git`);
   }
 });
 
-it.skipIf(IN_SANDBOX).each(['archive', 'delete'] as const)('retains %s intent when the server crashes during cleanup', async (operation) => {
+it.skipIf(REAL_SANDBOX).each(['archive', 'delete'] as const)('retains %s intent when the server crashes during cleanup', async (operation) => {
   const workspace = await create();
-  docker('exec', workspace.containerName, 'bash', '-c', `cat > /usr/local/bin/git <<'GIT'
+  asRoot(workspace.sandboxName, `cat > /usr/local/bin/git <<'GIT'
 #!/bin/bash
 if [ "$3 $4" = 'worktree prune' ]; then
   touch /tmp/prune-waiting
@@ -117,10 +117,10 @@ chmod +x /usr/local/bin/git`);
   const pending = (operation === 'delete'
     ? lonca.api('DELETE', `/workspaces/${workspace.id}`)
     : lonca.api('POST', `/workspaces/${workspace.id}/archive`)).catch(() => {});
-  await until('partial cleanup', () => dockerExec(workspace.containerName, 'test -e /tmp/prune-waiting').code === 0);
+  await until('partial cleanup', () => sandboxExec(workspace.sandboxName, 'test -e /tmp/prune-waiting').code === 0);
   await lonca.kill();
   await pending;
-  expect(dockerExec(workspace.containerName, 'touch /tmp/prune-release').code).toBe(0);
+  expect(sandboxExec(workspace.sandboxName, 'touch /tmp/prune-release').code).toBe(0);
   await lonca.start();
   expect(await lonca.workspace(workspace.id)).toMatchObject({ status: 'error', pendingOperation: operation });
   await retry(workspace, operation);
@@ -141,7 +141,7 @@ it.each(['create', 'restore'] as const)('resumes partial file copying during %s 
     expect(workspace.pendingOperation).toBe(operation);
     const edited = 'SECRET=edited-after-copy-failure\n';
     fs.writeFileSync(path.join(workspace.path, '.env'), edited);
-    expect(dockerExec(workspace.containerName, 'rm config && mkdir config').code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, 'rm config && mkdir config').code).toBe(0);
     await lonca.kill();
     await lonca.start();
     await lonca.api('POST', `/workspaces/${workspace.id}/retry`);
@@ -156,7 +156,7 @@ it.each(['create', 'restore'] as const)('resumes partial file copying during %s 
 
 it.each(['archive', 'delete', 'stop'] as const)('can finish %s even when a lost terminal has a damaged PID record', async (operation) => {
   const workspace = await create();
-  expect(dockerExec(workspace.containerName, `echo damaged > /var/tmp/lonca/tty/${workspace.id}-setup.pid`).code).toBe(0);
+  expect(sandboxExec(workspace.sandboxName, `echo damaged > /var/tmp/lonca/tty/${workspace.id}-setup.pid`).code).toBe(0);
   if (operation === 'delete') await lonca.api('DELETE', `/workspaces/${workspace.id}`);
   else await lonca.api('POST', `/workspaces/${workspace.id}/${operation}`);
   if (operation === 'delete') expect(await lonca.workspace(workspace.id)).toBeUndefined();
@@ -168,7 +168,7 @@ it.each(['archive', 'delete', 'stop'] as const)('can finish %s even when a lost 
 
 it.each(['archive', 'delete'] as const)('can %s a workspace while something an agent left running keeps writing to it', async (operation) => {
   const workspace = await create();
-  dockerExec(workspace.containerName, `cd ${workspace.path} && mkdir -p cache && (setsid nohup bash -c 'while :; do : > "cache/$RANDOM$RANDOM"; done' >/dev/null 2>&1 &)`);
+  sandboxExec(workspace.sandboxName, `cd ${workspace.path} && mkdir -p cache && (setsid nohup bash -c 'while :; do : > "cache/$RANDOM$RANDOM"; done' >/dev/null 2>&1 &)`);
   await until('the writer', () => fs.readdirSync(path.join(workspace.path, 'cache')).length > 20, 10000);
   if (operation === 'delete') {
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
@@ -184,7 +184,7 @@ it.each(['archive', 'delete'] as const)('can %s a workspace while something an a
 it('can delete a workspace whose connected terminal’s PID record became a FIFO', async () => {
   const workspace = await create();
   const shell = await lonca.api('POST', `/workspaces/${workspace.id}/terminals`);
-  expect(dockerExec(workspace.containerName, `f=/var/tmp/lonca/tty/${shell.id}.pid; rm -f "$f" && mkfifo "$f"`).code).toBe(0);
+  expect(sandboxExec(workspace.sandboxName, `f=/var/tmp/lonca/tty/${shell.id}.pid; rm -f "$f" && mkfifo "$f"`).code).toBe(0);
   await lonca.api('DELETE', `/workspaces/${workspace.id}`);
   expect(await lonca.workspace(workspace.id)).toBeUndefined();
 });

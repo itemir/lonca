@@ -1,6 +1,6 @@
 import type { ChatItem } from '../../shared/types.ts';
 
-// Agent output is whatever the process in the container chooses to write. Everything the
+// Agent output is whatever the process in the sandbox chooses to write. Everything the
 // web app renders has to be the type it expects, or one bad line could break the page on
 // every load, since the item is saved with the conversation.
 
@@ -28,6 +28,7 @@ export function sanitizeItem(item: ChatItem): ChatItem {
         name: text(item.name) ?? 'tool',
         title: text(item.title) ?? 'Tool call',
         detail: text(item.detail),
+        agentId: text(item.agentId),
         output: text(item.output),
         edits: Array.isArray(item.edits)
           ? item.edits.map((edit) => ({ path: text(edit?.path) ?? '', removed: text(edit?.removed) ?? '', added: text(edit?.added) ?? '' }))
@@ -37,7 +38,7 @@ export function sanitizeItem(item: ChatItem): ChatItem {
           : undefined,
       };
     case 'notice':
-      return { ...item, ...base, text: text(item.text) ?? '' };
+      return { ...item, ...base, text: text(item.text) ?? '', resetsAt: number(item.resetsAt) };
     case 'result':
       return {
         ...item,

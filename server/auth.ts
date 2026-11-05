@@ -4,7 +4,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { DEV_MODE, HTTP_PORT } from './config.ts';
 import { accessToken } from './store.ts';
 
-// The server can start containers and hand out shells, and anything running on this
+// The server can start virtual machines and hand out shells, and anything running on this
 // machine or any website open in a browser can reach localhost. Three checks close that:
 // the Host header defeats DNS rebinding, the Origin header stops other sites from opening
 // connections, and the token keeps out local processes.

@@ -43,7 +43,8 @@ test('reconnects a recovered terminal after a temporary missing handle and stops
     const output = page.locator('.terminal-view:visible .xterm-rows');
     await expect(output).toContainText(workspace.name);
     await input.focus();
-    await page.keyboard.type("trap '' HUP TERM; touch .context/shell-ready");
+    // An idle shell ends with the connection to the server. A busy one outlives it.
+    await page.keyboard.type("trap '' HUP TERM; touch .context/shell-ready; while true; do sleep 1; done");
     await page.keyboard.press('Enter');
     await expect.poll(() => fs.existsSync(path.join(workspace.path, '.context/shell-ready'))).toBe(true);
 

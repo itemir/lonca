@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
-  AlertCircle, Archive, ArrowLeft, ArrowRight, ChevronRight, CircleHelp, GitBranch, Home, MoreHorizontal, PanelLeft,
+  AlertCircle, Archive, ArrowLeft, ArrowRight, ChevronRight, CircleHelp, GitBranch, Home, Hourglass, MoreHorizontal, PanelLeft,
   Pause, Plus, Search, Settings as SettingsIcon, Trash2,
 } from 'lucide-react';
 import type { Project, Workspace } from '../../../shared/types.ts';
@@ -25,8 +25,11 @@ function DiffBadge({ workspace }: { workspace: Workspace }) {
 
 function WorkspaceIcon({ workspace }: { workspace: Workspace }) {
   const running = useStore((store) => store.sessions.some((session) => session.workspaceId === workspace.id && session.status === 'running'));
+  const lead = useStore((store) => store.sessions.find((session) => session.workspaceId === workspace.id && session.role === 'lead' && !session.closedAt));
   if (running || ['creating', 'restoring', 'rebuilding', 'archiving', 'deleting', 'stopping', 'starting'].includes(workspace.status)) return <Spinner size={13} />;
   if (workspace.status === 'error') return <AlertCircle size={14} className="icon-error" />;
+  if (lead?.lastOutcome === 'limit') return <Hourglass size={14} className="tab-state-limit" />;
+  if (lead?.unread) return <span className="unread-dot" title="The Lead needs you" />;
   if (workspace.status === 'stopped') return <Pause size={14} className="icon-dim" />;
   if (workspace.status === 'archived') return <Archive size={14} className="icon-dim" />;
   return <GitBranch size={14} />;
@@ -123,18 +126,21 @@ function ProjectGroup({ project, activeId }: { project: Project; activeId: strin
   );
 }
 
-function DockerStatus() {
+function SandboxStatusChip() {
   const system = useStore((store) => store.system);
-  let text = system.sandbox.state === 'ready' ? 'VMs ready' : 'Docker ready';
+  let text = 'VMs ready';
   let state = 'ok';
-  if (!system.docker.ok) {
-    text = 'Docker offline';
+  if (system.sandbox.state === 'checking') {
+    text = 'Checking for VMs';
+    state = 'busy';
+  } else if (system.sandbox.state !== 'ready') {
+    text = 'VMs unavailable';
     state = 'error';
   } else if (system.image.state === 'building') {
-    text = 'Building image';
+    text = 'Building template';
     state = 'busy';
   } else if (system.image.state === 'error') {
-    text = 'Image failed';
+    text = 'Template failed';
     state = 'error';
   }
   return <Link to="/settings" className={`status-chip status-${state}`} title="Open settings">{text}</Link>;
@@ -178,7 +184,7 @@ export function Sidebar() {
         {projects.map((project) => <ProjectGroup key={project.id} project={project} activeId={activeId} />)}
       </div>
       <footer className="sidebar-footer">
-        <DockerStatus />
+        <SandboxStatusChip />
         <span className="spacer" />
         <a className="icon-button" href="https://github.com/itemir/lonca#readme" target="_blank" rel="noreferrer" aria-label="Help" title="Help"><CircleHelp size={16} /></a>
         <Link className="icon-button" to="/settings" aria-label="Settings" title="Settings"><SettingsIcon size={16} /></Link>

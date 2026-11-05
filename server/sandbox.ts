@@ -1,18 +1,17 @@
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Duplex, PassThrough } from 'node:stream';
 import type { SandboxStatus } from '../shared/types.ts';
-import { PORTS_PER_WORKSPACE, RUNTIME_CHOICE, TTY_DIR } from './config.ts';
-import type { ExecOptions, ExecResult, OutputStream, TtyProcess } from './docker.ts';
+import { LONCA_HOME, PORTS_PER_WORKSPACE, PREFIX, TEMPLATE_DIR, TTY_DIR } from './config.ts';
 import { emptyAgent } from './ssh-agent.ts';
-import { KeyedQueue, RuntimeStoppedError, errorMessage, newId, sleep } from './util.ts';
+import { KeyedQueue, RuntimeStoppedError, errorMessage, newId, removeTree, sleep } from './util.ts';
 
 // Docker Sandboxes gives each workspace a microVM with its own kernel, driven through the `sbx`
-// CLI. Where it isn't available, workspaces run in containers instead (see containers.ts).
+// CLI. It's the only place Lonca runs anything other than its own server.
 
 const SANDBOX_USER = 'agent';
-const HANDLE_PREFIX = 'sbx:';
 
 const CREATE_TIMEOUT_MS = 5 * 60 * 1000;
 const COMMAND_TIMEOUT_MS = 60_000;
@@ -20,16 +19,38 @@ const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
 const LIST_CACHE_MS = 1500;
 
-/** Stands for a sandbox wherever a container id is expected. A container's id can't contain a colon. */
-export function sandboxHandle(name: string): string {
-  return `${HANDLE_PREFIX}${name}`;
-}
-
-export function sandboxName(handle: string): string | null {
-  return handle.startsWith(HANDLE_PREFIX) ? handle.slice(HANDLE_PREFIX.length) : null;
-}
-
 export class SandboxError extends Error {}
+
+export interface ExecOptions {
+  env?: string[];
+  workdir?: string;
+  stdin?: Buffer | string;
+  timeoutMs?: number;
+  /** Stops reading beyond this many bytes of stdout or stderr. */
+  maxBytes?: number;
+  /** Only for preparing a VM. Everything else runs as the unprivileged user. */
+  user?: string;
+}
+
+export interface ExecResult {
+  code: number | null;
+  stdout: Buffer;
+  stderr: Buffer;
+  truncated: boolean;
+}
+
+export interface OutputStream {
+  stdout: PassThrough;
+  stderr: PassThrough;
+  finished: Promise<void>;
+  stop(): void;
+}
+
+export interface TtyProcess {
+  stream: Duplex;
+  resize(cols: number, rows: number): Promise<void>;
+  exitCode(): Promise<number | null>;
+}
 
 /** `sbx` isn't always on the PATH of a server started some other way than from a terminal. */
 function findSbx(): string | null {
@@ -180,9 +201,8 @@ async function virtualizationProblem(): Promise<string | null> {
   }
 }
 
-/** Decides whether new workspaces can have a VM. */
+/** Decides whether workspaces can run. */
 export async function detectSandboxes(): Promise<SandboxStatus> {
-  if (RUNTIME_CHOICE === 'container') return { state: 'off' };
   if (!findSbx()) return missing();
   let version: string | undefined;
   try {
@@ -228,9 +248,54 @@ export async function templateLoaded(image: string): Promise<boolean> {
   return templateListIncludes(await sbx(['template', 'ls', '--quiet']), image);
 }
 
-/** Sandboxes have an image store of their own, separate from Docker's. */
-export async function loadTemplate(tarFile: string): Promise<void> {
-  await sbx(['template', 'load', tarFile], { timeoutMs: 15 * 60 * 1000 });
+let tag: string | undefined;
+
+/** Changes with what a template is made from, so upgrades rebuild it by themselves. Read once, so that editing those files doesn't rebuild it under a running server. */
+export function templateTag(): string {
+  if (!tag) {
+    const hash = crypto.createHash('sha256');
+    for (const name of fs.readdirSync(TEMPLATE_DIR).sort()) {
+      hash.update(name);
+      hash.update(fs.readFileSync(path.join(TEMPLATE_DIR, name)));
+    }
+    tag = `lonca-sandbox:${hash.digest('hex').slice(0, 12)}`;
+  }
+  return tag;
+}
+
+const BUILD_TIMEOUT_MS = 20 * 60 * 1000;
+// Docker's fullest, with compilers and Java, rather than the smaller one `sbx run shell` picks.
+const BASE_TEMPLATE = 'docker/sandbox-templates:shell-docker';
+const BUILDER = `${PREFIX}-template`;
+const BUILD_DIR = path.join(LONCA_HOME, 'template-build');
+
+/** Clears what building a template leaves while it runs, which a server stopping partway leaves behind. */
+export async function cleanUpTemplateBuild(): Promise<void> {
+  await removeSandbox(BUILDER);
+  await removeTree(BUILD_DIR);
+}
+
+/** Makes the template new workspaces start from: a VM from Docker's own, with what Lonca adds installed in it, saved. */
+export async function buildTemplate(tag: string, options: { fresh?: boolean }, onLog: (text: string) => void): Promise<void> {
+  const name = BUILDER;
+  const staging = BUILD_DIR;
+  try {
+    await cleanUpTemplateBuild();
+    fs.cpSync(TEMPLATE_DIR, staging, { recursive: true });
+    await ensurePolicy();
+    onLog('Starting a virtual machine to build it in…\n');
+    await sbx(['run', '--detach', '--name', name, '--template', BASE_TEMPLATE, '--pull', options.fresh ? 'always' : 'missing', '--skills', 'off', 'shell', staging], { timeoutMs: BUILD_TIMEOUT_MS });
+    await sbx(['policy', 'allow', 'network', '--sandbox', name, '**']);
+    onLog('Installing Claude Code and Codex…\n');
+    const build = await exec(name, ['bash', path.join(staging, 'build.sh'), staging], { user: 'root', timeoutMs: BUILD_TIMEOUT_MS });
+    onLog(build.stdout.toString('utf8') + build.stderr.toString('utf8'));
+    if (build.code !== 0) throw new SandboxError(`Installing into the template failed with code ${build.code}`);
+    onLog('Saving it…\n');
+    await sbx(['stop', name], { timeoutMs: CREATE_TIMEOUT_MS });
+    await sbx(['template', 'save', name, tag], { timeoutMs: BUILD_TIMEOUT_MS });
+  } finally {
+    await cleanUpTemplateBuild().catch(() => {});
+  }
 }
 
 // The first sandbox on a machine needs a network policy to exist, and only an interactive
@@ -244,12 +309,28 @@ async function ensurePolicy(): Promise<void> {
   policyReady = true;
 }
 
-/** The host, the LAN, private ranges and cloud metadata addresses, as a container's firewall blocks them. */
+/** The host, the LAN, private ranges and cloud metadata addresses, kept out of every sandbox on the internet-only setting. */
 export const BLOCKED_DESTINATIONS = [
   'localhost', 'host.docker.internal', '127.0.0.0/8', '::1/128',
   '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.168.0.0/16',
   '198.18.0.0/15', '224.0.0.0/4', '240.0.0.0/4', 'fc00::/7', 'fe80::/10',
 ];
+
+/** A credential the proxy adds for one sandbox, from a file on this computer that no sandbox has mounted. */
+export type ProxySecret = { file: string } & (
+  /** A service sbx knows about, which has a placeholder of its own. */
+  | { service: string }
+  /** Anything else. The proxy swaps the placeholder in request headers, on these hosts only. */
+  | { hosts: string[]; placeholder: string }
+);
+
+/** The file may not exist yet, which only means not signed in, so nothing checks it now. */
+export function secretArgs(sandbox: string, secret: ProxySecret): string[] {
+  const source = ['--sandbox', sandbox, '--command', `/bin/cat '${secret.file.replaceAll("'", "'\\''")}'`, '--refresh', 'on-demand', '--no-verify'];
+  return 'service' in secret
+    ? ['secret', 'set', secret.service, ...source, '--force']
+    : ['secret', 'set-custom', ...secret.hosts.flatMap((host) => ['--host', host]), '--placeholder', secret.placeholder, ...source];
+}
 
 export interface SandboxSpec {
   name: string;
@@ -258,10 +339,12 @@ export interface SandboxSpec {
   env: string[];
   /** Host paths mounted at the same path in the VM, so git's absolute paths resolve in both. */
   mounts: string[];
-  /** Where the shared Codex login lives on the host. */
-  credentials: string;
   /** A directory for what has to outlive the VM. */
   agentState: string;
+  /** Applied before anything runs in the VM, including one that was made before these changed. */
+  secrets: ProxySecret[];
+  /** A command to finish preparing the VM once it's booted. */
+  setup?: string[];
   firstPort?: number;
   network: 'internet' | 'host';
   memoryGb?: number;
@@ -280,32 +363,53 @@ export function createArgs(spec: SandboxSpec, image: string): string[] {
   if (spec.network === 'internet') {
     for (const destination of BLOCKED_DESTINATIONS) args.push('--deny-network', destination);
   }
-  args.push('shell', ...spec.mounts, spec.credentials, spec.agentState);
+  args.push('shell', ...spec.mounts, spec.agentState);
   return args;
 }
 
-/** The global policy may only allow some sites. A workspace has the internet, as a container does. */
+/** The global policy may only allow some sites. A workspace has the internet. */
 export function allowRule(network: SandboxSpec['network']): string {
   return network === 'host' ? '**,localhost' : '**';
 }
+
+// A sandbox doesn't run an entrypoint of ours, so this runs after starting one. It's sent rather
+// than kept in the template so that it also works on VMs made from older ones.
+export const SANDBOX_BOOT = String.raw`
+set -eu
+state="$1"
+mkdir -p "$HOME/.claude" "$HOME/.codex"
+[ -e "$HOME/.claude.json" ] || echo '{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}' > "$HOME/.claude.json"
+
+# Rebuilding a workspace replaces its VM, and conversations have to outlive that to be resumed.
+mkdir -p "$state/claude-projects" "$state/codex-sessions"
+ln -sfn "$state/claude-projects" "$HOME/.claude/projects"
+ln -sfn "$state/codex-sessions" "$HOME/.codex/sessions"
+
+# Terminal attachments end at reboot. Agent output survives until Lonca has read and saved it.
+boot=$(cat /proc/sys/kernel/random/boot_id)
+if [ "$(cat /var/tmp/lonca/boot 2>/dev/null)" != "$boot" ]; then
+  rm -rf /var/tmp/lonca/tty
+  mkdir -p /var/tmp/lonca/tty
+  echo "$boot" > /var/tmp/lonca/boot
+fi
+`;
 
 const byName = new KeyedQueue();
 const booted = new Set<string>();
 // A sandbox has no environment of its own that reaches `sbx exec`, so it goes with each command.
 const environments = new Map<string, string[]>();
 
-/** Returns a ready sandbox's handle; `start: false` rejects stopped or missing sandboxes. */
+/** Returns a ready sandbox's name; `start: false` rejects stopped or missing sandboxes. */
 export function ensureSandbox(spec: SandboxSpec, { start = true }: { start?: boolean } = {}): Promise<string> {
   return byName.run(spec.name, async () => {
     environments.set(spec.name, spec.env);
-    const handle = sandboxHandle(spec.name);
     // A passive caller must not reuse a pre-stop listing or wait behind another
     // lookup and then start a VM which has since stopped.
     if (!start) forgetListing();
     const known = (await listSandboxes()).find((entry) => entry.name === spec.name);
     if (!start && !known?.running) throw new RuntimeStoppedError('The sandbox is stopped or was removed');
-    if (known?.running && booted.has(spec.name)) return handle;
-    for (const dir of [...spec.mounts, path.join(spec.credentials, 'codex'), spec.agentState]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (known?.running && booted.has(spec.name)) return spec.name;
+    for (const dir of [...spec.mounts, spec.agentState]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     if (!known) {
       const image = await spec.image();
       await ensurePolicy();
@@ -321,15 +425,31 @@ export function ensureSandbox(spec: SandboxSpec, { start = true }: { start?: boo
       await sbx(['run', '--detach', '--name', spec.name], { timeoutMs: CREATE_TIMEOUT_MS });
     }
     forgetListing();
-    const boot = await sandboxExec(spec.name, ['lonca-boot', spec.credentials, spec.agentState], { timeoutMs: 30000 });
-    if (boot.code !== 0) throw new SandboxError(`The sandbox didn’t finish starting: ${boot.stderr.toString('utf8').trim()}`);
+    for (const secret of spec.secrets) await sbx(secretArgs(spec.name, secret));
+    for (const command of [['bash', '-c', SANDBOX_BOOT, 'lonca-boot', spec.agentState], ...(spec.setup ? [spec.setup] : [])]) {
+      const result = await exec(spec.name, command, { timeoutMs: 30000 });
+      if (result.code !== 0) throw new SandboxError(`The sandbox didn’t finish starting: ${result.stderr.toString('utf8').trim()}`);
+    }
     booted.add(spec.name);
-    return handle;
+    return spec.name;
   });
 }
 
 // Names that `sbx` itself needs from its environment, so a project's variable can't go there.
 const OWN_ENV = /^(HOME|PATH|USER|LOGNAME|SHELL|TMPDIR|DOCKER_.*|SBX_.*|XDG_.*|SSH_AUTH_SOCK)$/;
+
+// A template saved from a VM can't carry an environment, so these go with every command.
+const BASE_ENV: Record<string, string> = {
+  DISABLE_AUTOUPDATER: '1',
+  CODEX_DISABLE_UPDATE_CHECK: '1',
+  GIT_TERMINAL_PROMPT: '0',
+  PIP_BREAK_SYSTEM_PACKAGES: '1',
+  LANG: 'C.UTF-8',
+  TERM: 'xterm-256color',
+  // Some versions of sbx plant a placeholder key of their own, for a service Lonca doesn't use for
+  // Claude, and Claude would take that over the placeholder for a sign-in token.
+  ANTHROPIC_API_KEY: '',
+};
 
 /**
  * Builds `sbx exec` arguments. Values travel in the CLI's environment with only their names on
@@ -338,25 +458,23 @@ const OWN_ENV = /^(HOME|PATH|USER|LOGNAME|SHELL|TMPDIR|DOCKER_.*|SBX_.*|XDG_.*|S
 export function execArgs(
   name: string,
   cmd: string[],
-  options: { env?: string[]; workdir?: string; interactive?: boolean },
+  options: { env?: string[]; workdir?: string; interactive?: boolean; user?: string },
 ): { args: string[]; env: Record<string, string> } {
   const args = ['exec'];
   // A command gets a pipe for stdin even without --interactive, and tools that check for piped
-  // input then read it instead of their files: rg finds nothing. Docker gives these /dev/null.
+  // input then read it instead of their files: rg finds nothing. So they get /dev/null.
   const command = options.interactive ? cmd : ['sh', '-c', 'exec "$@" </dev/null', 'sh', ...cmd];
   if (options.interactive) args.push('--interactive');
-  args.push('--user', SANDBOX_USER);
+  args.push('--user', options.user ?? SANDBOX_USER);
   if (options.workdir) args.push('--workdir', options.workdir);
-  // sbx plants placeholder keys in every sandbox, for its proxy to swap for real ones. Lonca hands
-  // out credentials itself, and Claude would take this placeholder over a sign-in token.
-  const values = new Map([['ANTHROPIC_API_KEY', '']]);
+  const values = new Map(Object.entries(BASE_ENV));
   for (const entry of [...(environments.get(name) ?? []), ...(options.env ?? [])]) {
     const equals = entry.indexOf('=');
     values.set(entry.slice(0, equals), entry.slice(equals + 1));
   }
   const env: Record<string, string> = {};
   for (const [key, value] of values) {
-    if (OWN_ENV.test(key) || value === '') {
+    if (OWN_ENV.test(key) || value === '' || value === BASE_ENV[key]) {
       args.push(`--env=${key}=${value}`);
     } else {
       env[key] = value;
@@ -367,8 +485,14 @@ export function execArgs(
   return { args, env };
 }
 
-/** The sandbox counterpart of `exec` in docker.ts, with the same limits for the same reasons. */
-export async function sandboxExec(name: string, cmd: string[], options: ExecOptions = {}): Promise<ExecResult> {
+/**
+ * Runs a command in a sandbox as the unprivileged user and collects its output.
+ *
+ * Agents control what's in a sandbox, so any file read here could be a FIFO that never ends or a
+ * link to /dev/zero. Nothing is allowed to run or grow without limit: `timeout` makes sure the
+ * process dies, not just the wait for it.
+ */
+export async function exec(name: string, cmd: string[], options: ExecOptions = {}): Promise<ExecResult> {
   const hasStdin = options.stdin !== undefined;
   const timeoutMs = options.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -419,8 +543,18 @@ export async function sandboxExec(name: string, cmd: string[], options: ExecOpti
   });
 }
 
+/** Like `exec`, but rejects on a non-zero exit and returns stdout as text. */
+export async function execText(name: string, cmd: string[], options: ExecOptions = {}): Promise<string> {
+  const result = await exec(name, cmd, options);
+  if (result.code !== 0) {
+    const message = result.stderr.toString('utf8').trim() || result.stdout.toString('utf8').trim();
+    throw new Error(message || `${cmd[0]} exited with code ${result.code}`);
+  }
+  return result.stdout.toString('utf8');
+}
+
 /** Runs a command and streams its output without buffering it. */
-export async function sandboxStream(name: string, cmd: string[], options: ExecOptions = {}): Promise<OutputStream> {
+export async function execStream(name: string, cmd: string[], options: ExecOptions = {}): Promise<OutputStream> {
   const { args, env } = execArgs(name, cmd, options);
   const child = spawn(sbxPath(), args, { stdio: ['ignore', 'pipe', 'pipe'], env: await cliEnv(env) });
   const stdout = new PassThrough();
@@ -438,7 +572,7 @@ export async function sandboxStream(name: string, cmd: string[], options: ExecOp
  * Starts a command on a pseudo-terminal. `sbx exec -t` needs a real terminal on this side, which
  * a server doesn't have, so lonca-pty makes one inside the VM and the rest goes over plain pipes.
  */
-export async function sandboxTty(
+export async function execTty(
   name: string,
   cmd: string[],
   options: { env?: string[]; workdir?: string; cols?: number; rows?: number },
@@ -491,7 +625,7 @@ export async function sandboxTty(
       if (closed || stream.destroyed) continue;
       const running = await isSandboxRunning(name).catch(() => false);
       if (!running || closed || stream.destroyed) continue;
-      await sandboxExec(
+      await exec(
         name,
         ['bash', '-c', 'stty -F "$(head -c 64 "$0")" cols "$1" rows "$2"', ttyFile, String(cols), String(rows)],
         { timeoutMs: 10000 },

@@ -15,12 +15,13 @@ export function modelLabel(catalog: Catalog, agent: AgentId, model: string): str
 }
 
 /** Chooses an agent, model and effort. A started conversation stays with its agent. */
-export function ModelPicker({ catalog, value, lockAgent, onChange, up = true }: {
+export function ModelPicker({ catalog, value, lockAgent, onChange, up = true, right = false }: {
   catalog: Catalog;
   value: ModelChoice;
   lockAgent?: boolean;
   onChange: (choice: ModelChoice) => void;
   up?: boolean;
+  right?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -43,7 +44,7 @@ export function ModelPicker({ catalog, value, lockAgent, onChange, up = true }: 
         <ChevronDown size={14} />
       </button>
       {open && (
-        <div className={`popover model-popover ${up ? 'popover-up' : 'popover-down'}`}>
+        <div className={`popover model-popover ${up ? 'popover-up' : 'popover-down'} ${right ? 'popover-right' : ''}`}>
           <div className="model-column">
             {(Object.keys(catalog) as AgentId[]).map((agent) => {
               const disabled = lockAgent && agent !== value.agent;

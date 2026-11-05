@@ -19,6 +19,8 @@ export interface TurnContext {
   project: Project;
   systemPrompt: string;
   attachments: Attachment[];
+  /** How the CLI starts the Lead's tools, for a Lead. */
+  tools?: { command: string; args: string[] };
 }
 
 export interface AgentAdapter {

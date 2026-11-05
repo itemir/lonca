@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { ChangeSet } from '../../shared/types.ts';
-import { Lonca, dockerExec, git, makeFixtureRepo } from '../support/harness.ts';
+import { Lonca, sandboxExec, git, makeFixtureRepo } from '../support/harness.ts';
 
 test('shows rename metadata and only the edited lines of a renamed file', async ({ page }) => {
   const lonca = new Lonca({ port: 48343, instance: 'rename-diff-test', firstWorkspacePort: 55400 });
@@ -17,7 +17,7 @@ test('shows rename metadata and only the edited lines of a renamed file', async 
     await lonca.start();
     const project = await lonca.waitForProject((await lonca.api('POST', '/projects', { path: fixture })).id);
     const workspace = await lonca.waitForWorkspace((await lonca.api('POST', `/projects/${project.id}/workspaces`, {})).workspace.id);
-    expect(dockerExec(workspace.containerName, `cd '${workspace.path}' && git mv '${oldPath}' '${newPath}'`).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `cd '${workspace.path}' && git mv '${oldPath}' '${newPath}'`).code).toBe(0);
     const changes = await lonca.api<ChangeSet>('GET', `/workspaces/${workspace.id}/changes`);
     expect(changes.files).toEqual([expect.objectContaining({ status: 'R', path: newPath, oldPath, added: 0, removed: 0 })]);
     const query = new URLSearchParams({ path: newPath, oldPath });

@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, ArrowDown, Bot, Brain, CheckCircle2, ChevronRight, Circle, CircleDot, ClipboardList, Eye, FilePen, Globe,
-  Info, Paperclip, Search, Send, Terminal as TerminalIcon, Wrench, X,
+  AlertTriangle, ArrowDown, Bell, Bot, Brain, CheckCircle2, ChevronRight, Circle, CircleDot, ClipboardList, Eye, FilePen, Globe,
+  Info, Paperclip, Search, Send, Terminal as TerminalIcon, Users, Wrench, X,
 } from 'lucide-react';
 import type {
   ChatItem, NoticeItem, ResultItem, Session, ThinkingItem, ToolItem, ToolKind, UserItem, Workspace,
@@ -10,6 +10,7 @@ import { api } from '../api.ts';
 import { formatDuration, relativeToWorkspace } from '../format.ts';
 import { attempt, signInBlocker, useStore } from '../store.ts';
 import { Markdown } from './Markdown.tsx';
+import { modelLabel } from './ModelPicker.tsx';
 import { ErrorBoundary, Spinner } from './ui.tsx';
 
 const TOOL_ICONS: Record<ToolKind, typeof Wrench> = {
@@ -19,6 +20,7 @@ const TOOL_ICONS: Record<ToolKind, typeof Wrench> = {
   search: Search,
   web: Globe,
   agent: Bot,
+  team: Users,
   todos: ClipboardList,
   other: Wrench,
 };
@@ -52,19 +54,23 @@ function TodoList({ item }: { item: ToolItem }) {
 
 function ToolRow({ item, root, nested }: { item: ToolItem; root: string; nested: ChatItem[] }) {
   const [open, setOpen] = useState(false);
+  const agent = useStore((store) => (item.agentId ? store.sessions.find((session) => session.id === item.agentId) : undefined));
+  const catalog = useStore((store) => store.catalog);
   const Icon = TOOL_ICONS[item.kind];
   if (item.kind === 'todos' && item.todos?.length) {
     return <div className="tool tool-todos"><TodoList item={item} /></div>;
   }
   const detail = relativeToWorkspace(item.detail, root);
-  const hasBody = Boolean(item.output || item.edits?.length || nested.length > 0 || (detail && detail.includes('\n')));
-  const showCommand = item.kind === 'command' && detail;
+  const hasBody = Boolean(item.output || item.edits?.length || nested.length > 0 || (detail && (detail.includes('\n') || item.kind === 'team')));
+  const showCommand = (item.kind === 'command' || item.kind === 'team') && detail;
   return (
     <div className={`tool tool-${item.status}`}>
       <button type="button" className="tool-head" aria-expanded={open} disabled={!hasBody} onClick={() => setOpen((value) => !value)}>
         <span className="tool-icon">{item.status === 'running' ? <Spinner size={13} /> : <Icon size={14} />}</span>
-        <span className="tool-title">{item.title}</span>
-        {detail && <span className="tool-detail">{detail.split('\n')[0]}</span>}
+        <span className="tool-title">
+          {item.title}{agent && <> {agent.title} <span className="tab-model">{modelLabel(catalog, agent.agent, agent.model)}</span></>}
+        </span>
+        {detail && <span className={`tool-detail ${item.kind === 'team' ? 'tool-detail-plain' : ''}`}>{detail.split('\n')[0]}</span>}
         {item.status === 'error' && <span className="tool-failed">failed</span>}
         {hasBody && <ChevronRight size={14} className={`tool-chevron ${open ? 'rotated' : ''}`} />}
       </button>
@@ -97,8 +103,31 @@ function ThinkingRow({ item }: { item: ThinkingItem }) {
 
 function UserMessage({ item, sessionId }: { item: UserItem; sessionId: string }) {
   const running = useStore((store) => store.sessions.find((session) => session.id === sessionId)?.status === 'running');
+  const queuedNote = item.queued && (
+    <div className="queued-note">
+      {running ? 'Sends when the current turn finishes' : 'Waiting to send'}
+      {!running && (
+        <button type="button" className="link-button" onClick={() => void attempt(() => api.flushQueue(sessionId))}>
+          <Send size={12} /> Send now
+        </button>
+      )}
+      <button type="button" className="link-button" onClick={() => void attempt(() => api.cancelQueued(sessionId, item.id))}>
+        <X size={12} /> Cancel
+      </button>
+    </div>
+  );
+  // Written for the Lead to read, so what's shown is what happened.
+  if (item.from === 'lonca') {
+    return (
+      <div className="wake">
+        <div className="wake-row"><Bell size={13} /><span>{item.summary ?? 'An update from Lonca'}</span></div>
+        {queuedNote}
+      </div>
+    );
+  }
   return (
-    <div className={`user-message ${item.queued ? 'queued' : ''}`}>
+    <div className={`user-message ${item.queued ? 'queued' : ''} ${item.from === 'lead' ? 'from-lead' : ''}`}>
+      {item.from === 'lead' && <div className="message-from">From Lead <span className="from-note">Private to this agent, the Lead and you.</span></div>}
       <div className="user-text">{item.text}</div>
       {item.attachments && item.attachments.length > 0 && (
         <div className="attachment-list">
@@ -107,19 +136,7 @@ function UserMessage({ item, sessionId }: { item: UserItem; sessionId: string })
           ))}
         </div>
       )}
-      {item.queued && (
-        <div className="queued-note">
-          {running ? 'Sends when the current turn finishes' : 'Waiting to send'}
-          {!running && (
-            <button type="button" className="link-button" onClick={() => void attempt(() => api.flushQueue(sessionId))}>
-              <Send size={12} /> Send now
-            </button>
-          )}
-          <button type="button" className="link-button" onClick={() => void attempt(() => api.cancelQueued(sessionId, item.id))}>
-            <X size={12} /> Cancel
-          </button>
-        </div>
-      )}
+      {queuedNote}
     </div>
   );
 }
@@ -229,7 +246,7 @@ function Transcript({ items, root, sessionId = '' }: { items: ChatItem[]; root: 
   );
 }
 
-function Elapsed({ since }: { since: number }) {
+export function Elapsed({ since }: { since: number }) {
   const [, tick] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => tick((value) => value + 1), 1000);
@@ -240,7 +257,7 @@ function Elapsed({ since }: { since: number }) {
 
 const TRANSCRIPT_RETRY_MS = 3000;
 
-export function ChatTranscript({ session, workspace, intro }: { session: Session; workspace: Workspace; intro: React.ReactNode }) {
+export function ChatTranscript({ session, workspace, intro, footer }: { session: Session; workspace: Workspace; intro: React.ReactNode; footer?: React.ReactNode }) {
   const transcript = useStore((store) => store.transcripts[session.id]);
   const loadTranscript = useStore((store) => store.loadTranscript);
   const loadFailure = useStore((store) => store.transcriptErrors[session.id]);
@@ -304,6 +321,7 @@ export function ChatTranscript({ session, workspace, intro }: { session: Session
         {session.status === 'running' && (
           <div className="working-row"><Spinner size={13} /> Working… <Elapsed since={startedAt} /></div>
         )}
+        {footer}
         <Transcript items={waiting} root={workspace.path} sessionId={session.id} />
       </div>
       {showJump && (

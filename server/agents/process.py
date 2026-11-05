@@ -6,6 +6,7 @@ argv holds the unique run directory, so a process reusing that PID cannot qualif
 """
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -69,7 +70,53 @@ def output_receipt(directory, **fields):
     print("\nLONCA_OUTPUT " + json.dumps({**fields, "code": code, "stderr": stderr}), file=sys.stderr, flush=True)
 
 
-def follow(directory, offset):
+CALL_ID = re.compile(r"[a-f0-9]{32}")
+CALL_LIMIT = 512 * 1024
+
+
+class ToolCalls:
+    """Hands on a Lead's tool calls. A call with a reply has been dealt with, and any
+    other is handed on again after a reconnect, so the server needs no saved position."""
+
+    def __init__(self, directory):
+        self.directory = directory
+        self.position = 0
+        self.partial = b""
+
+    def forward(self):
+        try:
+            fd = os.open(f"{self.directory}/calls.jsonl", os.O_RDONLY | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return
+            os.lseek(fd, self.position, os.SEEK_SET)
+            data = os.read(fd, CALL_LIMIT)
+        finally:
+            os.close(fd)
+        self.position += len(data)
+        lines = (self.partial + data).split(b"\n")
+        self.partial = lines.pop()
+        if len(self.partial) > CALL_LIMIT:
+            self.partial = b""
+        for line in lines:
+            self.hand_on(line)
+
+    def hand_on(self, line):
+        try:
+            call = json.loads(line)
+            identifier = call["id"]
+        except (ValueError, KeyError, TypeError):
+            return
+        if not isinstance(identifier, str) or not CALL_ID.fullmatch(identifier):
+            return
+        if not os.path.lexists(f"{self.directory}/replies/{identifier}.json"):
+            # json.dumps keeps it to one line of ASCII, so it can't be split across a multibyte character.
+            print("LONCA_CALL " + json.dumps(call), file=sys.stderr, flush=True)
+
+
+def follow(directory, offset, calls=None):
     try:
         fd = os.open(f"{directory}/out.jsonl", os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError:
@@ -91,6 +138,8 @@ def follow(directory, offset):
             # Revalidate throughout the stream, not only when attaching it. A
             # tail --pid would wait forever if that PID acquired another owner.
             alive = alive and owner(directory) is not None
+            if calls:
+                calls.forward()
             data = stream.read(64 * 1024)
             if data:
                 sys.stdout.buffer.write(data)
@@ -105,7 +154,7 @@ def follow(directory, offset):
 def main():
     action, directory, *args = sys.argv[1:]
     if action == "follow":
-        follow(directory, int(args[0]))
+        follow(directory, int(args[0]), ToolCalls(directory) if "calls" in args[1:] else None)
     elif action == "status":
         print("alive" if owner(directory) else "dead")
     elif action == "signal":

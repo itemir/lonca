@@ -3,7 +3,7 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentId, LoginMethod, LoginState } from '../../shared/types.ts';
+import type { LoginMethod, LoginState } from '../../shared/types.ts';
 import {
   LoginScreen, classifyCodexFailure, findClaudeLink, findClaudeToken, findCodexDevice, findRedirectLink, isClaudeCodeRejected, redact,
 } from '../../server/agents/login.ts';
@@ -179,6 +179,8 @@ class FakeProcess implements LoginProcess {
     this.delivered.push({ port, path });
   }
 
+  savedLogin = async (): Promise<string> => 'what the CLI saved';
+
   async kill(): Promise<void> {
     this.killed = true;
   }
@@ -199,7 +201,6 @@ function setup(overrides: Partial<LoginDriver> = {}, timings = TIMINGS) {
   const methods: LoginMethod[] = [];
   const published: (LoginState | null)[] = [];
   const saved: string[] = [];
-  const cleanedUp: AgentId[] = [];
   const ports = new Map<number, (target: URL) => Promise<ReturnOutcome>>();
   const driver: LoginDriver = {
     spawn: async (_agent, method) => {
@@ -212,17 +213,15 @@ function setup(overrides: Partial<LoginDriver> = {}, timings = TIMINGS) {
       ports.set(port, onReturn);
       return () => ports.delete(port);
     },
+    checkClaudeToken: async () => {},
     saveClaudeToken: async (token) => {
       saved.push(token);
     },
     finishCodexLogin: async () => true,
-    cleanUp: async (agent) => {
-      cleanedUp.push(agent);
-    },
     publish: (_agent, login) => published.push(login),
     ...overrides,
   };
-  return { manager: new LoginManager(driver, timings), processes, methods, published, saved, cleanedUp, ports };
+  return { manager: new LoginManager(driver, timings), processes, methods, published, saved, ports };
 }
 
 const tick = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -383,9 +382,29 @@ describe('the Codex sign-in with a one-time code', () => {
     expect(manager.states().codex).toMatchObject({ phase: 'waiting', code: 'FAKE-7CODE', url: 'http://platform.claude.com:8080/codex/device' });
     processes[0].exit(0);
     await tick();
-    expect(finish).toHaveBeenCalledOnce();
+    expect(finish).toHaveBeenCalledExactlyOnceWith('what the CLI saved');
     expect(manager.states().codex?.phase).toBe('done');
     expect(manager.states().codex?.code).toBeUndefined();
+    expect(processes[0].killed).toBe(true);
+  });
+
+  it('keeps nothing from an attempt cancelled while its login was being read', async () => {
+    const finish = vi.fn(async () => true);
+    let read = (_login: string) => {};
+    const { manager, processes } = setup({ finishCodexLogin: finish });
+    await manager.start('codex', 'device');
+    processes[0].savedLogin = () => new Promise((resolve) => {
+      read = resolve;
+    });
+    processes[0].emit(recording('codex-success'));
+    processes[0].exit(0);
+    await tick();
+    expect(manager.states().codex?.phase).toBe('saving');
+    await manager.cancel('codex');
+    read('a login');
+    await tick();
+    expect(finish).not.toHaveBeenCalled();
+    expect(processes[0].killed).toBe(true);
   });
 
   it('doesn’t call it done if the login didn’t take', async () => {
@@ -397,14 +416,14 @@ describe('the Codex sign-in with a one-time code', () => {
     expect(manager.states().codex).toMatchObject({ phase: 'failed', failure: 'stopped' });
   });
 
-  it('says why when device sign-in is off, and puts the shared login back', async () => {
-    const { manager, processes, cleanedUp } = setup();
+  it('says why when device sign-in is off, and leaves nothing behind', async () => {
+    const { manager, processes } = setup();
     await manager.start('codex', 'device');
     processes[0].emit(recording('codex-disabled'));
     processes[0].exit(1);
     await tick();
     expect(manager.states().codex).toMatchObject({ phase: 'failed', failure: 'disabled' });
-    expect(cleanedUp).toEqual(['codex']);
+    expect(processes[0].killed).toBe(true);
   });
 });
 
@@ -603,6 +622,27 @@ describe('coming back from the sign-in page', () => {
     expect(manager.states().codex?.phase).toBe('done');
   });
 
+  it('doesn’t save a token if the sign-in was cancelled while it was being checked', async () => {
+    let checked = () => {};
+    const { manager, processes, saved } = setup({
+      checkClaudeToken: () => new Promise((resolve) => {
+        checked = resolve;
+      }),
+    });
+    await manager.start('claude');
+    processes[0].emit(promptFrames('claude-success'));
+    await tick();
+    await manager.submitCode('claude', 'abc');
+    processes[0].emit(recording('claude-success'));
+    processes[0].exit(0);
+    await tick();
+    expect(manager.states().claude?.phase).toBe('saving');
+    await manager.cancel('claude');
+    checked();
+    await tick();
+    expect(saved).toEqual([]);
+  });
+
   it('doesn’t let an attempt that’s over say it worked, over the one that replaced it', async () => {
     let saved = () => {};
     const { manager, processes, published } = setup({
@@ -640,7 +680,7 @@ describe('coming back from the sign-in page', () => {
 
   it('Codex: tells a page that said no from a sign-in the service refused', async () => {
     for (const [name, failure] of [['codex-redirect-denied', 'denied'], ['codex-redirect-rejected', 'rejected']] as const) {
-      const { manager, processes, ports, cleanedUp } = setup();
+      const { manager, processes, ports } = setup();
       await manager.start('codex');
       processes[0].emit(codexPrompt(name));
       await tick();
@@ -650,7 +690,8 @@ describe('coming back from the sign-in page', () => {
       processes[0].exit(1);
       expect(await outcome).toBe('failed');
       expect(manager.states().codex).toMatchObject({ phase: 'failed', failure });
-      expect(cleanedUp).toEqual(['codex']);
+      await tick();
+      expect(processes[0].killed).toBe(true);
       expect(ports.size).toBe(0);
     }
   });
@@ -713,13 +754,12 @@ describe('coming back from the sign-in page', () => {
 
   it('Codex: says the port is taken, and the one-time code doesn’t need it', async () => {
     const listen = vi.fn(async () => { throw new Error('EADDRINUSE'); });
-    const { manager, processes, methods, cleanedUp } = setup({ listen });
+    const { manager, processes, methods } = setup({ listen });
     await manager.start('codex');
     processes[0].emit(codexPrompt('codex-redirect-success'));
     await tick();
     expect(manager.states().codex).toMatchObject({ phase: 'failed', failure: 'port-busy', message: '1455' });
     expect(processes[0].killed).toBe(true);
-    expect(cleanedUp).toEqual(['codex']);
 
     await manager.start('codex', 'device');
     expect(methods).toEqual(['browser', 'device']);
@@ -894,7 +934,7 @@ describe('starting and stopping a sign-in', () => {
   });
 
   it('cancels cleanly, and stops anything that arrives afterwards from mattering', async () => {
-    const { manager, processes, published, cleanedUp, saved } = setup();
+    const { manager, processes, published, saved } = setup();
     await manager.start('claude');
     processes[0].emit(promptFrames('claude-success'));
     await tick();
@@ -902,7 +942,6 @@ describe('starting and stopping a sign-in', () => {
     expect(processes[0].killed).toBe(true);
     expect(manager.states().claude).toBeUndefined();
     expect(published.at(-1)).toBeNull();
-    expect(cleanedUp).toEqual(['claude']);
     processes[0].exit(0);
     await tick();
     expect(saved).toEqual([]);

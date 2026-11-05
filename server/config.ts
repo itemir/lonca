@@ -11,17 +11,16 @@ export const LONCA_HOME = fs.realpathSync(home);
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const WEB_DIST = path.join(REPO_ROOT, 'dist', 'web');
-export const IMAGE_CONTEXT = path.join(REPO_ROOT, 'docker', 'workspace');
+/** What the template new workspaces start from is made of. */
+export const TEMPLATE_DIR = path.join(REPO_ROOT, 'template');
 
 export const HTTP_PORT = Number(process.env.PORT ?? 4700);
 export const DEV_MODE = process.env.LONCA_DEV === '1';
 
-/** Keeps a second instance, such as a test run, from touching this one's Docker resources. */
+/** Keeps a second instance, such as a test run, from touching this one's sandboxes. */
 export const INSTANCE = process.env.LONCA_INSTANCE ?? '';
 export const PREFIX = INSTANCE ? `lonca-${INSTANCE}` : 'lonca';
 
-/** `auto` gives new workspaces a VM wherever Docker Sandboxes can run one, and a container otherwise. */
-export const RUNTIME_CHOICE = process.env.LONCA_RUNTIME ?? 'auto';
 
 export const FIRST_WORKSPACE_PORT = Number(process.env.LONCA_FIRST_PORT ?? 20000);
 export const PORTS_PER_WORKSPACE = 10;
@@ -30,9 +29,17 @@ export const paths = {
   state: path.join(LONCA_HOME, 'state.json'),
   secrets: path.join(LONCA_HOME, 'secrets.json'),
   token: path.join(LONCA_HOME, 'token'),
+  /** Instructions for every project's Leads. Never mounted into a workspace. */
+  playbook: path.join(LONCA_HOME, 'lead.md'),
+  /** A project's own. Beside its repository rather than in it, so agents can't reach it. */
+  projectPlaybook: (slug: string) => path.join(LONCA_HOME, 'projects', slug, 'lead.md'),
   sessions: path.join(LONCA_HOME, 'sessions'),
-  /** The shared Codex login. Mounted into every workspace, so never read from the host. */
-  credentials: path.join(LONCA_HOME, 'credentials'),
+  /** Codex's sign-in. No virtual machine mounts it. */
+  helperCredentials: path.join(LONCA_HOME, 'helper-credentials'),
+  /** Where Codex's sign-in used to be. Older workspaces can't lose the mount, so it's kept, and kept empty. */
+  oldCredentials: path.join(LONCA_HOME, 'credentials'),
+  /** What Docker Sandboxes' proxy reads to fill in credentials. Never mounted into anything. */
+  boundary: path.join(LONCA_HOME, 'boundary'),
   /** What a sandbox has to keep when it's replaced. Written by agents, so never read from the host. */
   agentState: (workspaceId: string) => path.join(LONCA_HOME, 'agent-state', workspaceId),
   projects: path.join(LONCA_HOME, 'projects'),
@@ -41,6 +48,8 @@ export const paths = {
   worktree: (slug: string, name: string) => path.join(LONCA_HOME, 'projects', slug, 'workspaces', name),
 };
 
-/** Inside a container. Writable by the agent, never read from the host. */
+/** Inside a sandbox. Writable by the agent, never read from the host. */
 export const RUNS_DIR = '/var/tmp/lonca/agent-runs';
 export const TTY_DIR = '/var/tmp/lonca/tty';
+/** Where a Lead's agent keeps its notes, away from the checkout everyone reads. */
+export const SCRATCH_DIR = '/var/tmp/lonca/agent-scratch';

@@ -9,7 +9,7 @@ const claudeModel = (id: string, label: string): ModelOption => ({
   defaultEffort: 'high',
 });
 
-/** Codex's list is replaced at runtime with the catalog of the CLI in the workspace image. */
+/** Codex's list is replaced at runtime with the catalog of the CLI in the workspace template. */
 export const DEFAULT_CATALOG: Catalog = {
   claude: {
     label: 'Claude',

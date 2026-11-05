@@ -1,8 +1,8 @@
 import type { Project } from '../shared/types.ts';
+import { placeholderEnv } from './boundary.ts';
 import { state } from './store.ts';
-import { secretEnv } from './system.ts';
 
-/** Environment for agents, terminals and scripts. Secrets are passed per process, never baked into a container. */
+/** Environment for agents, terminals and scripts. It holds no credentials of Lonca's, only placeholders for them. */
 export function execEnv(project: Project | undefined): string[] {
   const { gitName, gitEmail } = state.settings;
   const identity = [
@@ -10,5 +10,5 @@ export function execEnv(project: Project | undefined): string[] {
     ...(gitEmail ? [`GIT_AUTHOR_EMAIL=${gitEmail}`, `GIT_COMMITTER_EMAIL=${gitEmail}`] : []),
   ];
   const custom = Object.entries(project?.settings.env ?? {}).map(([key, value]) => `${key}=${value}`);
-  return [...identity, ...secretEnv(), ...custom];
+  return [...identity, ...placeholderEnv(), ...custom];
 }

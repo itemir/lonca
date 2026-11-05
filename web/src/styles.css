@@ -42,7 +42,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 body.resizing iframe, body.resizing .xterm { pointer-events: none; }
 
 button, input, textarea, select { font: inherit; color: inherit; }
-button { background: none; border: 0; padding: 0; cursor: pointer; }
+button { background: none; border: 0; padding: 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 button:disabled { cursor: default; }
 a { color: inherit; }
 h1, h2, h3, p, ul { margin: 0; padding: 0; }
@@ -80,6 +80,7 @@ code { font-family: var(--mono); font-size: 0.93em; }
 .main {
   min-width: 0;
   height: 100vh;
+  height: var(--viewport-height, 100dvh);
   display: flex;
   flex-direction: column;
   background: var(--bg);
@@ -407,6 +408,7 @@ select.input { appearance: auto; }
 
 .sidebar {
   height: 100vh;
+  height: var(--viewport-height, 100dvh);
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -780,6 +782,36 @@ a.crumb:hover { color: var(--text); }
 .session-tab .tab-close { display: none; }
 .session-tab:hover .tab-close, .session-tab .tab-close:focus-visible { display: inline-grid; }
 
+/* The Lead and its agents: one fixed place for state, so labels don't jump. */
+.session-tab.team-tab, .session-tab.team-tab.active { min-width: 0; padding-right: 4px; }
+.team-tab .tab-label { gap: 6px; }
+.tab-slot { flex: none; width: 14px; display: inline-grid; place-items: center; }
+.lead-tab { color: var(--text-2); }
+.lead-tab .tab-title { font-weight: 500; }
+.tab-model { flex: none; color: var(--text-3); font-size: 12px; }
+.tab.active .tab-model { color: var(--text-2); }
+.unread-dot { flex: none; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.tab-state-limit { flex: none; color: var(--warning); }
+.tab-state-failed { flex: none; color: var(--error); }
+.tab-state-stopped { flex: none; color: var(--text-3); }
+.tab-divider { flex: none; width: 1px; height: 18px; margin: 0 6px; background: var(--line-strong); }
+
+.new-lead-tab {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  margin-right: 6px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 7px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.new-lead-tab:hover { background: var(--hover); color: var(--text); }
+
 .tab-rename {
   width: 150px;
   padding: 2px 5px;
@@ -803,7 +835,7 @@ a.crumb:hover { color: var(--text); }
   font-size: 13px;
 }
 
-.workspace-banner > span:first-of-type { flex: 1; overflow-wrap: anywhere; }
+.workspace-banner > span:not(.spinner) { flex: 1; overflow-wrap: anywhere; }
 .workspace-banner.banner-error { background: var(--error-bg); color: var(--error); }
 
 .workspace-content {
@@ -897,6 +929,13 @@ a.crumb:hover { color: var(--text); }
 }
 
 .user-message.queued { border: 1px dashed var(--line-strong); background: none; }
+.user-message.from-lead { border-radius: 0 10px 10px 0; box-shadow: inset 2px 0 0 var(--accent); }
+.message-from { margin-bottom: 4px; color: var(--text-2); font-size: 12.5px; font-weight: 500; }
+.from-note { margin-left: 4px; color: var(--text-3); font-weight: 400; }
+.wake { margin: 14px 0 6px; }
+.wake-row { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 12.5px; }
+.wake-row::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+.wake-row svg { flex: none; }
 .user-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .queued-note {
@@ -1022,6 +1061,9 @@ a.crumb:hover { color: var(--text); }
 
 .tool-title { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+.tool-title .tab-model { margin-left: 2px; }
+.tool-detail-plain.tool-detail { font-family: var(--font); font-size: 12.5px; }
+
 .tool-detail {
   flex: 1;
   min-width: 0;
@@ -1130,6 +1172,22 @@ a.crumb:hover { color: var(--text); }
   color: var(--text-3);
   font-size: 13px;
 }
+
+/* What a Lead's agents are doing, at the end of its conversation. */
+.team-card { margin: 10px 0 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
+.team-row-wrap { display: flex; align-items: center; padding-right: 10px; border-top: 1px solid var(--line); }
+.team-row-wrap:first-child { border-top: 0; }
+.team-row { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 5px 12px; font-size: 13px; text-align: left; }
+.team-row:hover { background: var(--raised); }
+.team-row-icon { flex: none; width: 16px; display: inline-grid; place-items: center; }
+.team-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.team-row-title, .team-row-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-row-detail { color: var(--text-3); font-size: 12px; }
+.team-row-time { flex: none; color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.team-note { padding: 7px 12px 8px; border-top: 1px solid var(--line); color: var(--text-3); font-size: 12.5px; }
+.waiting-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 8px 0; color: var(--text-3); font-size: 13px; }
+.waiting-row .link-button { font-size: 12.5px; color: var(--text-2); }
+.closed-note { flex: none; padding: 12px 20px 18px; color: var(--text-3); font-size: 13px; text-align: center; }
 
 .jump-latest {
   position: absolute;
@@ -1244,6 +1302,11 @@ a.crumb:hover { color: var(--text); }
 .popover-down { top: calc(100% + 6px); }
 .model-column { flex: 1; min-width: 190px; }
 .model-group + .model-group { margin-top: 6px; }
+.popover-right { left: auto; right: 0; }
+.lock-popover { left: 0; width: 300px; padding: 9px 11px; color: var(--text-2); font-size: 13px; }
+.lock-popover strong { color: var(--text); font-weight: 500; }
+.switch-picker { margin: 10px 0; padding: 3px; border: 1px solid var(--line-strong); border-radius: 8px; width: fit-content; }
+.create-help { min-width: 0; margin-left: 2px; }
 .model-efforts { flex: none; min-width: 130px; border-left: 1px solid var(--line-strong); margin-left: 4px; padding-left: 4px; }
 
 /* Side panel */
@@ -1753,6 +1816,13 @@ a.home-row:hover { background: var(--panel); }
 }
 
 .empty-card p { margin-bottom: 12px; }
+.empty-card strong { color: var(--text); font-weight: 500; }
+.no-lead { max-width: 560px; padding-top: 72px; }
+.inline-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.playbook-source { margin-bottom: 8px; }
+.playbook-field { margin-top: 8px; }
+.playbook-text { min-height: 280px; line-height: 1.6; }
+.settings-select { width: 72px; flex: none; }
 
 .settings-section {
   margin-top: 34px;
@@ -2008,6 +2078,26 @@ a.home-row:hover { background: var(--panel); }
   }
 }
 
+/* A phone moves between tabs from a list rather than a row of tabs. */
+.phone-back { flex: none; display: inline-flex; align-items: center; gap: 2px; height: 40px; margin-left: -6px; color: var(--text-2); font-size: 14px; }
+.phone-title { min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.phone-title strong, .phone-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.phone-title strong { font-size: 14px; font-weight: 500; }
+.phone-title span { color: var(--text-3); font-size: 12px; }
+.team-strip { flex: none; width: 100%; display: flex; align-items: center; gap: 9px; min-height: 44px; padding: 0 14px; background: var(--panel); border-top: 1px solid var(--line); color: var(--text-2); font-size: 13.5px; text-align: left; }
+.tabs-sheet { position: absolute; inset: 0; z-index: 25; display: flex; flex-direction: column; background: var(--bg); }
+.tabs-sheet-head { flex: none; display: flex; align-items: center; gap: 8px; height: var(--header); padding: 0 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.tabs-sheet-head strong { font-weight: 500; }
+.tabs-sheet-body { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 0 16px; }
+.tabs-sheet .panel-heading { display: flex; align-items: center; justify-content: space-between; min-height: 40px; padding: 8px 16px 2px; color: var(--text-3); font-size: 12.5px; }
+.tabs-sheet .panel-heading .link-button { color: var(--text-2); font-size: 13px; }
+.sheet-row { display: flex; align-items: center; padding-right: 10px; }
+.sheet-row.active { background: var(--raised); }
+.sheet-open, .sheet-new { min-width: 0; display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 6px 16px; font-size: 14px; text-align: left; }
+.sheet-open { flex: 1; }
+.sheet-new { width: 100%; color: var(--text-2); }
+.sheet-icon { flex: none; width: 16px; display: inline-grid; place-items: center; color: var(--text-2); }
+
 @media (max-width: 720px) {
   .app { grid-template-columns: minmax(0, 1fr); }
 
@@ -2034,6 +2124,22 @@ a.home-row:hover { background: var(--panel); }
   .close-dialog .modal { width: 100%; max-height: 100%; border-width: 1px 0 0; border-radius: 12px 12px 0 0; }
   .close-dialog .modal-actions { flex-direction: column-reverse; }
   .close-dialog .button { height: 44px; }
+  .lock-popover { width: min(300px, 80vw); }
+  /* An editor can't open from a phone, and there's nowhere for a separate window to go. */
+  .open-in, .terminal-window-button { display: none; }
+  .create-help { display: none; }
+}
+
+/* No mouse: anything to press has to be big enough for a finger, and iOS zooms in on small inputs. */
+@media (pointer: coarse) {
+  .composer-input, .input { font-size: 16px; }
+  .send-button { width: 44px; height: 44px; }
+  .icon-button { width: 40px; height: 40px; }
+  .model-button { height: 40px; }
+  .button { min-height: 44px; }
+  .button-small { min-height: 40px; }
+  .menu-item { min-height: 44px; }
+  .tool-head { min-height: 36px; }
 }
 
 /* Fingers need bigger targets than the dense layout gives them. */
@@ -2050,11 +2156,4 @@ a.home-row:hover { background: var(--panel); }
 
   .bottom-tabs { height: 44px; }
   .bottom-tabs .icon-button, .terminal-tab .tab-close { width: 44px; height: 44px; }
-}
-
-/* An editor can't open from a phone, and the header needs the room for the trash icon. Nor is
-   there anywhere for a separate window to go. */
-
-@media (max-width: 720px) and (pointer: coarse) {
-  .open-in, .terminal-window-button { display: none; }
 }

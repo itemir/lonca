@@ -2,13 +2,13 @@ import path from 'node:path';
 import type {
   ChangeSet, ChangedFile, CheckRun, Checks, DiffStat, FileContent, FileEntry, PullRequest, SearchHit, Workspace,
 } from '../shared/types.ts';
-import { exec, execText } from './docker.ts';
+import { exec, execText } from './sandbox.ts';
 import { execEnv } from './env.ts';
 import { getProject, getSecrets } from './store.ts';
 import { HttpError } from './util.ts';
-import { publishWorkspace, runningContainer } from './workspaces.ts';
+import { publishWorkspace, runningSandbox } from './workspaces.ts';
 
-// Every read of a worktree happens through the container. The host never follows a path
+// Every read of a worktree happens through the sandbox. The host never follows a path
 // inside it, so a symlink an agent planted can't point the server at the host's files.
 
 const READ_LIMIT = 2 * 1024 * 1024;
@@ -22,10 +22,10 @@ export function safeRelativePath(input: string): string {
 }
 
 export async function listDirectory(workspace: Workspace, directory: string): Promise<FileEntry[]> {
-  const containerId = await runningContainer(workspace);
+  const sandbox = await runningSandbox(workspace);
   const relative = safeRelativePath(directory);
   const listing = await exec(
-    containerId,
+    sandbox,
     // The `./` keeps a directory named `-delete` from being read as an instruction to find.
     ['find', `./${relative}`, '-mindepth', '1', '-maxdepth', '1', '!', '-name', '.git', '-printf', '%y\t%s\t%f\\0'],
     { workdir: workspace.path },
@@ -46,7 +46,7 @@ export async function listDirectory(workspace: Workspace, directory: string): Pr
       } satisfies FileEntry;
     });
   if (entries.length > 0) {
-    const check = await exec(containerId, ['git', 'check-ignore', '-z', '--stdin'], {
+    const check = await exec(sandbox, ['git', 'check-ignore', '-z', '--stdin'], {
       workdir: workspace.path,
       stdin: entries.map((entry) => entry.path).join('\0') + '\0',
     });
@@ -65,13 +65,13 @@ const MIME: Record<string, string> = {
 };
 
 export async function readWorkspaceFile(workspace: Workspace, file: string): Promise<FileContent> {
-  const containerId = await runningContainer(workspace);
+  const sandbox = await runningSandbox(workspace);
   const relative = safeRelativePath(file);
-  const stat = await exec(containerId, ['stat', '-Lc', '%F\t%s', '--', relative], { workdir: workspace.path });
+  const stat = await exec(sandbox, ['stat', '-Lc', '%F\t%s', '--', relative], { workdir: workspace.path });
   if (stat.code !== 0) throw new HttpError(404, `${relative} doesn’t exist`);
   const [kind, size] = stat.stdout.toString('utf8').trim().split('\t');
   if (!kind.startsWith('regular')) throw new HttpError(400, `${relative} isn’t a file`);
-  const content = await exec(containerId, ['head', '-c', String(READ_LIMIT), '--', relative], { workdir: workspace.path, maxBytes: READ_LIMIT + 1 });
+  const content = await exec(sandbox, ['head', '-c', String(READ_LIMIT), '--', relative], { workdir: workspace.path, maxBytes: READ_LIMIT + 1 });
   const mime = MIME[path.posix.extname(relative).toLowerCase()];
   const isBinary = content.stdout.subarray(0, 8000).includes(0);
   const asBase64 = isBinary || (mime !== undefined && mime !== 'image/svg+xml');
@@ -104,9 +104,9 @@ function rankFileMatch(filePath: string, query: string): number {
 export async function searchFiles(workspace: Workspace, query: string, mode: 'names' | 'content'): Promise<SearchHit[]> {
   const needle = query.trim();
   if (!needle) return [];
-  const containerId = await runningContainer(workspace);
+  const sandbox = await runningSandbox(workspace);
   if (mode === 'content') {
-    const result = await exec(containerId, [
+    const result = await exec(sandbox, [
       'rg', '--line-number', '--no-heading', '--color', 'never', '--smart-case', '--fixed-strings',
       '--max-columns', '200', '--max-count', '5', '--max-filesize', '1M', '--', needle,
     ], { workdir: workspace.path, maxBytes: 512 * 1024, timeoutMs: 15000 });
@@ -119,7 +119,7 @@ export async function searchFiles(workspace: Workspace, query: string, mode: 'na
         return match ? [{ path: match[1], line: Number(match[2]), text: match[3].trim() }] : [];
       });
   }
-  const listed = await exec(containerId, ['git', 'ls-files', '-co', '--exclude-standard', '-z'], { workdir: workspace.path, maxBytes: 8 * 1024 * 1024 });
+  const listed = await exec(sandbox, ['git', 'ls-files', '-co', '--exclude-standard', '-z'], { workdir: workspace.path, maxBytes: 8 * 1024 * 1024 });
   const lowered = needle.toLowerCase();
   return listed.stdout
     .toString('utf8')
@@ -190,8 +190,8 @@ git rev-list --count "$mb..HEAD"
 `;
 
 export async function getChanges(workspace: Workspace): Promise<ChangeSet> {
-  const containerId = await runningContainer(workspace);
-  const output = await execText(containerId, ['bash', '-c', CHANGES_SCRIPT, 'lonca-changes', workspace.baseBranch], {
+  const sandbox = await runningSandbox(workspace);
+  const output = await execText(sandbox, ['bash', '-c', CHANGES_SCRIPT, 'lonca-changes', workspace.baseBranch], {
     workdir: workspace.path,
     timeoutMs: 30000,
     maxBytes: 16 * 1024 * 1024,
@@ -253,11 +253,11 @@ git --literal-pathspecs diff --no-color -M "$mb" -- "$@"
 `;
 
 export async function getFileDiff(workspace: Workspace, file: string, untracked: boolean, oldFile?: string): Promise<string> {
-  const containerId = await runningContainer(workspace);
+  const sandbox = await runningSandbox(workspace);
   const relative = safeRelativePath(file);
   const oldRelative = oldFile ? safeRelativePath(oldFile) : '';
   const result = await exec(
-    containerId,
+    sandbox,
     ['bash', '-c', DIFF_SCRIPT, 'lonca-diff', workspace.baseBranch, relative, untracked ? '1' : '0', oldRelative],
     { workdir: workspace.path, maxBytes: DIFF_LIMIT, timeoutMs: 30000 },
   );
@@ -278,9 +278,9 @@ export function normalizeCheck(raw: any): CheckRun {
 export async function getChecks(workspace: Workspace): Promise<Checks> {
   const project = getProject(workspace.projectId);
   if (!project?.githubOwner) return { github: 'not-github', pr: null, checks: [] };
-  if (!getSecrets().githubToken) return { github: 'missing-token', pr: null, checks: [] };
-  const containerId = await runningContainer(workspace);
-  const result = await exec(containerId, [
+  if (!project.settings.env.GH_TOKEN && !getSecrets().githubToken) return { github: 'missing-token', pr: null, checks: [] };
+  const sandbox = await runningSandbox(workspace);
+  const result = await exec(sandbox, [
     'gh', 'pr', 'view', workspace.branch,
     '--json', 'number,title,url,state,isDraft,reviewDecision,mergeable,statusCheckRollup',
   ], { workdir: workspace.path, env: execEnv(project), timeoutMs: 30000 });

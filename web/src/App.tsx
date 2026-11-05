@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Route, Routes, useLocation } from 'react-router-dom';
+import { Link, Route, Routes, useLocation } from 'react-router-dom';
 import { AddProjectDialog } from './components/AddProjectDialog.tsx';
 import { LoginDialog } from './components/LoginDialog.tsx';
 import { SearchPalette } from './components/SearchPalette.tsx';
@@ -20,12 +20,26 @@ export function App() {
   const ready = useStore((store) => store.ready);
   const locked = useStore((store) => store.locked);
   const connected = useStore((store) => store.connected);
-  const docker = useStore((store) => store.system.docker);
   const sandbox = useStore((store) => store.system.sandbox);
   const setSearchOpen = useStore((store) => store.setSearchOpen);
   const sidebarOpen = useLayout((layout) => layout.sidebarOpen);
   const sidebar = useResizable('sidebar', 272, 200, 460, 'x', false);
   const location = useLocation();
+  const leadNeedsYou = useStore((store) => store.sessions.some((session) => session.role === 'lead' && !session.closedAt && session.unread));
+
+  useEffect(() => {
+    document.title = leadNeedsYou ? '● Lonca' : 'Lonca';
+  }, [leadNeedsYou]);
+
+  // An on-screen keyboard covers the page without resizing it, which would hide the composer.
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport || !matchMedia('(pointer: coarse)').matches) return;
+    const update = () => document.documentElement.style.setProperty('--viewport-height', `${viewport.height}px`);
+    update();
+    viewport.addEventListener('resize', update);
+    return () => viewport.removeEventListener('resize', update);
+  }, []);
 
   useEffect(() => {
     if (!connectionStarted) {
@@ -55,16 +69,17 @@ export function App() {
       )}
       <main className="main">
         {!connected && <div className="banner">Lost the connection to the Lonca server. Reconnecting…</div>}
-        {connected && !docker.ok && (
-          <div className="banner banner-error">
-            Workspaces can’t run because Lonca can’t reach Docker{docker.error ? `: ${docker.error}` : '.'} Start it and Lonca will pick it up.
-          </div>
+        {connected && sandbox.state === 'not-installed' && (
+          <div className="banner banner-error">Workspaces can’t run without Docker Sandboxes. <Link to="/settings">Settings</Link> says how to install it.</div>
         )}
-        {connected && docker.ok && sandbox.state === 'signed-out' && (
-          <div className="banner">New workspaces are running in containers instead of virtual machines, because Docker Sandboxes isn’t signed in. Run <code>sbx login</code> in a terminal.</div>
+        {connected && sandbox.state === 'unsupported' && (
+          <div className="banner banner-error">Workspaces can’t run on this computer: {sandbox.detail}</div>
         )}
-        {connected && docker.ok && sandbox.state === 'unavailable' && (
-          <div className="banner">New workspaces are running in containers instead of virtual machines, because Docker Sandboxes isn’t working: {sandbox.detail}</div>
+        {connected && sandbox.state === 'signed-out' && (
+          <div className="banner banner-error">Workspaces can’t run because Docker Sandboxes isn’t signed in. Run <code>sbx login</code> in a terminal, and Lonca will pick it up.</div>
+        )}
+        {connected && sandbox.state === 'unavailable' && (
+          <div className="banner banner-error">Workspaces can’t run because Docker Sandboxes isn’t working: {sandbox.detail}</div>
         )}
         <ErrorBoundary key={location.pathname}>
           <Routes>

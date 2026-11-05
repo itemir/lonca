@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import type { ChangeSet, CheckRun, Checks, FileEntry, Project, SearchHit, Workspace } from '../../../shared/types.ts';
 import { api } from '../api.ts';
-import { basename, dirname, runtimeName, safeUrl } from '../format.ts';
+import { basename, dirname, safeUrl } from '../format.ts';
 import { usePolled, useResizable } from '../hooks.ts';
 import { attempt, useStore } from '../store.ts';
 import { BottomPanel } from './BottomPanel.tsx';
@@ -270,7 +270,7 @@ export function RightPanel({ workspace, project, onOpenFile, onOpenDiff, onCreat
   const pr = checks.data?.pr;
 
   const createPr = () => {
-    if (!secrets.githubToken) {
+    if (!project.settings.env.GH_TOKEN && !secrets.githubToken) {
       useStore.getState().toast('Connect GitHub first so the agent can push this branch.');
       navigate('/settings');
       return;
@@ -347,7 +347,7 @@ function statusNote(workspace: Workspace): string {
     case 'stopping': return 'Stopping…';
     case 'starting': return 'Starting…';
     case 'deleting': return 'Deleting…';
-    case 'stopped': return `This workspace’s ${runtimeName(workspace)} is stopped.`;
+    case 'stopped': return 'This workspace’s virtual machine is stopped.';
     case 'archived': return 'This workspace is archived. Restore it to see its files.';
     case 'archiving': return 'Archiving…';
     default: return workspace.error ?? 'This workspace isn’t available.';

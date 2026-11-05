@@ -11,7 +11,7 @@ import { HttpError, errorMessage, sleep } from './util.ts';
 // prints goes straight from this process to the secrets file without reaching a page.
 //
 // A sign-in page sends the browser back to a port on `localhost`, where the CLI is listening.
-// The CLI is in a container, so Lonca answers on that port of this computer and passes the
+// The CLI is in a virtual machine, so Lonca answers on that port of this computer and passes the
 // request in. The browser gets Lonca's page and not the CLI's answer, which can't be relied on:
 // Claude's redirects to its success page even when it failed, and Codex's has a token in it.
 
@@ -22,6 +22,9 @@ export interface LoginProcess {
   write(data: string): void;
   /** Gives the CLI's listener the browser's return from the sign-in page. */
   deliver(port: number, path: string): Promise<void>;
+  /** What this CLI saved, for one that saves its login to a file. */
+  savedLogin(): Promise<string>;
+  /** Ends the CLI if it's still going, and removes what it left. */
   kill(): Promise<void>;
 }
 
@@ -32,11 +35,11 @@ export interface LoginDriver {
   spawn(agent: AgentId, method: LoginMethod): Promise<LoginProcess>;
   /** Answers on a port of this computer until the function it gives is called. Fails if the port is taken. */
   listen(port: number, onReturn: (target: URL) => Promise<ReturnOutcome>): Promise<() => void>;
+  /** Throws if the token doesn't work. This takes a while, and the sign-in can end meanwhile. */
+  checkClaudeToken(token: string): Promise<void>;
   saveClaudeToken(token: string): Promise<void>;
-  /** After `codex login` exits: moves its login to the shared volume and reports whether it took. */
-  finishCodexLogin(): Promise<boolean>;
-  /** Puts things back after a sign-in that didn't finish. */
-  cleanUp(agent: AgentId): Promise<void>;
+  /** With what `codex login` saved once it's exited: keeps it if it's a login, and reports whether it was. */
+  finishCodexLogin(login: string): Promise<boolean>;
   publish(agent: AgentId, login: LoginState | null): void;
 }
 
@@ -150,12 +153,12 @@ class LoginSession {
         return;
       }
       this.process = process;
-      // Starting can take minutes if the image is being rebuilt, which isn't the CLI's doing.
+      // Starting can take minutes if the template is being rebuilt, which isn't the CLI's doing.
       this.later(this.timings.noLinkMs, () => {
         if (this.state.phase === 'starting') void this.fail('no-link');
       });
       process.onData((data) => void this.onData(data));
-      void process.exited.then((code) => this.onExit(code));
+      void process.exited.then((code) => this.onExit(code, process));
     } catch (error) {
       await this.fail('unavailable', errorMessage(error));
     }
@@ -237,6 +240,8 @@ class LoginSession {
     if (!token) return false;
     this.update({ phase: 'saving', ...NO_LINKS });
     try {
+      await this.driver.checkClaudeToken(token);
+      if (this.finished || this.cancelled) return true;
       await this.driver.saveClaudeToken(token);
       await this.succeed();
     } catch (error) {
@@ -245,8 +250,14 @@ class LoginSession {
     return true;
   }
 
-  private async onExit(code: number | null): Promise<void> {
+  private async onExit(code: number | null, process: LoginProcess): Promise<void> {
     this.process = null;
+    await this.afterExit(code, process);
+    // Not before now, because what it left can be the login.
+    await process.kill().catch(() => {});
+  }
+
+  private async afterExit(code: number | null, process: LoginProcess): Promise<void> {
     if (this.finished || this.cancelled) return;
     // Anything the CLI wrote just before exiting has to be on screen before this looks at it.
     await this.screen.write('');
@@ -258,7 +269,9 @@ class LoginSession {
     if (code === 0) {
       this.update({ phase: 'saving', ...NO_LINKS });
       try {
-        if (await this.driver.finishCodexLogin()) await this.succeed();
+        const login = await process.savedLogin();
+        if (this.finished || this.cancelled) return;
+        if (await this.driver.finishCodexLogin(login)) await this.succeed();
         else await this.fail('stopped');
       } catch (error) {
         await this.fail('save-failed', errorMessage(error));
@@ -296,7 +309,6 @@ class LoginSession {
     this.screen.dispose();
     await this.process?.kill().catch(() => {});
     this.process = null;
-    await this.driver.cleanUp(this.agent).catch(() => {});
   }
 
   async submitCode(code: string): Promise<void> {
@@ -337,7 +349,6 @@ class LoginSession {
     if (this.state.phase !== 'done' && this.state.phase !== 'failed') this.screen.dispose();
     await this.process?.kill().catch(() => {});
     this.process = null;
-    await this.driver.cleanUp(this.agent).catch(() => {});
   }
 }
 

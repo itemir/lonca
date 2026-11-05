@@ -5,12 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ChangeSet, ChatItem, FileContent, FileEntry, LoginState, Project, Session, TextItem, ToolItem, Workspace } from '../../shared/types.ts';
-import { BLOCKED_DESTINATIONS } from '../../server/sandbox.ts';
-import { imageTag, sandboxImageTag } from '../../server/docker.ts';
-import {
-  FAKE_SANDBOX, FAKE_SBX, FAKE_SBX_DIR, IN_SANDBOX, Lonca, REAL_SANDBOX, docker, dockerExec, dockerExecAsync, git, installFakeSignIn, makeFixtureRepo,
-  removeFakeSignIn, removeRuntime, runtimeRunning, sandboxSshKeys, sbx, setFakeSignIn, sleep, until,
-} from '../support/harness.ts';
+import { BLOCKED_DESTINATIONS, templateTag } from '../../server/sandbox.ts';
+import { FAKE_SANDBOX, FAKE_SBX, FAKE_SBX_DIR, Lonca, REAL_SANDBOX, docker, sandboxExec, sandboxExecAsync, git, installFakeSignIn, makeFixtureRepo, removeFakeSignIn, removeSandbox, sandboxRunning, sandboxSshKeys, sbx, setFakeSignIn, sleep, until, asRoot } from '../support/harness.ts';
 import { type MockLlm, startMockLlm } from '../support/mock-llm.ts';
 
 const lonca = new Lonca({ port: 47181, instance: 'dockertest', firstWorkspacePort: 46100 });
@@ -26,13 +22,8 @@ const tools = (items: ChatItem[]) => items.filter((item): item is ToolItem => it
 beforeAll(async () => {
   mock = await startMockLlm();
   fixture = makeFixtureRepo();
-  // Start cold, as a new user does: the image has to build while workspaces are requested.
-  try {
-    docker('rmi', imageTag());
-  } catch {
-    // Another Lonca instance is using it; these tests still run, just not from cold.
-  }
-  if (FAKE_SANDBOX) docker('rmi', '--force', sandboxImageTag());
+  // Start cold, as a new user does: the template has to build while workspaces are requested.
+  if (FAKE_SANDBOX) sbx('template', 'rm', '--force', templateTag());
   await lonca.start();
 });
 
@@ -123,22 +114,16 @@ describe('projects and workspaces', () => {
     expect(a.workspace.name).not.toBe(b.workspace.name);
     a.workspace = await lonca.waitForWorkspace(a.workspace.id);
     b.workspace = await lonca.waitForWorkspace(b.workspace.id);
-    expect(a.workspace.containerName).not.toBe(b.workspace.containerName);
+    expect(a.workspace.sandboxName).not.toBe(b.workspace.sandboxName);
     expect(a.workspace.port).not.toBe(b.workspace.port);
 
-    expect(a.workspace.runtime).toBe(IN_SANDBOX ? 'sandbox' : 'container');
-    expect(runtimeRunning(a.workspace.containerName)).toBe(true);
-    if (!IN_SANDBOX) {
-      const inspect = JSON.parse(docker('inspect', a.workspace.containerName))[0];
-      expect(inspect.HostConfig.SecurityOpt).toContain('no-new-privileges');
-      expect(inspect.HostConfig.CapDrop).toContain('ALL');
-    }
+    expect(sandboxRunning(a.workspace.sandboxName)).toBe(true);
 
-    const list = dockerExec(a.workspace.containerName, `git -C ${a.workspace.path} worktree list`).output;
+    const list = sandboxExec(a.workspace.sandboxName, `git -C ${a.workspace.path} worktree list`).output;
     expect(list).toContain(a.workspace.path);
     expect(list).toContain(b.workspace.path);
     expect(list).toContain(`[${a.workspace.branch}]`);
-    expect(dockerExec(a.workspace.containerName, 'git status --short --branch').output).toContain(a.workspace.branch);
+    expect(sandboxExec(a.workspace.sandboxName, 'git status --short --branch').output).toContain(a.workspace.branch);
     expect(fs.readFileSync(path.join(a.workspace.path, '.git'), 'utf8')).toMatch(/^gitdir: .*repo\.git\/worktrees\//);
     expect(fs.readFileSync(path.join(a.workspace.path, 'README.md'), 'utf8')).toContain('Fixture');
   });
@@ -147,7 +132,7 @@ describe('projects and workspaces', () => {
     expect(a.workspace.filesCopied).toBe(1);
     expect(fs.readFileSync(path.join(a.workspace.path, '.env'), 'utf8')).toContain('from-local-checkout');
     fs.writeFileSync(path.join(a.workspace.path, '.context', 'note.txt'), 'scratch');
-    expect(dockerExec(a.workspace.containerName, 'git status --porcelain').output).toBe('');
+    expect(sandboxExec(a.workspace.sandboxName, 'git status --porcelain').output).toBe('');
   });
 
   it('gives a copied file the permissions it has in the local checkout', async () => {
@@ -175,44 +160,35 @@ describe('projects and workspaces', () => {
 });
 
 describe('isolation', () => {
-  it.skipIf(IN_SANDBOX)('runs as an unprivileged user that cannot escalate', () => {
-    const name = a.workspace.containerName;
-    expect(dockerExec(name, 'id -u').output).toBe('1000');
-    expect(dockerExec(name, 'grep CapEff /proc/self/status').output).toMatch(/0000000000000000$/);
-    expect(dockerExec(name, 'grep NoNewPrivs /proc/self/status').output).toMatch(/1$/);
-    expect(dockerExec(name, 'iptables -F').code).not.toBe(0);
-    expect(dockerExec(name, 'touch /etc/nope').code).not.toBe(0);
-  });
-
   it('cannot see other workspaces or the host filesystem', () => {
-    const name = a.workspace.containerName;
-    expect(dockerExec(name, `test -e ${b.workspace.path}/README.md`).code).not.toBe(0);
-    expect(dockerExec(name, `test -e ${fixture}/README.md`).code).not.toBe(0);
-    expect(dockerExec(name, `test -e ${lonca.home}/secrets.json`).code).not.toBe(0);
-    expect(dockerExec(name, `test -e ${lonca.home}/token`).code).not.toBe(0);
-    expect(dockerExec(name, `test -d ${a.workspace.path}`).code).toBe(0);
+    const name = a.workspace.sandboxName;
+    expect(sandboxExec(name, `test -e ${b.workspace.path}/README.md`).code).not.toBe(0);
+    expect(sandboxExec(name, `test -e ${fixture}/README.md`).code).not.toBe(0);
+    expect(sandboxExec(name, `test -e ${lonca.home}/secrets.json`).code).not.toBe(0);
+    expect(sandboxExec(name, `test -e ${lonca.home}/token`).code).not.toBe(0);
+    expect(sandboxExec(name, `test -d ${a.workspace.path}`).code).toBe(0);
   });
 
   it('keeps each workspace’s home directory private', () => {
-    dockerExec(a.workspace.containerName, 'echo private > ~/only-in-a');
-    expect(dockerExec(b.workspace.containerName, 'test -e ~/only-in-a').code).not.toBe(0);
+    sandboxExec(a.workspace.sandboxName, 'echo private > ~/only-in-a');
+    expect(sandboxExec(b.workspace.sandboxName, 'test -e ~/only-in-a').code).not.toBe(0);
   });
 
-  it.runIf(IN_SANDBOX)('runs as its own user, with sudo that stops at the VM', () => {
-    const name = a.workspace.containerName;
-    expect(dockerExec(name, 'id -un').output).toBe('agent');
-    expect(dockerExec(name, 'sudo -n id -u').output).toBe('0');
+  it('runs as its own user, with sudo that stops at the VM', () => {
+    const name = a.workspace.sandboxName;
+    expect(sandboxExec(name, 'id -un').output).toBe('agent');
+    expect(sandboxExec(name, 'sudo -n id -u').output).toBe('0');
   });
 
   it.runIf(REAL_SANDBOX)('has a kernel of its own', () => {
-    const name = a.workspace.containerName;
-    expect(dockerExec(name, 'uname -r').output).not.toBe(dockerExec(`${lonca.prefix}-tools`, 'uname -r').output);
+    const bootId = (name: string) => sandboxExec(name, 'cat /proc/sys/kernel/random/boot_id').output;
+    expect(bootId(a.workspace.sandboxName)).not.toBe(bootId(b.workspace.sandboxName));
   });
 
   // Docker Sandboxes 0.50 gives a sandbox the SSH agent of the last command run in it, until another
   // command brings a different one. Lonca's commands bring one with no keys. 0.51 doesn't lend it.
   it.runIf(REAL_SANDBOX)('keeps out the SSH keys of an sbx command run from a terminal', async () => {
-    const name = a.workspace.containerName;
+    const name = a.workspace.sandboxName;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lonca-ssh-'));
     const socket = path.join(dir, 'agent.sock');
     let agent: ChildProcess | undefined;
@@ -234,28 +210,17 @@ describe('isolation', () => {
 
   // The fake sandbox has no network policy to test.
   it.skipIf(FAKE_SANDBOX)('cannot reach the host or the Lonca server', async () => {
-    const name = a.workspace.containerName;
-    const curl = async (url: string) => (await dockerExecAsync(name, `curl -s -o /dev/null -m 4 -w '%{http_code}' ${url}`)).output;
+    const name = a.workspace.sandboxName;
+    const curl = async (url: string) => (await sandboxExecAsync(name, `curl -s -o /dev/null -m 4 -w '%{http_code}' ${url}`)).output;
     expect(await curl(`http://host.docker.internal:${lonca.port}/api/state`)).toMatch(/^(000|403)/);
     expect(await curl(`http://host.docker.internal:${mock.port}/`)).toMatch(/^(000|403)/);
   });
 
-  it.skipIf(IN_SANDBOX)('cannot reach sibling containers', async () => {
-    const name = a.workspace.containerName;
-    const curl = async (url: string) => (await dockerExecAsync(name, `curl -s -o /dev/null -m 4 -w '%{http_code}' ${url}`)).output;
-    const sibling = JSON.parse(docker('inspect', b.workspace.containerName))[0];
-    const ip = Object.values<any>(sibling.NetworkSettings.Networks)[0].IPAddress;
-    dockerExec(b.workspace.containerName, 'cd /tmp && nohup python3 -m http.server 8123 >/dev/null 2>&1 &');
-    await sleep(500);
-    expect(dockerExec(b.workspace.containerName, `curl -s -o /dev/null -m 4 -w '%{http_code}' http://127.0.0.1:8123/`).output).toBe('200');
-    expect(await curl(`http://${ip}:8123/`)).toMatch(/^000/);
-  });
-
   it('can reach the internet and publishes its ports to the host', async () => {
-    const name = a.workspace.containerName;
-    expect(dockerExec(name, `curl -s -o /dev/null -m 10 -w '%{http_code}' https://github.com/`).output).toBe('200');
+    const name = a.workspace.sandboxName;
+    expect(sandboxExec(name, `curl -s -o /dev/null -m 10 -w '%{http_code}' https://github.com/`).output).toBe('200');
     // sbx exec waits for whatever still holds its output, so the whole background job needs redirecting.
-    dockerExec(name, `(cd /tmp && nohup python3 -m http.server ${a.workspace.port} --bind 0.0.0.0) >/dev/null 2>&1 &`);
+    sandboxExec(name, `(cd /tmp && nohup python3 -m http.server ${a.workspace.port} --bind 0.0.0.0) >/dev/null 2>&1 &`);
     const response = await until('the published port', () => fetch(`http://127.0.0.1:${a.workspace.port}/`), 10000);
     expect(response.status).toBe(200);
   });
@@ -263,7 +228,7 @@ describe('isolation', () => {
   it('reads files through the container, so symlinks cannot reach host files', async () => {
     fs.symlinkSync('/etc/passwd', path.join(a.workspace.path, 'host-passwd'));
     const file = await lonca.api<FileContent>('GET', `/workspaces/${a.workspace.id}/file?path=host-passwd`);
-    expect(file.content).toContain(IN_SANDBOX ? 'agent:x:1000' : 'lonca:x:1000');
+    expect(file.content).toContain('agent:x:1000');
     expect(file.content).not.toContain('_appleevents');
     fs.unlinkSync(path.join(a.workspace.path, 'host-passwd'));
     await expect(lonca.api('GET', `/workspaces/${a.workspace.id}/file?path=../../../etc/passwd`)).rejects.toThrow(/outside the workspace/);
@@ -277,7 +242,7 @@ describe('isolation', () => {
     expect(fs.statSync(path.join(lonca.home, 'secrets.json')).mode & 0o777).toBe(0o600);
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
-    expect(REAL_SANDBOX ? sbx('ls', '--json') : docker('inspect', workspace.containerName)).not.toContain('ghp_not_a_real_token');
+    expect(REAL_SANDBOX ? sbx('ls', '--json') : docker('inspect', workspace.sandboxName)).not.toContain('ghp_not_a_real_token');
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
     await lonca.api('PUT', '/secrets/github', { token: '' });
   });
@@ -301,7 +266,7 @@ describe('hostile files in a workspace', () => {
   it('won’t read FIFOs or endless devices through the file API', async () => {
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
-    dockerExec(workspace.containerName, `cd ${workspace.path} && mkfifo a-fifo && ln -s /dev/zero endless`);
+    sandboxExec(workspace.sandboxName, `cd ${workspace.path} && mkfifo a-fifo && ln -s /dev/zero endless`);
     await expect(lonca.api('GET', `/workspaces/${workspace.id}/file?path=a-fifo`)).rejects.toThrow(/isn’t a file/);
     await expect(lonca.api('GET', `/workspaces/${workspace.id}/file?path=endless`)).rejects.toThrow(/isn’t a file/);
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
@@ -327,7 +292,7 @@ describe('hostile files in a workspace', () => {
     const fifo = path.join(repoPath(), 'packed-refs');
     const hadPacked = fs.existsSync(fifo);
     const saved = hadPacked ? fs.readFileSync(fifo) : null;
-    dockerExec(workspace.containerName, `rm -f ${fifo} && mkfifo ${fifo}`);
+    sandboxExec(workspace.sandboxName, `rm -f ${fifo} && mkfifo ${fifo}`);
     const branches = await Promise.race([
       lonca.api<string[]>('GET', `/projects/${project.id}/branches`),
       sleep(5000).then(() => 'hung'),
@@ -345,7 +310,7 @@ describe('hostile files in a workspace', () => {
     const made = await lonca.api('POST', `/projects/${created.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(made.workspace.id);
     const hooks = path.join(lonca.home, 'projects', created.slug, 'repo.git', 'hooks');
-    dockerExec(workspace.containerName, `mkdir -p ${hooks} && printf '#!/bin/sh\\ntouch ${marker}\\n' > ${hooks}/reference-transaction && chmod +x ${hooks}/reference-transaction && chmod 555 ${hooks} && mkdir ${workspace.path}/locked && touch ${workspace.path}/locked/file && chmod 555 ${workspace.path}/locked`);
+    sandboxExec(workspace.sandboxName, `mkdir -p ${hooks} && printf '#!/bin/sh\\ntouch ${marker}\\n' > ${hooks}/reference-transaction && chmod +x ${hooks}/reference-transaction && chmod 555 ${hooks} && mkdir ${workspace.path}/locked && touch ${workspace.path}/locked/file && chmod 555 ${workspace.path}/locked`);
     await lonca.api('DELETE', `/projects/${created.id}`);
     expect(fs.existsSync(path.join(lonca.home, 'projects', created.slug))).toBe(false);
     const again = await lonca.waitForProject((await lonca.api<Project>('POST', '/projects', { path: repo })).id);
@@ -369,7 +334,7 @@ describe('hostile files in a workspace', () => {
   it('archives and deletes workspaces with read-only directories', async () => {
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
-    dockerExec(workspace.containerName, `cd ${workspace.path} && mkdir -p cache/mod && touch cache/mod/file && chmod -R 555 cache`);
+    sandboxExec(workspace.sandboxName, `cd ${workspace.path} && mkdir -p cache/mod && touch cache/mod/file && chmod -R 555 cache`);
     await lonca.api('POST', `/workspaces/${workspace.id}/archive`);
     expect((await lonca.workspace(workspace.id)).status).toBe('archived');
     expect(fs.existsSync(workspace.path)).toBe(false);
@@ -393,7 +358,7 @@ describe('hostile files in a workspace', () => {
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
     await lonca.api('PATCH', `/projects/${project.id}`, { settings: { image: 'lonca-image-that-does-not-exist:nope' } });
-    removeRuntime(workspace.containerName);
+    removeSandbox(workspace.sandboxName);
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
     expect(fs.existsSync(workspace.path)).toBe(false);
     await lonca.api('PATCH', `/projects/${project.id}`, { settings: { image: '' } });
@@ -431,8 +396,8 @@ describe('files and changes', () => {
   });
 
   it('reports committed, modified and untracked changes against the base branch', async () => {
-    const name = a.workspace.containerName;
-    dockerExec(name, `cd ${a.workspace.path} && echo '// committed' >> src/index.js && git -c user.name=t -c user.email=t@t commit -qam 'Change' && echo modified >> README.md && printf 'one\\ntwo\\n' > brand-new.txt`);
+    const name = a.workspace.sandboxName;
+    sandboxExec(name, `cd ${a.workspace.path} && echo '// committed' >> src/index.js && git -c user.name=t -c user.email=t@t commit -qam 'Change' && echo modified >> README.md && printf 'one\\ntwo\\n' > brand-new.txt`);
     const changes = await lonca.api<ChangeSet>('GET', `/workspaces/${a.workspace.id}/changes`);
     const byPath = Object.fromEntries(changes.files.map((file) => [file.path, file]));
     expect(byPath['src/index.js']).toMatchObject({ status: 'M', added: 1, removed: 0 });
@@ -447,7 +412,7 @@ describe('files and changes', () => {
     const untracked = await lonca.api<string>('GET', `/workspaces/${a.workspace.id}/diff?path=brand-new.txt&untracked=1`);
     expect(untracked).toContain('+two');
 
-    dockerExec(name, `cd ${a.workspace.path} && git checkout -q README.md && rm brand-new.txt`);
+    sandboxExec(name, `cd ${a.workspace.path} && git checkout -q README.md && rm brand-new.txt`);
   });
 
   it('stores attachments under .context', async () => {
@@ -463,17 +428,19 @@ describe('files and changes', () => {
 });
 
 describe('terminals', () => {
-  it('opens a shell in the container and survives a reconnect', async () => {
+  it('opens a shell in the sandbox and survives a reconnect', async () => {
     const info = await lonca.api('POST', `/workspaces/${a.workspace.id}/terminals`);
     const first = await lonca.openTerminal(info.id);
-    await until('a prompt', () => first.output().includes(IN_SANDBOX ? '$ ' : '%'), 10000);
+    await until('a prompt', () => first.output().includes('$ '), 10000);
     first.send('echo "whoami=$(whoami) host=$(hostname) cwd=$PWD port=$LONCA_PORT"\n');
-    await until('command output', () => first.output().includes(IN_SANDBOX ? 'whoami=agent host=' : `whoami=lonca host=${a.workspace.name}`), 10000);
+    await until('command output', () => first.output().includes('whoami=agent host='), 10000);
     expect(first.output()).toContain(`cwd=${a.workspace.path} port=${a.workspace.port}`);
     first.socket.send(JSON.stringify({ type: 'resize', cols: 123, rows: 45 }));
-    await sleep(200);
-    first.send('stty size\n');
-    await until('the new size', () => first.output().includes('45 123'), 10000);
+    // A VM takes a moment to apply it.
+    await until('the new size', () => {
+      first.send('stty size\n');
+      return first.output().includes('45 123');
+    }, 10000, 500);
     first.socket.close();
 
     const second = await lonca.openTerminal(info.id);
@@ -523,7 +490,7 @@ describe('terminals', () => {
       const state = await lonca.api('GET', '/state');
       return state.terminals.find((entry: { id: string }) => entry.id === rerun.id)?.status === 'exited';
     }, 15000);
-    expect(dockerExec(workspace.containerName, 'pgrep -f "sleep 1000"').code).not.toBe(0);
+    expect(sandboxExec(workspace.sandboxName, 'pgrep -f "sleep 1000"').code).not.toBe(0);
     terminal.socket.close();
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
     await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: '' } });
@@ -557,11 +524,11 @@ describe('terminals and scripts, without a restart', () => {
 
   it('closes an idle shell straight away, as closing a terminal window does', async () => {
     const shell = await lonca.api('POST', `/workspaces/${workspace.id}/terminals`);
-    const pid = dockerExec(workspace.containerName, `cat /var/tmp/lonca/tty/${shell.id}.pid`).output;
+    const pid = sandboxExec(workspace.sandboxName, `cat /var/tmp/lonca/tty/${shell.id}.pid`).output;
     const started = Date.now();
     await lonca.api('DELETE', `/terminals/${shell.id}`);
     expect(Date.now() - started).toBeLessThan(1500);
-    expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).not.toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).not.toBe(0);
   });
 
   // An idle workspace mustn't cost a command every few seconds. Docker reports each one.
@@ -574,7 +541,7 @@ describe('terminals and scripts, without a restart', () => {
       const since = Math.floor(Date.now() / 1000) + 1;
       await sleep(16000);
       const events = docker('events', '--since', String(since), '--until', String(Math.floor(Date.now() / 1000)),
-        '--filter', `container=${workspace.containerName}`, '--filter', 'event=exec_create', '--format', '{{.Action}}');
+        '--filter', `container=${workspace.sandboxName}`, '--filter', 'event=exec_create', '--format', '{{.Action}}');
       expect(events).toBe('');
     } finally {
       connected.socket.close();
@@ -589,7 +556,7 @@ describe('scripts across restarts', () => {
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
     // Anchored, so it doesn't count the shell this very command runs in.
-    const copies = () => dockerExec(workspace.containerName, `pgrep -fc '^sleep 4321'`).output;
+    const copies = () => sandboxExec(workspace.sandboxName, `pgrep -fc '^sleep 4321'`).output;
 
     await Promise.all([
       lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`),
@@ -627,7 +594,7 @@ describe('scripts across restarts', () => {
     await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: "trap '' TERM; exec sleep 43219" } });
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
-    const pids = () => dockerExec(workspace.containerName, "pgrep -f '^sleep 43219$'").output.split('\n').filter(Boolean);
+    const pids = () => sandboxExec(workspace.sandboxName, "pgrep -f '^sleep 43219$'").output.split('\n').filter(Boolean);
     try {
       await lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`);
       await until('the original script', () => pids().length === 1, 15000);
@@ -663,7 +630,7 @@ describe('agents', () => {
     const created = await lonca.api('POST', `/projects/${agentProject.id}/workspaces`, {});
     claudeSession = created.session;
     workspace = await lonca.waitForWorkspace(created.workspace.id);
-    dockerExec(workspace.containerName, `cat > ~/.codex/config.toml <<EOF
+    sandboxExec(workspace.sandboxName, `cat > ~/.codex/config.toml <<EOF
 cli_auth_credentials_store = "file"
 model_provider = "mock"
 [model_providers.mock]
@@ -711,7 +678,6 @@ EOF`);
 
     const session = await lonca.session(claudeSession.id);
     expect(session.resumeId).toBeTruthy();
-    expect(session.title).toContain('THINK first');
     expect((await lonca.workspace(workspace.id)).title).toContain('THINK first');
     expect(mock.requests.some((request) => request.model === 'claude-opus-5-5')).toBe(true);
   });
@@ -725,10 +691,12 @@ EOF`);
   });
 
   it('passes the chosen model and effort to the CLI', async () => {
-    await lonca.api('PATCH', `/sessions/${claudeSession.id}`, { model: 'claude-sonnet-5-5', effort: 'low' });
-    await lonca.api('POST', `/sessions/${claudeSession.id}/messages`, { text: 'model check', attachments: [] });
-    await lonca.waitForIdle(claudeSession.id);
+    const session = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, { agent: 'claude' });
+    await lonca.api('PATCH', `/sessions/${session.id}`, { model: 'claude-sonnet-5-5', effort: 'low' });
+    await lonca.api('POST', `/sessions/${session.id}/messages`, { text: 'model check', attachments: [] });
+    await lonca.waitForIdle(session.id);
     expect(mock.requests.at(-1)?.model).toBe('claude-sonnet-5-5');
+    expect((await lonca.session(session.id)).title).toBe('model check');
   });
 
   it('runs a Codex turn in the container and resumes it', async () => {
@@ -761,7 +729,7 @@ EOF`);
 
     await lonca.api('POST', `/workspaces/${workspace.id}/recreate`);
     // The mock's address is in this file, which isn't a conversation and goes with the disk.
-    dockerExec(workspace.containerName, `grep -q mock ~/.codex/config.toml || cat > ~/.codex/config.toml <<EOF
+    sandboxExec(workspace.sandboxName, `grep -q mock ~/.codex/config.toml || cat > ~/.codex/config.toml <<EOF
 cli_auth_credentials_store = "file"
 model_provider = "mock"
 [model_providers.mock]
@@ -785,7 +753,10 @@ EOF`);
   });
 
   it('won’t switch a started conversation to another agent', async () => {
-    await expect(lonca.api('PATCH', `/sessions/${claudeSession.id}`, { agent: 'codex' })).rejects.toThrow(/Open a new tab/);
+    const session = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, { agent: 'claude' });
+    await lonca.api('POST', `/sessions/${session.id}/messages`, { text: 'started', attachments: [] });
+    await lonca.waitForIdle(session.id);
+    await expect(lonca.api('PATCH', `/sessions/${session.id}`, { agent: 'codex' })).rejects.toThrow(/Open a new tab/);
   });
 
   it('interrupts a running turn and can continue afterwards', async () => {
@@ -795,7 +766,7 @@ EOF`);
     await lonca.api('POST', `/sessions/${claudeSession.id}/interrupt`);
     const items = await lonca.waitForIdle(claudeSession.id, 15000);
     expect(items.at(-1)).toMatchObject({ type: 'result', interrupted: true });
-    expect(dockerExec(workspace.containerName, 'pgrep -f "claude -p"').code).not.toBe(0);
+    expect(sandboxExec(workspace.sandboxName, 'pgrep -f "claude -p"').code).not.toBe(0);
 
     await lonca.api('POST', `/sessions/${claudeSession.id}/messages`, { text: 'after the interrupt', attachments: [] });
     const after = await lonca.waitForIdle(claudeSession.id);
@@ -820,7 +791,7 @@ EOF`);
     await lonca.api('POST', `/sessions/${claudeSession.id}/interrupt`);
     const items = await lonca.waitForIdle(claudeSession.id, 15000);
     expect(items.at(-1)).toMatchObject({ type: 'result', interrupted: true });
-    expect(dockerExec(workspace.containerName, 'pgrep -f "claude -p"').code).not.toBe(0);
+    expect(sandboxExec(workspace.sandboxName, 'pgrep -f "claude -p"').code).not.toBe(0);
   });
 
   it('keeps an agent running across a server crash and picks its output back up', async () => {
@@ -829,7 +800,7 @@ EOF`);
     await sleep(1000);
     await lonca.kill();
     await sleep(1000);
-    expect(dockerExec(workspace.containerName, 'pgrep -f "claude -p"').code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, 'pgrep -f "claude -p"').code).toBe(0);
     await lonca.start();
     const items = await lonca.waitForIdle(claudeSession.id, 60000);
     expect(texts(items).at(-1)).toContain('You said: SLOW survive the restart');
@@ -847,31 +818,32 @@ EOF`);
   });
 
   it('holds messages through a restart after Stop', async () => {
-    await lonca.api('POST', `/sessions/${claudeSession.id}/messages`, { text: 'SLOW going to be stopped', attachments: [] });
-    await until('the turn to start', async () => (await lonca.session(claudeSession.id)).status === 'running', 10000);
-    const held = await lonca.api('POST', `/sessions/${claudeSession.id}/messages`, { text: 'held through a restart', attachments: [] });
-    await lonca.api('POST', `/sessions/${claudeSession.id}/interrupt`);
-    await until('the turn to stop', async () => (await lonca.session(claudeSession.id)).status === 'idle', 15000);
-    expect((await lonca.session(claudeSession.id)).held).toBe(true);
+    const conversation = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, { agent: 'claude' });
+    await lonca.api('POST', `/sessions/${conversation.id}/messages`, { text: 'SLOW going to be stopped', attachments: [] });
+    await until('the turn to start', async () => (await lonca.session(conversation.id)).status === 'running', 10000);
+    const held = await lonca.api('POST', `/sessions/${conversation.id}/messages`, { text: 'held through a restart', attachments: [] });
+    await lonca.api('POST', `/sessions/${conversation.id}/interrupt`);
+    await until('the turn to stop', async () => (await lonca.session(conversation.id)).status === 'idle', 15000);
+    expect((await lonca.session(conversation.id)).held).toBe(true);
     await lonca.kill();
     await lonca.start();
     await sleep(2500);
-    const session = await lonca.session(claudeSession.id);
+    const session = await lonca.session(conversation.id);
     expect(session.status).toBe('idle');
     expect(session.queue).toEqual([held.id]);
-    await lonca.api('DELETE', `/sessions/${claudeSession.id}/queue/${held.id}`);
-    expect((await lonca.session(claudeSession.id)).held).toBeFalsy();
+    await lonca.api('DELETE', `/sessions/${conversation.id}/queue/${held.id}`);
+    expect((await lonca.session(conversation.id)).held).toBeFalsy();
   });
 
   it('survives hostile files in a run’s own directory', async () => {
     await lonca.api('POST', `/sessions/${claudeSession.id}/messages`, { text: 'SLOW plant things', attachments: [] });
     const running = await until('the turn to start', async () => {
       const session = await lonca.session(claudeSession.id);
-      return session.status === 'running' && dockerExec(workspace.containerName, `test -f /var/tmp/lonca/agent-runs/${session.activeRunId}/pid`).code === 0 ? session : null;
+      return session.status === 'running' && sandboxExec(workspace.sandboxName, `test -f /var/tmp/lonca/agent-runs/${session.activeRunId}/pid`).code === 0 ? session : null;
     }, 15000);
     const dir = `/var/tmp/lonca/agent-runs/${running.activeRunId}`;
     // An enormous line, and an exit file that's really /dev/zero.
-    dockerExec(workspace.containerName, `ln -sf /dev/zero ${dir}/exit.tmp; head -c 40000000 /dev/zero | tr '\\0' x >> ${dir}/out.jsonl; echo >> ${dir}/out.jsonl`);
+    sandboxExec(workspace.sandboxName, `ln -sf /dev/zero ${dir}/exit.tmp; head -c 40000000 /dev/zero | tr '\\0' x >> ${dir}/out.jsonl; echo >> ${dir}/out.jsonl`);
     await sleep(1000);
     expect((await fetch(`${lonca.url}/api/state`, { headers: lonca.headers })).status).toBe(200);
     await lonca.api('POST', `/sessions/${claudeSession.id}/interrupt`);
@@ -883,12 +855,12 @@ EOF`);
     await lonca.api('POST', `/sessions/${claudeSession.id}/messages`, { text: 'SLOW sabotage my tracking', attachments: [] });
     const running = await until('the turn to start', async () => {
       const session = await lonca.session(claudeSession.id);
-      return session.status === 'running' && dockerExec(workspace.containerName, `test -f /var/tmp/lonca/agent-runs/${session.activeRunId}/pid`).code === 0 ? session : null;
+      return session.status === 'running' && sandboxExec(workspace.sandboxName, `test -f /var/tmp/lonca/agent-runs/${session.activeRunId}/pid`).code === 0 ? session : null;
     }, 15000);
     const dir = `/var/tmp/lonca/agent-runs/${running.activeRunId}`;
     // Checked before the agent goes, since Lonca can then remove its run directory at any moment.
     // Anchored, so it doesn't kill the shell this very command runs in.
-    expect(dockerExec(workspace.containerName, `rm -f ${dir}/pid && mkfifo ${dir}/pid && test -p ${dir}/pid && pkill -f '^claude -p'`).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `rm -f ${dir}/pid && mkfifo ${dir}/pid && test -p ${dir}/pid && pkill -f '^claude -p'`).code).toBe(0);
     await lonca.api('POST', `/sessions/${claudeSession.id}/interrupt`);
     await until('the session to recover', async () => (await lonca.session(claudeSession.id)).status === 'idle', 60000);
   });
@@ -903,7 +875,7 @@ EOF`);
     await lonca.waitForIdle(session.id);
     const lost = (await lonca.session(session.id)).resumeId;
     expect(lost).toBeTruthy();
-    dockerExec(workspace.containerName, `rm -rf ${history}`);
+    sandboxExec(workspace.sandboxName, `rm -rf ${history}`);
     await lonca.api('POST', `/sessions/${session.id}/messages`, { text: 'after it was lost', attachments: [] });
     const items = await lonca.waitForIdle(session.id);
     const latest = items.slice(items.findLastIndex((item) => item.type === 'user'));
@@ -959,23 +931,24 @@ describe('signing in', () => {
     await lonca.api('DELETE', `/projects/${signInProject.id}`);
   });
 
-  it('hands a saved Claude token to the CLI, wherever line wrapping broke it', async () => {
+  it('saves a Claude token for the proxy, wherever line wrapping broke it, and keeps it out of the workspace', async () => {
     await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-oat01-not\n-a-real-token ' });
     expect((await agents()).claude.signedIn).toBe(true);
     expect((await lonca.api('GET', '/state')).secrets.claudeToken).toBe('••••oken');
+    expect(fs.readFileSync(path.join(lonca.home, 'boundary', 'claude'), 'utf8')).toBe('sk-ant-oat01-not-a-real-token');
     await lonca.api('POST', `/sessions/${session.id}/messages`, { text: 'signed in now', attachments: [] });
     const items = await lonca.waitForIdle(session.id);
+    // The mock isn't a host the proxy adds it for, so what leaves the VM is still the placeholder.
     expect(texts(items).at(-1)).toContain('You said: signed in now');
-    const sent = mock.requests.filter((request) => request.path.endsWith('/messages')).at(-1);
-    expect(sent?.auth).toBe('Bearer sk-ant-oat01-not-a-real-token');
-    expect(REAL_SANDBOX ? sbx('ls', '--json') : docker('inspect', workspace.containerName)).not.toContain('not-a-real-token');
+    expect(mock.requests.filter((request) => request.path.endsWith('/messages')).at(-1)?.auth).toBe('Bearer sk-ant-oat01-lonca-placeholder');
+    expect(REAL_SANDBOX ? sbx('ls', '--json') : docker('inspect', workspace.sandboxName)).not.toContain('not-a-real-token');
   });
 
   it('treats anything else as an Anthropic API key', async () => {
     await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-not-a-real-key' });
     await lonca.api('POST', `/sessions/${session.id}/messages`, { text: 'with a key', attachments: [] });
     await lonca.waitForIdle(session.id);
-    expect(mock.requests.filter((request) => request.path.endsWith('/messages')).at(-1)?.auth).toBe('sk-ant-api03-not-a-real-key');
+    expect(mock.requests.filter((request) => request.path.endsWith('/messages')).at(-1)?.auth).toBe('sk-ant-oat01-lonca-placeholder');
   });
 
   // Costs nothing: the real service turns the made-up token down. Which way it does shows what arrived.
@@ -1013,7 +986,6 @@ describe('signing in', () => {
     await lonca.kill();
     await lonca.start();
     try {
-      await until('the helper', async () => dockerExec(`${lonca.prefix}-tools`, 'true').code === 0, 30000);
       await expect(lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-not-a-real-key' })).rejects.toThrow(/didn’t accept this key/);
       await expect(lonca.api('PUT', '/agents/codex/api-key', { key: 'sk-not-a-real-key-for-testing' })).rejects.toThrow(/didn’t accept this key/);
       const state = await lonca.api('GET', '/state');
@@ -1047,23 +1019,22 @@ describe('signing in', () => {
     const ws = await lonca.waitForWorkspace(created.workspace.id);
     try {
       // Claude: the real API refuses a made-up key, then the next turn has working credentials.
-      await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-not-a-real-key' });
+      await lonca.api('PATCH', `/projects/${project.id}`, { settings: { env: { ANTHROPIC_API_KEY: 'sk-ant-api03-not-a-real-key' } } });
       await lonca.api('POST', `/sessions/${created.session.id}/messages`, { text: 'first try', attachments: [] });
       const failed = await lonca.waitForIdle(created.session.id, 60000);
       expect(failed.find((item) => item.type === 'notice')).toMatchObject({ code: 'auth' });
       expect((await lonca.session(created.session.id)).resumeId).toBeTruthy();
 
-      await lonca.api('PATCH', `/projects/${project.id}`, { settings: { network: 'host', env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`, CODEX_API_KEY: 'sk-mock' } } });
+      await lonca.api('PATCH', `/projects/${project.id}`, { settings: { network: 'host', env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`, ANTHROPIC_API_KEY: 'sk-mock', CODEX_API_KEY: 'sk-mock' } } });
       await lonca.api('POST', `/workspaces/${ws.id}/recreate`);
       await lonca.api('POST', `/sessions/${created.session.id}/messages`, { text: 'second try', attachments: [] });
       const claude = await lonca.waitForIdle(created.session.id, 60000);
       expect(texts(claude).at(-1)).toContain('You said: second try');
       expect(claude.at(-1)).toMatchObject({ type: 'result', failed: false });
-      await lonca.api('POST', '/agents/claude/logout');
 
       // Codex won't resume a conversation under another provider, so this keeps the built-in
       // one and only moves its address. The mock refuses the first turn as the real API does.
-      dockerExec(ws.containerName, `printf 'cli_auth_credentials_store = "file"\nopenai_base_url = "http://host.docker.internal:${mock.port}/v1"\n' > ~/.codex/config.toml`);
+      sandboxExec(ws.sandboxName, `printf 'cli_auth_credentials_store = "file"\nopenai_base_url = "http://host.docker.internal:${mock.port}/v1"\n' > ~/.codex/config.toml`);
       mock.refuseCodex = true;
       const codexSession = await lonca.api<Session>('POST', `/workspaces/${ws.id}/sessions`, { agent: 'codex' });
       await lonca.api('POST', `/sessions/${codexSession.id}/messages`, { text: 'first try', attachments: [] });
@@ -1086,91 +1057,36 @@ describe('signing in', () => {
     }
   });
 
-  it('doesn’t share an API key the CLI got while signing in to ChatGPT, however the sign-in ended', async () => {
-    const tools = `${lonca.prefix}-tools`;
-    dockerExec(tools, `rm -f ~/.codex/auth.json && printf '{"auth_mode":"chatgpt","OPENAI_API_KEY":"sk-got-while-signing-in","tokens":{"refresh_token":"rt"}}' > ~/.codex/auth.json && chmod 600 ~/.codex/auth.json`);
-    // Any check does this, without a sign-in having finished.
+  it('doesn’t take a login left in the helper for the sign-in, and clears away what a cut-off sign-in left', async () => {
+    const tools = await lonca.startHelper();
+    const left = `{"auth_mode":"apikey","OPENAI_API_KEY":"sk-not-a-real-key-for-testing"}`;
+    const cutOff = '/var/tmp/lonca/tty/login-codex-cutoff';
+    sandboxExec(tools, `printf '%s' '${left}' > ~/.codex/auth.json && mkdir ${cutOff} && printf '%s' '${left}' > ${cutOff}/auth.json`);
+    await lonca.kill();
+    await lonca.start();
+    await until('the sign-in that was cut off to go', () => sandboxExec(tools, `test -e ${cutOff}`).code !== 0, 60000);
     await lonca.api('POST', '/agents/refresh');
-    const shared = dockerExec(workspace.containerName, 'jq -c "{auth_mode, OPENAI_API_KEY, refresh: .tokens.refresh_token}" ~/.codex/auth.json');
-    expect(JSON.parse(shared.output)).toEqual({ auth_mode: 'chatgpt', OPENAI_API_KEY: null, refresh: 'rt' });
-    expect(dockerExec(tools, 'stat -L -c %a ~/.codex/auth.json').output).toBe('600');
+    expect((await agents()).codex.signedIn).toBe(false);
+    expect(fs.existsSync(path.join(lonca.home, 'boundary', 'codex'))).toBe(false);
+    sandboxExec(tools, 'rm -f ~/.codex/auth.json');
+  });
 
-    // A private file it can't read isn't shared at all.
-    dockerExec(tools, `rm -f ~/.codex/auth.json && printf 'sk-half-written-file' > ~/.codex/auth.json`);
+  it('doesn’t take a login someone ran by hand in a workspace as the sign-in', async () => {
+    sandboxExec(workspace.sandboxName, `rm -f ~/.codex/auth.json && printf '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-not-a-real-key-for-testing"}' > ~/.codex/auth.json`);
     await lonca.api('POST', '/agents/refresh');
-    expect(dockerExec(tools, 'test -L ~/.codex/auth.json').code).toBe(0);
-    expect(dockerExec(workspace.containerName, 'grep -c sk-half-written-file ~/.codex/auth.json').code).not.toBe(0);
-    await lonca.api('POST', '/agents/codex/logout');
     expect((await agents()).codex.signedIn).toBe(false);
+    expect(fs.existsSync(path.join(lonca.home, 'boundary', 'codex'))).toBe(false);
   });
 
-  it('still shares a login made by hand in a workspace whose image has no jq', async () => {
-    const tools = `${lonca.prefix}-tools`;
-    docker('exec', tools, 'mv', '/usr/bin/jq', '/usr/bin/jq.away');
-    try {
-      dockerExec(tools, `rm -f ~/.codex/auth.json && printf '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-not-a-real-key-for-testing"}' > ~/.codex/auth.json`);
-      await lonca.api('POST', '/agents/refresh');
-      expect(dockerExec(tools, 'test -L ~/.codex/auth.json').code).toBe(0);
-      expect(dockerExec(workspace.containerName, 'codex login status 2>&1').output).toMatch(/API key configured/);
-    } finally {
-      docker('exec', tools, 'mv', '/usr/bin/jq.away', '/usr/bin/jq');
-    }
-    await lonca.api('POST', '/agents/codex/logout');
-    expect((await agents()).codex.signedIn).toBe(false);
-  });
-
-  it('shares a real Codex login, which replaces the link with a private file', async () => {
-    const tools = `${lonca.prefix}-tools`;
-    const asLogin = `rm -f ~/.codex/auth.json && printf '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-not-a-real-key-for-testing"}' > ~/.codex/auth.json && chmod 600 ~/.codex/auth.json`;
-    const isLink = (container: string) => dockerExec(container, 'test -L ~/.codex/auth.json').code === 0;
-    expect((await agents()).codex.signedIn).toBe(false);
-
-    // This is what `codex login --device-auth` leaves behind.
-    dockerExec(tools, asLogin);
-    expect(isLink(tools)).toBe(false);
-    expect(dockerExec(workspace.containerName, 'codex login status 2>&1').output).toMatch(/Not logged in/);
-
-    await lonca.api('POST', '/agents/refresh');
-    expect((await agents()).codex.signedIn).toBe(true);
-    expect(isLink(tools)).toBe(true);
-    expect(dockerExec(workspace.containerName, 'codex login status 2>&1').output).toMatch(/API key configured/);
-
-    // Signing out works even if the link was just replaced, and reaches every workspace.
-    dockerExec(tools, asLogin);
-    await lonca.api('POST', '/agents/codex/logout');
-    expect((await agents()).codex.signedIn).toBe(false);
-    expect(dockerExec(workspace.containerName, 'codex login status 2>&1').output).toMatch(/Not logged in/);
-  });
-
-  it('keeps a private Codex login through a container restart', async () => {
-    const tools = `${lonca.prefix}-tools`;
-    dockerExec(tools, `rm -f ~/.codex/auth.json && printf '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-not-a-real-key-for-testing"}' > ~/.codex/auth.json`);
-    docker('restart', '-t', '1', tools);
-    await until('the container to be back', () => dockerExec(tools, 'test -e /run/lonca/ready').code === 0, 15000);
-    expect(dockerExec(workspace.containerName, 'codex login status 2>&1').output).toMatch(/API key configured/);
-    await lonca.api('POST', '/agents/codex/logout');
-  });
-
-  it('shares a login someone ran by hand in a workspace', async () => {
-    await lonca.api('PATCH', `/projects/${signInProject.id}`, {
-      settings: { env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`, MOCK_KEY: 'sk-mock' } },
-    });
-    dockerExec(workspace.containerName, `rm -f ~/.codex/auth.json && printf '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-not-a-real-key-for-testing"}' > ~/.codex/auth.json; printf 'cli_auth_credentials_store = "file"\nmodel_provider = "mock"\n[model_providers.mock]\nname = "mock"\nbase_url = "http://host.docker.internal:${mock.port}/v1"\nwire_api = "responses"\nenv_key = "MOCK_KEY"\nsupports_websockets = false\n' > ~/.codex/config.toml`);
-    const session2 = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, { agent: 'codex' });
-    await lonca.api('POST', `/sessions/${session2.id}/messages`, { text: 'hello', attachments: [] });
-    await lonca.waitForIdle(session2.id);
-    expect(dockerExec(workspace.containerName, 'test -L ~/.codex/auth.json').code).toBe(0);
-    expect(dockerExec(`${lonca.prefix}-tools`, 'codex login status 2>&1').output).toMatch(/API key configured/);
-    await lonca.api('POST', '/agents/codex/logout');
-  });
-
-  it('shares Codex sign-in with every workspace, and signs them all out', async () => {
+  it('saves an API key for Codex, for the proxy, and signs out of it', async () => {
+    const forProxy = path.join(lonca.home, 'boundary', 'codex');
     await lonca.api('PUT', '/agents/codex/api-key', { key: 'sk-not-a-real-key-for-testing' });
     expect((await agents()).codex.signedIn).toBe(true);
-    expect(dockerExec(workspace.containerName, 'codex login status 2>&1').output).toMatch(/API key configured/);
+    expect(fs.readFileSync(forProxy, 'utf8')).toBe('sk-not-a-real-key-for-testing');
+    expect(fs.statSync(forProxy).mode & 0o777).toBe(0o600);
     await lonca.api('POST', '/agents/codex/logout');
     expect((await agents()).codex.signedIn).toBe(false);
-    expect(dockerExec(workspace.containerName, 'codex login status 2>&1').output).toMatch(/Not logged in/);
+    expect(fs.existsSync(forProxy)).toBe(false);
   });
 });
 
@@ -1187,16 +1103,23 @@ describe('the real sign-in flows', () => {
     const current = await reached('claude', 'waiting');
     return current.pasteUrl ? current : null;
   });
+  /** Finishing is reported before what it left in the helper has gone. */
+  const helperHoldsNoLogin = () => until('the helper to hold no login', () => {
+    const found = sandboxExec(tools(), `find ~/.codex /var/tmp/lonca/tty -name auth.json -o -name 'login-codex-*'`);
+    return found.code === 0 && found.output.trim() === '';
+  }, 20000);
+  /** The CLIs alone, since what started them has the same words in its arguments. */
+  const codexClis = () => sandboxExec(tools(), `pgrep -fc '^[^ ]*codex(.real)? login'`);
   /** What a browser is sent to when the sign-in page is done with it. */
   const comeBack = (link: string, query = 'code=fakecode') => {
     const url = new URL(link);
     return `${url.searchParams.get('redirect_uri')}?${query}&state=${url.searchParams.get('state')}`;
   };
-let frames: string[];
+  let frames: string[];
   let events: import('ws').WebSocket;
 
   beforeAll(async () => {
-    await until('the helper', async () => dockerExec(tools(), 'true').code === 0, 30000);
+    await lonca.startHelper();
     installFakeSignIn(tools());
     await sleep(500);
     frames = [];
@@ -1257,7 +1180,7 @@ let frames: string[];
     expect(JSON.parse(fs.readFileSync(path.join(lonca.home, 'secrets.json'), 'utf8')).claudeToken).toBe(token);
     expect(frames.join('\n')).not.toContain('sk-ant-oat');
     await expect(fetch(back)).rejects.toThrow();
-    expect(dockerExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
+    expect(sandboxExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
     await lonca.api('DELETE', '/agents/claude/login');
     await lonca.api('POST', '/agents/claude/logout');
   });
@@ -1283,13 +1206,13 @@ let frames: string[];
     const failed = await reached('claude', 'failed', 30000);
     expect(failed.failure).toBe('rejected');
     expect(failed.output).toContain('wasn');
-    expect(dockerExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
+    expect(sandboxExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
 
     setFakeSignIn(tools(), { mode: 'ok' });
     await lonca.api('POST', '/agents/claude/login');
     await reached('claude', 'waiting');
     await lonca.api('DELETE', '/agents/claude/login');
-    expect(dockerExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
+    expect(sandboxExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
   });
 
   it('turns away a code from another sign-in, or a key in the code box', async () => {
@@ -1305,7 +1228,7 @@ let frames: string[];
   it('joins a sign-in already under way, rather than starting a second CLI', async () => {
     await Promise.all([lonca.api('POST', '/agents/claude/login'), lonca.api('POST', '/agents/claude/login')]);
     await reached('claude', 'waiting');
-    expect(dockerExec(tools(), `pgrep -fc '^/usr/local/bin/claude.real setup-token|^claude setup-token'`).output).toBe('1');
+    expect(sandboxExec(tools(), `pgrep -fc '^/usr/local/bin/claude.real setup-token|^claude setup-token'`).output).toBe('1');
     await lonca.api('DELETE', '/agents/claude/login');
   });
 
@@ -1314,13 +1237,14 @@ let frames: string[];
     await reached('claude', 'waiting');
     await lonca.kill();
     await lonca.start();
-    await until('the old CLI to go', () => dockerExec(tools(), `pgrep -fc 'setup-token'`).code !== 0, 20000);
+    await until('the old CLI to go', () => sandboxExec(tools(), `pgrep -fc 'setup-token'`).code !== 0, 20000);
     expect(await login('claude')).toBeUndefined();
   });
 
-  it('signs in to Codex with the browser coming back to the real CLI, and shares it with every workspace', async () => {
+  it('signs in to Codex with the browser coming back to the real CLI, for the proxy to use and out of reach of workspaces', async () => {
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const ws = await lonca.waitForWorkspace(created.workspace.id);
+    const forProxy = path.join(lonca.home, 'boundary', 'codex');
     setFakeSignIn(tools(), { mode: 'ok' });
     await lonca.api('POST', '/agents/codex/login');
     const waiting = await reached('codex', 'waiting');
@@ -1331,29 +1255,33 @@ let frames: string[];
     // These would end the real CLI's sign-in, the second one by saying it worked.
     for (const route of ['cancel', 'success']) expect((await fetch(`http://127.0.0.1:1455/${route}`)).status).toBe(404);
     expect((await login('codex'))?.phase).toBe('waiting');
-    expect(dockerExec(tools(), `pgrep -fc 'codex.real login|codex login'`).code).toBe(0);
+    expect(sandboxExec(tools(), `pgrep -fc 'codex.real login|codex login'`).code).toBe(0);
 
     const answer = await fetch(back);
     expect(await answer.text()).toContain('You’re signed in');
     expect(answer.url).toBe(back);
     expect((await login('codex'))?.phase).toBe('done');
     expect((await lonca.api('GET', '/state')).system.agents.codex).toMatchObject({ signedIn: true, summary: 'Signed in with ChatGPT as probe@example.com' });
-    expect(dockerExec(tools(), 'test -L ~/.codex/auth.json').code).toBe(0);
-    expect(dockerExec(ws.containerName, 'codex login status 2>&1').output).toMatch(/Logged in using ChatGPT/);
-    expect(dockerExec(tools(), `pgrep -fc 'codex.real login|codex login'`).code).not.toBe(0);
+    expect(codexClis().code).not.toBe(0);
+    await helperHoldsNoLogin();
     await expect(fetch(back)).rejects.toThrow();
 
-    // The CLI got an API key while signing in. What's shared with workspaces is what a one-time code leaves.
-    const shared = dockerExec(ws.containerName, 'jq -c "{auth_mode, OPENAI_API_KEY, signedIn: (.tokens.refresh_token != null)}" ~/.codex/auth.json');
-    expect(JSON.parse(shared.output)).toEqual({ auth_mode: 'chatgpt', OPENAI_API_KEY: null, signedIn: true });
-    expect(dockerExec(tools(), 'stat -L -c %a ~/.codex/auth.json').output).toBe('600');
+    // The CLI got an API key while signing in. What's kept is what a one-time code leaves.
+    const saved = path.join(lonca.home, 'helper-credentials', 'codex', 'auth.json');
+    const kept = JSON.parse(fs.readFileSync(saved, 'utf8'));
+    expect(kept).toMatchObject({ auth_mode: 'chatgpt', OPENAI_API_KEY: null });
+    expect(kept.tokens.refresh_token).toBeTruthy();
+    expect(fs.statSync(saved).mode & 0o777).toBe(0o600);
+    const token = fs.readFileSync(forProxy, 'utf8');
+    expect(token).toBe(kept.tokens.access_token);
+    expect(sandboxExec(ws.sandboxName, 'cat ~/.codex/auth.json 2>/dev/null; env').output).not.toContain(token);
 
-    // Starting another sign-in and cancelling it must not sign every workspace out.
+    // Starting another sign-in and cancelling it must not sign out.
     await lonca.api('POST', '/agents/codex/login');
     await reached('codex', 'waiting');
     await lonca.api('DELETE', '/agents/codex/login');
-    expect(dockerExec(tools(), 'test -L ~/.codex/auth.json').code).toBe(0);
-    expect(dockerExec(ws.containerName, 'codex login status 2>&1').output).toMatch(/Logged in using ChatGPT/);
+    await helperHoldsNoLogin();
+    expect(fs.readFileSync(forProxy, 'utf8')).toBe(token);
     await expect(fetch(back)).rejects.toThrow();
 
     await lonca.api('POST', '/agents/codex/logout');
@@ -1382,40 +1310,53 @@ let frames: string[];
     await lonca.api('POST', '/agents/codex/login', { method: 'device' });
     expect((await reached('codex', 'waiting')).code).toBe('FAKE-7CODE');
     await expect(fetch(comeBack(waiting.url!))).rejects.toThrow();
-    expect(dockerExec(tools(), `pgrep -fc 'login --device-auth'`).output).toBe('1');
+    expect(codexClis().output).toBe('1');
     await lonca.api('DELETE', '/agents/codex/login');
   });
 
-  it('signs in to Codex with the one-time code on the real CLI and shares it with every workspace', async () => {
+  it('ends a sign-in that’s under way on signing out, so that finishing it can’t sign back in', async () => {
+    setFakeSignIn(tools(), { mode: 'ok', approved: false });
+    await lonca.api('POST', '/agents/codex/login', { method: 'device' });
+    await reached('codex', 'waiting');
+    await lonca.api('POST', '/agents/codex/logout');
+    expect(await login('codex')).toBeUndefined();
+    expect(codexClis().code).not.toBe(0);
+    expect((await lonca.api('GET', '/state')).system.agents.codex.signedIn).toBe(false);
+  });
+
+  it('signs in to Codex with the one-time code on the real CLI, for the proxy to use and out of reach of workspaces', async () => {
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const ws = await lonca.waitForWorkspace(created.workspace.id);
+    const forProxy = path.join(lonca.home, 'boundary', 'codex');
     setFakeSignIn(tools(), { mode: 'ok', approved: false });
     await lonca.api('POST', '/agents/codex/login', { method: 'device' });
     const waiting = await reached('codex', 'waiting');
     expect(waiting.code).toBe('FAKE-7CODE');
     expect(waiting.url).toBe('http://127.0.0.1:8080/codex/device');
-    expect(dockerExec(ws.containerName, 'codex login status 2>&1').output).toMatch(/Not logged in/);
+    expect(fs.existsSync(forProxy)).toBe(false);
 
     // Approving on the page is all it takes. Nothing else happens in Lonca.
     setFakeSignIn(tools(), { approved: true });
     await reached('codex', 'done', 30000);
     const agents = (await lonca.api('GET', '/state')).system.agents;
     expect(agents.codex).toMatchObject({ signedIn: true, summary: 'Signed in with ChatGPT as probe@example.com', usesKey: false });
-    expect(dockerExec(tools(), 'test -L ~/.codex/auth.json').code).toBe(0);
-    expect(dockerExec(ws.containerName, 'codex login status 2>&1').output).toMatch(/Logged in using ChatGPT/);
+    await helperHoldsNoLogin();
+    const token = fs.readFileSync(forProxy, 'utf8');
+    expect(token).toBeTruthy();
+    expect(sandboxExec(ws.sandboxName, 'cat ~/.codex/auth.json 2>/dev/null; env').output).not.toContain(token);
     await lonca.api('DELETE', '/agents/codex/login');
 
-    // Starting another sign-in and cancelling it must not sign every workspace out.
+    // Starting another sign-in and cancelling it must not sign out.
     setFakeSignIn(tools(), { approved: false });
     await lonca.api('POST', '/agents/codex/login', { method: 'device' });
     await reached('codex', 'waiting');
     await lonca.api('DELETE', '/agents/codex/login');
-    expect(dockerExec(tools(), `pgrep -fc 'login --device-auth'`).code).not.toBe(0);
-    expect(dockerExec(tools(), 'test -L ~/.codex/auth.json').code).toBe(0);
-    expect(dockerExec(ws.containerName, 'codex login status 2>&1').output).toMatch(/Logged in using ChatGPT/);
+    expect(codexClis().code).not.toBe(0);
+    expect(fs.readFileSync(forProxy, 'utf8')).toBe(token);
     expect((await lonca.api('GET', '/state')).system.agents.codex.signedIn).toBe(true);
 
     await lonca.api('POST', '/agents/codex/logout');
+    expect(fs.existsSync(forProxy)).toBe(false);
     await lonca.api('DELETE', `/workspaces/${ws.id}`);
   });
 
@@ -1438,7 +1379,7 @@ let frames: string[];
     const saved = await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-not-a-real-key' });
     expect(saved).toEqual({ verified: true });
     expect(await login('claude')).toBeUndefined();
-    expect(dockerExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
+    expect(sandboxExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
     expect((await lonca.api('GET', '/state')).system.agents.claude).toMatchObject({ signedIn: true, summary: 'Using an API key ending in -key', usesKey: true });
     await lonca.api('POST', '/agents/claude/logout');
   });
@@ -1446,93 +1387,63 @@ let frames: string[];
 
 describe('workspace lifecycle', () => {
   it('stops and restarts a container, and wakes it when a message arrives', async () => {
-    const { id, containerName } = a.workspace;
+    const { id, sandboxName } = a.workspace;
     await lonca.api('POST', `/workspaces/${id}/stop`);
     expect((await lonca.workspace(id)).status).toBe('stopped');
-    expect(runtimeRunning(containerName)).toBe(false);
+    expect(sandboxRunning(sandboxName)).toBe(false);
     await expect(lonca.api('GET', `/workspaces/${id}/files?path=.`)).rejects.toThrow(/stopped/);
     await lonca.api('POST', `/workspaces/${id}/start`);
     expect((await lonca.workspace(id)).status).toBe('ready');
-    expect(dockerExec(containerName, 'cat ~/only-in-a').output).toBe('private');
+    expect(sandboxExec(sandboxName, 'cat ~/only-in-a').output).toBe('private');
   });
 
   it('recreates a container deleted behind its back when started', async () => {
-    const { id, containerName } = a.workspace;
-    removeRuntime(containerName);
+    const { id, sandboxName } = a.workspace;
+    removeSandbox(sandboxName);
     await sleep(2000);
     await lonca.api('POST', `/workspaces/${id}/start`);
     const entries = await lonca.api<FileEntry[]>('GET', `/workspaces/${id}/files?path=.`);
     expect(entries.map((entry) => entry.name)).toContain('README.md');
-    // A container's home is on a volume of its own. A sandbox's goes with it.
-    if (!IN_SANDBOX) expect(dockerExec(containerName, 'cat ~/only-in-a').output).toBe('private');
   });
 
   it('archives without losing the branch, then restores', async () => {
-    const { id, path: worktree, containerName, branch } = a.workspace;
+    const { id, path: worktree, sandboxName, branch } = a.workspace;
     const repo = path.join(lonca.home, 'projects', project.slug, 'repo.git');
-    const commits = dockerExec(containerName, 'git rev-parse HEAD').output;
+    const commits = sandboxExec(sandboxName, 'git rev-parse HEAD').output;
     await lonca.api('POST', `/workspaces/${id}/archive`);
     expect((await lonca.workspace(id)).status).toBe('archived');
     expect(fs.existsSync(worktree)).toBe(false);
-    expect(runtimeRunning(containerName)).toBeNull();
+    expect(sandboxRunning(sandboxName)).toBeNull();
     expect(fs.existsSync(path.join(repo, 'worktrees', a.workspace.name))).toBe(false);
     expect(fs.existsSync(path.join(repo, 'refs', 'heads', ...branch.split('/')))).toBe(true);
 
     await lonca.api('POST', `/workspaces/${id}/restore`);
     await lonca.waitForWorkspace(id);
-    expect(dockerExec(containerName, 'git rev-parse HEAD').output).toBe(commits);
-    if (!IN_SANDBOX) expect(dockerExec(containerName, 'cat ~/only-in-a').output).toBe('private');
-    expect(dockerExec(containerName, 'git status --short --branch').output).toContain(branch);
+    expect(sandboxExec(sandboxName, 'git rev-parse HEAD').output).toBe(commits);
+    expect(sandboxExec(sandboxName, 'git status --short --branch').output).toContain(branch);
   });
 
   it('deletes a workspace and everything it owned', async () => {
-    const { id, path: worktree, containerName, branch } = b.workspace;
+    const { id, path: worktree, sandboxName, branch } = b.workspace;
     const repo = path.join(lonca.home, 'projects', project.slug, 'repo.git');
     await lonca.api('DELETE', `/workspaces/${id}`);
     expect(fs.existsSync(worktree)).toBe(false);
-    expect(runtimeRunning(containerName)).toBeNull();
+    expect(sandboxRunning(sandboxName)).toBeNull();
     expect(fs.existsSync(path.join(lonca.home, 'agent-state', id))).toBe(false);
-    if (!IN_SANDBOX) {
-      expect(() => docker('volume', 'inspect', `${lonca.prefix}-home-${id}`)).toThrow();
-      const labelled = docker('volume', 'ls', '-q', '--filter', `label=dev.lonca.instance=${lonca.prefix}`);
-      expect(labelled).toContain(`${lonca.prefix}-home-${a.workspace.id}`);
-    }
     expect(fs.existsSync(path.join(repo, 'refs', 'heads', ...branch.split('/')))).toBe(false);
     expect((await lonca.workspace(id))).toBeUndefined();
-  });
-
-  it.skipIf(IN_SANDBOX)('refuses to start without its firewall, whatever IPv6 is doing', async () => {
-    const image = docker('inspect', '--format', '{{.Config.Image}}', a.workspace.containerName);
-    for (const ipv6Off of ['0', '1']) {
-      const output = (() => {
-        try {
-          return docker('run', '--rm', '--init', '--cap-drop', 'ALL', '--cap-add', 'SETUID', '--cap-add', 'SETGID', '--sysctl', `net.ipv6.conf.all.disable_ipv6=${ipv6Off}`, image, 'echo', 'started-anyway');
-        } catch (error) {
-          return String((error as { stderr?: string }).stderr);
-        }
-      })();
-      expect(output).toContain('could not install the network firewall');
-      expect(output).not.toContain('started-anyway');
-    }
-  });
-
-  it.skipIf(IN_SANDBOX)('blocks private and reserved address ranges', () => {
-    const rules = docker('exec', a.workspace.containerName, 'iptables', '-S', 'OUTPUT');
-    for (const range of ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.168.0.0/16', '198.18.0.0/15', '224.0.0.0/4', '240.0.0.0/4']) {
-      expect(rules).toContain(`-d ${range} -j REJECT`);
-    }
   });
 });
 
 describe('project settings', () => {
-  it.runIf(IN_SANDBOX)('applies network and resource limits when a sandbox is rebuilt', async () => {
+  it('applies network and resource limits when a sandbox is rebuilt', async () => {
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
-    const curl = async () => (await dockerExecAsync(workspace.containerName, `curl -s -o /dev/null -m 4 -w '%{http_code}' http://host.docker.internal:${mock.port}/`)).output;
-    const calls = () => fs.readFileSync(path.join(FAKE_SBX_DIR, 'calls.log'), 'utf8').split('\n').filter((line) => line.includes(workspace.containerName));
+    const curl = async () => (await sandboxExecAsync(workspace.sandboxName, `curl -s -o /dev/null -m 4 -w '%{http_code}' http://host.docker.internal:${mock.port}/`)).output;
+    const calls = () => fs.readFileSync(path.join(FAKE_SBX_DIR, 'calls.log'), 'utf8').split('\n').filter((line) => line.includes(workspace.sandboxName) && !line.startsWith('secret '));
     if (FAKE_SANDBOX) {
       expect(calls().at(0)).toContain(BLOCKED_DESTINATIONS.join(' '));
-      expect(calls().at(-1)).toBe(`policy allow network --sandbox ${workspace.containerName} **`);
+      expect(calls().at(-1)).toBe(`policy allow network --sandbox ${workspace.sandboxName} **`);
     } else {
       expect(await curl()).toMatch(/^(000|403)/);
     }
@@ -1543,7 +1454,7 @@ describe('project settings', () => {
     expect(fs.existsSync(path.join(workspace.path, 'README.md'))).toBe(true);
     if (FAKE_SANDBOX) {
       expect(calls().at(-2)).toMatch(/deny= .*--memory 2048m --cpus 2/);
-      expect(calls().at(-1)).toBe(`policy allow network --sandbox ${workspace.containerName} **,localhost`);
+      expect(calls().at(-1)).toBe(`policy allow network --sandbox ${workspace.sandboxName} **,localhost`);
     }
 
     await lonca.api('PATCH', `/projects/${project.id}`, { settings: { network: 'internet', memoryGb: 0, cpus: 0 } });
@@ -1552,42 +1463,43 @@ describe('project settings', () => {
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
   });
 
-  it.skipIf(IN_SANDBOX)('applies network and resource limits when a container is rebuilt', async () => {
-    const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
-    const workspace = await lonca.waitForWorkspace(created.workspace.id);
-    const curl = async () => (await dockerExecAsync(workspace.containerName, `curl -s -o /dev/null -m 4 -w '%{http_code}' http://host.docker.internal:${mock.port}/`)).output;
-    const hostConfig = () => JSON.parse(docker('inspect', workspace.containerName))[0].HostConfig;
-    expect(await curl()).toMatch(/^000/);
-    expect(hostConfig().CapAdd).toContain('NET_ADMIN');
-
-    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { network: 'host', memoryGb: 2, cpus: 1.5 } });
-    await lonca.api('POST', `/workspaces/${workspace.id}/recreate`);
-    expect(await curl()).toBe('200');
-    expect(hostConfig().Memory).toBe(2 * 1024 ** 3);
-    expect(hostConfig().NanoCpus).toBe(1.5e9);
-    expect(hostConfig().CapAdd).not.toContain('NET_ADMIN');
-    expect(fs.existsSync(path.join(workspace.path, 'README.md'))).toBe(true);
-
-    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { network: 'internet', memoryGb: 0, cpus: 0 } });
-    await lonca.api('POST', `/workspaces/${workspace.id}/recreate`);
-    expect(await curl()).toMatch(/^000/);
+  it('rebuilds the template when asked, and the next workspace starts from it', async () => {
+    const installedAt = (name: string) => Number(sandboxExec(name, 'stat -c %Y /usr/local/bin/lonca-run').output);
+    const before = installedAt(a.workspace.sandboxName);
+    const image = async () => (await lonca.api('GET', '/state')).system.image;
+    await lonca.api('POST', '/image/rebuild');
+    expect((await image()).state).toBe('building');
+    await until('the build to finish', async () => (await image()).state === 'ready', 500000, 1000);
+    const workspace = await lonca.waitForWorkspace((await lonca.api('POST', `/projects/${project.id}/workspaces`, {})).workspace.id);
+    expect(installedAt(workspace.sandboxName)).toBeGreaterThan(before);
+    expect(sbx('ls', '--json')).not.toContain(`${lonca.prefix}-template`);
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
-  });
+  }, 600000);
 
-  it('runs workspaces on a project’s custom image', async () => {
-    const state = await lonca.api('GET', '/state');
+  it('runs workspaces on a project’s own template, saved from a workspace', async () => {
+    const source = await lonca.waitForWorkspace((await lonca.api('POST', `/projects/${project.id}/workspaces`, {})).workspace.id);
+    asRoot(source.sandboxName, 'touch /custom-marker');
+    sbx('stop', source.sandboxName);
     const custom = `${lonca.prefix}-custom:test`;
-    execFileSync('docker', ['build', '-q', '-t', custom, '-'], { input: `FROM ${state.system.image.tag}\nUSER root\nRUN touch /custom-marker\n${IN_SANDBOX ? 'USER agent\n' : ''}`, stdio: ['pipe', 'ignore', 'ignore'] });
+    sbx('template', 'save', source.sandboxName, custom);
+    await lonca.api('DELETE', `/workspaces/${source.id}`);
     await lonca.api('PATCH', `/projects/${project.id}`, { settings: { image: custom } });
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
-    expect(dockerExec(workspace.containerName, 'test -e /custom-marker').code).toBe(0);
-    expect(dockerExec(workspace.containerName, 'id -un').output).toBe(IN_SANDBOX ? 'agent' : 'lonca');
+    expect(sandboxExec(workspace.sandboxName, 'test -e /custom-marker').code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, 'id -un').output).toBe('agent');
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
     await lonca.api('PATCH', `/projects/${project.id}`, { settings: { image: '' } });
-    docker('rmi', custom);
-    // Docker Sandboxes keeps its own copy.
-    if (REAL_SANDBOX) sbx('template', 'rm', custom, '--force');
+    sbx('template', 'rm', '--force', custom);
+  });
+
+  it('says so when a project’s template isn’t there, rather than leaving it to Docker', async () => {
+    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { image: `${lonca.prefix}-missing:never` } });
+    const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
+    await until('the failure', async () => (await lonca.workspace(created.workspace.id)).status === 'error', 60000);
+    expect((await lonca.workspace(created.workspace.id)).error).toMatch(/no template called/);
+    await lonca.api('DELETE', `/workspaces/${created.workspace.id}`);
+    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { image: '' } });
   });
 
   it('runs a repository’s own setup script from lonca.json', async () => {
@@ -1605,15 +1517,15 @@ describe('project settings', () => {
   });
 });
 
-describe('git in containers', () => {
+describe('git in workspaces', () => {
   it('gives git and gh the GitHub token, and rewrites ssh remotes to https', async () => {
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
-    const name = workspace.containerName;
-    const credential = dockerExec(name, `printf 'protocol=https\\nhost=github.com\\n\\n' | GH_TOKEN=not-a-real-token git credential fill`).output;
+    const name = workspace.sandboxName;
+    const credential = sandboxExec(name, `printf 'protocol=https\\nhost=github.com\\n\\n' | GH_TOKEN=not-a-real-token git credential fill`).output;
     expect(credential).toContain('password=not-a-real-token');
-    expect(dockerExec(name, 'git ls-remote git@github.com:octocat/Hello-World.git HEAD').output).toMatch(/^[0-9a-f]{40}\s+HEAD/);
-    expect(dockerExec(name, 'git config --system push.autoSetupRemote').output).toBe('true');
+    expect(sandboxExec(name, 'git ls-remote git@github.com:octocat/Hello-World.git HEAD').output).toMatch(/^[0-9a-f]{40}\s+HEAD/);
+    expect(sandboxExec(name, 'git config --system push.autoSetupRemote').output).toBe('true');
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
   });
 
@@ -1655,12 +1567,12 @@ describe('remote repositories', () => {
   });
 });
 
-describe('choosing how a workspace runs', () => {
-  // Decided by what's on the machine, so each case gets a server of its own, starting from nothing.
+describe('when Docker Sandboxes can’t run workspaces', () => {
+  // Each case gets a server of its own, starting from nothing.
   const home = () => path.join(FAKE_SBX_DIR, 'choosing');
   const withServer = async (env: Record<string, string>, test: (server: Lonca, project: Project) => Promise<void>) => {
     const server = new Lonca({ port: 47183, instance: 'dockertest-choosing', firstWorkspacePort: 46400 });
-    server.env = { LONCA_RUNTIME: 'auto', LONCA_SBX: FAKE_SBX, FAKE_SBX_DIR: home(), ...env };
+    server.env = { LONCA_SBX: FAKE_SBX, FAKE_SBX_DIR: home(), ...env };
     fs.mkdirSync(home(), { recursive: true });
     await server.start();
     try {
@@ -1672,21 +1584,19 @@ describe('choosing how a workspace runs', () => {
   };
   const sandboxState = async (server: Lonca) => (await server.api('POST', '/sandboxes/check')).state;
 
-  it('uses a container when Docker Sandboxes isn’t installed', async () => {
+  it('won’t make a workspace when it isn’t installed', async () => {
     await withServer({ LONCA_SBX: '/nonexistent/sbx' }, async (server, created) => {
       expect(await sandboxState(server)).toBe('not-installed');
-      const { workspace } = await server.api('POST', `/projects/${created.id}/workspaces`, {});
-      expect(workspace.runtime).toBe('container');
-      await server.api('DELETE', `/workspaces/${workspace.id}`);
+      await expect(server.api('POST', `/projects/${created.id}/workspaces`, {})).rejects.toThrow(/503.*isn’t installed/);
+      expect((await server.api('GET', '/state')).workspaces).toEqual([]);
     });
   });
 
-  it('uses a container when it’s signed out or can’t virtualize, and a VM once it can', async () => {
+  it('won’t make one when it’s signed out or can’t virtualize, and does once it can', async () => {
     fs.writeFileSync(path.join(home(), 'signed-out'), '');
     await withServer({}, async (server, created) => {
       expect(await sandboxState(server)).toBe('signed-out');
-      const container = await server.api('POST', `/projects/${created.id}/workspaces`, {});
-      expect(container.workspace.runtime).toBe('container');
+      await expect(server.api('POST', `/projects/${created.id}/workspaces`, {})).rejects.toThrow(/503.*sbx login/);
 
       fs.rmSync(path.join(home(), 'signed-out'));
       fs.writeFileSync(path.join(home(), 'virtualization'), 'fail');
@@ -1696,7 +1606,6 @@ describe('choosing how a workspace runs', () => {
       expect(await sandboxState(server)).toBe('ready');
 
       const made = await server.api('POST', `/projects/${created.id}/workspaces`, {});
-      expect(made.workspace.runtime).toBe('sandbox');
       const workspace: Workspace = await server.waitForWorkspace(made.workspace.id);
       const inVm = (await server.api<FileEntry[]>('GET', `/workspaces/${workspace.id}/files?path=.`)).map((entry) => entry.name);
       expect(inVm).toContain('README.md');
@@ -1728,15 +1637,6 @@ describe('choosing how a workspace runs', () => {
       expect((await server.workspace(workspace.id)).status).toBe('ready');
       await server.api('DELETE', `/workspaces/${workspace.id}`);
       expect(fs.existsSync(workspace.path)).toBe(false);
-      await server.api('DELETE', `/workspaces/${container.workspace.id}`);
     });
-  });
-
-  it('refuses rather than falling back when told to use VMs', async () => {
-    fs.writeFileSync(path.join(home(), 'signed-out'), '');
-    await withServer({ LONCA_RUNTIME: 'sandbox' }, async (server, created) => {
-      await expect(server.api('POST', `/projects/${created.id}/workspaces`, {})).rejects.toThrow(/LONCA_RUNTIME/);
-    });
-    fs.rmSync(path.join(home(), 'signed-out'));
   });
 });

@@ -1,6 +1,6 @@
 // Starts a real Lonca server in a throwaway home directory with its own Docker
 // resources, so tests never touch a user's data, and cleans all of it up afterwards.
-import { type ChildProcess, execFile, execFileSync, spawn } from 'node:child_process';
+import { type ChildProcess, execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,12 +9,11 @@ import type { ChatItem, Session, SessionSnapshot, Workspace } from '../../shared
 
 export const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
 
-// How this run's workspaces run: `container`, or a sandbox from the real `sbx` (`sandbox`) or from
-// tests/support/fake-sbx (`fake-sandbox`). The real one needs Docker Sandboxes installed and signed in.
-export const RUNTIME = process.env.LONCA_TEST_RUNTIME ?? 'container';
-export const IN_SANDBOX = RUNTIME !== 'container';
+// Whose sandboxes this run uses: tests/support/fake-sbx's, which are Docker containers (`fake`), or
+// the real `sbx`'s (`sandbox`), which needs Docker Sandboxes installed and signed in.
+export const RUNTIME = process.env.LONCA_TEST_RUNTIME ?? 'fake';
 export const REAL_SANDBOX = RUNTIME === 'sandbox';
-export const FAKE_SANDBOX = RUNTIME === 'fake-sandbox';
+export const FAKE_SANDBOX = !REAL_SANDBOX;
 export const FAKE_SBX = path.join(REPO_ROOT, 'tests', 'support', 'fake-sbx');
 export const FAKE_SBX_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'lonca-fake-sbx-'));
 process.on('exit', () => fs.rmSync(FAKE_SBX_DIR, { recursive: true, force: true }));
@@ -24,29 +23,26 @@ const fakeSbxEnv = { FAKE_SBX_DIR, LONCA_SBX: FAKE_SBX };
 // commands mustn't bring this machine's.
 const { SSH_AUTH_SOCK: _ownAgent, ...withoutAgent } = process.env;
 const sbxEnv = { ...withoutAgent, FAKE_SBX_DIR };
+const SBX = REAL_SANDBOX ? 'sbx' : FAKE_SBX;
 
 export function docker(...args: string[]): string {
   return execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 export function sbx(...args: string[]): string {
-  return execFileSync(REAL_SANDBOX ? 'sbx' : FAKE_SBX, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: sbxEnv }).trim();
+  return execFileSync(SBX, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: sbxEnv }).trim();
 }
 
-/** The helper is a container however workspaces run. */
-function execCommand(container: string, script: string): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
-  if (IN_SANDBOX && !container.endsWith('-tools')) {
-    return { file: REAL_SANDBOX ? 'sbx' : FAKE_SBX, args: ['exec', '--user', 'agent', container, '--', 'bash', '-c', script], env: sbxEnv };
-  }
-  return { file: 'docker', args: ['exec', '--user', 'lonca', container, 'bash', '-c', script], env: process.env };
+function execCommand(sandbox: string, script: string): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+  return { file: SBX, args: ['exec', '--user', 'agent', sandbox, '--', 'bash', '-c', script], env: sbxEnv };
 }
 
 /**
  * How many SSH keys a process in a sandbox can list: through its own agent socket, then straight
  * through sbx's relay on the gateway, which is still there when the sandbox has no socket for it.
  */
-export function sandboxSshKeys(container: string): string {
-  return dockerExec(container, `
+export function sandboxSshKeys(sandbox: string): string {
+  return sandboxExec(sandbox, `
 count() { timeout 5 ssh-add -l 2>/dev/null | grep -c SHA256; }
 socat UNIX-LISTEN:/tmp/relay.sock,fork TCP:gateway.docker.internal:3129 2>/dev/null &
 relay=$!
@@ -57,32 +53,23 @@ rm -f /tmp/relay.sock
 `).output;
 }
 
-/** Runs a script as root in a workspace's container or sandbox, for setting up a test. */
-export function asRoot(container: string, script: string): string {
-  if (IN_SANDBOX) return execFileSync(REAL_SANDBOX ? 'sbx' : FAKE_SBX, ['exec', '--user', 'root', container, '--', 'bash', '-c', script], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: sbxEnv }).trim();
-  return docker('exec', '--user', '0', container, 'bash', '-c', script);
+/** Runs a script as root in a sandbox, for setting up a test. */
+export function asRoot(sandbox: string, script: string): string {
+  return execFileSync(SBX, ['exec', '--user', 'root', sandbox, '--', 'bash', '-c', script], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: sbxEnv }).trim();
 }
 
-/** Whether a workspace's container or sandbox exists and is running. */
-export function runtimeRunning(name: string): boolean | null {
-  if (IN_SANDBOX) {
-    const found = (JSON.parse(sbx('ls', '--json')) as { name: string; status: string }[]).find((entry) => entry.name === name);
-    return found ? /^running/.test(found.status) : null;
-  }
-  try {
-    return JSON.parse(docker('inspect', name))[0].State.Running;
-  } catch {
-    return null;
-  }
+/** Whether a sandbox exists and is running. */
+export function sandboxRunning(name: string): boolean | null {
+  const found = (JSON.parse(sbx('ls', '--json')) as { name: string; status: string }[]).find((entry) => entry.name === name);
+  return found ? /^running/.test(found.status) : null;
 }
 
-export function removeRuntime(name: string): void {
-  if (IN_SANDBOX) sbx('rm', '--force', name);
-  else docker('rm', '-f', name);
+export function removeSandbox(name: string): void {
+  sbx('rm', '--force', name);
 }
 
-export function dockerExec(container: string, script: string): { code: number; output: string } {
-  const { file, args, env } = execCommand(container, script);
+export function sandboxExec(sandbox: string, script: string): { code: number; output: string } {
+  const { file, args, env } = execCommand(sandbox, script);
   try {
     const output = execFileSync(file, args, {
       encoding: 'utf8',
@@ -98,9 +85,9 @@ export function dockerExec(container: string, script: string): { code: number; o
   }
 }
 
-/** Like `dockerExec`, but leaves this process free to answer, for commands that call the mock. */
-export function dockerExecAsync(container: string, script: string): Promise<{ code: number; output: string }> {
-  const { file, args, env } = execCommand(container, script);
+/** Like `sandboxExec`, but leaves this process free to answer, for commands that call the mock. */
+export function sandboxExecAsync(sandbox: string, script: string): Promise<{ code: number; output: string }> {
+  const { file, args, env } = execCommand(sandbox, script);
   return new Promise((resolve) => {
     execFile(file, args, { encoding: 'utf8', env }, (error, stdout, stderr) => {
       resolve({ code: error ? (error as { code?: number }).code ?? 1 : 0, output: `${stdout}${error ? stderr : ''}`.trim() });
@@ -193,9 +180,9 @@ export class Lonca {
         LONCA_INSTANCE: this.instance,
         LONCA_FIRST_PORT: String(this.firstWorkspacePort),
         LONCA_NO_OPEN: '1',
+        LONCA_NO_NOTIFY: '1',
         // Saving a made-up key shouldn't need the real service to accept it. Most tests want that.
         LONCA_SKIP_CREDENTIAL_CHECK: '1',
-        LONCA_RUNTIME: IN_SANDBOX ? 'sandbox' : 'container',
         ...(REAL_SANDBOX ? {} : fakeSbxEnv),
         PORT: String(this.port),
         ...this.env,
@@ -208,6 +195,30 @@ export class Lonca {
     this.process.stdout!.on('data', collect);
     this.process.stderr!.on('data', collect);
     await until('the server to listen', async () => (await fetch(`${this.url}/api/state`, { headers: this.headers })).ok, 30000);
+  }
+
+  /**
+   * Cuts this server off from Docker Sandboxes, or reconnects it. Its sandboxes keep running, and
+   * so do the test's own commands. Only the stand-in for `sbx` can do this. Commands the server
+   * already has running lose their connection too, as they would if the daemon went away.
+   */
+  setOffline(offline: boolean): void {
+    const flag = path.join(FAKE_SBX_DIR, `offline-${this.instance}`);
+    if (!offline) {
+      fs.rmSync(flag, { force: true });
+      return;
+    }
+    fs.writeFileSync(flag, '');
+    if (this.process?.pid) spawnSync('pkill', ['-KILL', '-P', String(this.process.pid)]);
+  }
+
+  /** The helper only runs when something needs it, and a sign-in is the first thing to. */
+  async startHelper(): Promise<string> {
+    const helper = `${this.prefix}-tools`;
+    await this.api('POST', '/agents/claude/login');
+    await until('the helper', () => sandboxExec(helper, 'true').code === 0, 300000, 500);
+    await this.api('DELETE', '/agents/claude/login');
+    return helper;
   }
 
   /** Stops the server the way Ctrl-C does. */
@@ -227,9 +238,11 @@ export class Lonca {
   kill(): Promise<void> {
     return new Promise((resolve) => {
       if (!this.process) return resolve();
+      const gone = this.process.exitCode !== null || this.process.signalCode !== null;
       this.process.once('exit', () => resolve());
       this.process.kill('SIGKILL');
       this.process = null;
+      if (gone) resolve();
     });
   }
 
@@ -307,57 +320,55 @@ export class Lonca {
 
   /** Removes the server, its home directory and every Docker resource it created. */
   async destroy(): Promise<void> {
+    this.setOffline(false);
     await this.kill();
-    if (REAL_SANDBOX) {
-      const sandboxes = (JSON.parse(sbx('ls', '--json')) as { name: string }[]).map((entry) => entry.name);
-      for (const name of sandboxes.filter((entry) => entry.startsWith(`${this.prefix}-`))) sbx('rm', '--force', name);
-    }
-    const label = `label=dev.lonca.instance=${this.prefix}`;
-    const containers = docker('ps', '-aq', '--filter', label).split('\n').filter(Boolean);
-    if (containers.length) docker('rm', '-f', ...containers);
-    const volumes = docker('volume', 'ls', '-q', '--filter', label).split('\n').filter(Boolean);
-    if (volumes.length) docker('volume', 'rm', '-f', ...volumes);
-    const networks = docker('network', 'ls', '-q', '--filter', label).split('\n').filter(Boolean);
-    if (networks.length) docker('network', 'rm', ...networks);
+    const sandboxes = (JSON.parse(sbx('ls', '--json')) as { name: string }[]).map((entry) => entry.name);
+    for (const name of sandboxes.filter((entry) => entry.startsWith(`${this.prefix}-`))) sbx('rm', '--force', name);
     fs.rmSync(this.home, { recursive: true, force: true });
   }
 }
 
-/** Points the real CLIs in a container at tests/support/fake-signin.mjs instead of the real services. */
-export function installFakeSignIn(container: string): void {
+/** Points the real CLIs in a sandbox at tests/support/fake-signin.mjs instead of the real services. */
+export function installFakeSignIn(sandbox: string): void {
   // Claude is told not to check certificates. Codex does check them, so it gets a CA to trust.
-  dockerExec(container, `mkdir -p /tmp/fake-signin && cd /tmp/fake-signin \
+  sandboxExec(sandbox, `mkdir -p /tmp/fake-signin && cd /tmp/fake-signin \
     && openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=fake-signin -keyout ca-key.pem -out ca.pem 2>/dev/null \
     && openssl req -newkey rsa:2048 -nodes -subj /CN=auth.openai.com -keyout key.pem -out cert.csr 2>/dev/null \
     && printf 'subjectAltName=DNS:auth.openai.com,DNS:platform.claude.com,DNS:claude.com,DNS:api.anthropic.com\nbasicConstraints=CA:FALSE\n' > cert.ext \
     && openssl x509 -req -days 2 -in cert.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -extfile cert.ext -out cert.pem 2>/dev/null`);
-  docker('cp', path.join(REPO_ROOT, 'tests', 'support', 'fake-signin.mjs'), `${container}:/tmp/fake-signin/server.mjs`);
-  docker('exec', '-d', '--user', 'lonca', container, 'node', '/tmp/fake-signin/server.mjs');
-  dockerExec(container, 'for _ in $(seq 1 100); do curl -s -o /dev/null http://127.0.0.1:8080/ && exit 0; sleep 0.1; done; exit 1');
-  docker('exec', container, 'bash', '-c', `
+  sbx('cp', path.join(REPO_ROOT, 'tests', 'support', 'fake-signin.mjs'), `${sandbox}:/tmp/fake-signin/server.mjs`);
+  // As root, because in a VM only root can have port 443.
+  asRoot(sandbox, '(nohup node /tmp/fake-signin/server.mjs </dev/null) >/dev/null 2>&1 &');
+  sandboxExec(sandbox, 'for _ in $(seq 1 100); do curl -s -o /dev/null http://127.0.0.1:8080/ && exit 0; sleep 0.1; done; exit 1');
+  asRoot(sandbox, `
     echo '127.0.0.1 platform.claude.com claude.com api.anthropic.com auth.openai.com' >> /etc/hosts
-    mv /usr/local/bin/claude /usr/local/bin/claude.real
-    printf '#!/bin/bash\\nexport NODE_TLS_REJECT_UNAUTHORIZED=0\\nexec /usr/local/bin/claude.real "$@"\\n' > /usr/local/bin/claude
-    mv /usr/local/bin/codex /usr/local/bin/codex.real
-    printf '#!/bin/bash\\nexport CODEX_CA_CERTIFICATE=/tmp/fake-signin/ca.pem\\nif [ "$1 $2" = "login --device-auth" ]; then exec /usr/local/bin/codex.real login --device-auth --experimental_issuer http://127.0.0.1:8080; fi\\nexec /usr/local/bin/codex.real "$@"\\n' > /usr/local/bin/codex
-    chmod +x /usr/local/bin/claude /usr/local/bin/codex
+    claude=$(command -v claude)
+    codex=$(command -v codex)
+    mv "$claude" "$claude.real"
+    mv "$codex" "$codex.real"
+    # The VM's proxy would go to the real service, whatever /etc/hosts says.
+    direct='unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy'
+    printf '#!/bin/bash\\n%s\\nexport NODE_TLS_REJECT_UNAUTHORIZED=0\\nexec %s.real "$@"\\n' "$direct" "$claude" > "$claude"
+    printf '#!/bin/bash\\n%s\\nexport CODEX_CA_CERTIFICATE=/tmp/fake-signin/ca.pem\\nif [ "$1 $2" = "login --device-auth" ]; then exec %s.real login --device-auth --experimental_issuer http://127.0.0.1:8080; fi\\nexec %s.real "$@"\\n' "$direct" "$codex" "$codex" > "$codex"
+    chmod +x "$claude" "$codex"
   `);
 }
 
-export function setFakeSignIn(container: string, options: { mode?: 'ok' | 'rejected' | 'disabled' | 'denied'; approved?: boolean }): void {
+export function setFakeSignIn(sandbox: string, options: { mode?: 'ok' | 'rejected' | 'disabled' | 'denied'; approved?: boolean }): void {
   const lines = [];
   if (options.mode) lines.push(`echo ${options.mode} > /tmp/fake-signin/mode`);
   if (options.approved === true) lines.push('touch /tmp/fake-signin/approved');
   if (options.approved === false) lines.push('rm -f /tmp/fake-signin/approved');
-  dockerExec(container, lines.join('; '));
+  sandboxExec(sandbox, lines.join('; '));
 }
 
-export function removeFakeSignIn(container: string): void {
-  // It runs as the unprivileged user, and root here has no capability to signal other users.
-  docker('exec', '--user', 'lonca', container, 'pkill', '-f', '^node /tmp/fake-signin/server.mjs');
-  docker('exec', container, 'bash', '-c', `
-    mv -f /usr/local/bin/claude.real /usr/local/bin/claude
-    mv -f /usr/local/bin/codex.real /usr/local/bin/codex
+export function removeFakeSignIn(sandbox: string): void {
+  asRoot(sandbox, `
+    pkill -f '^node /tmp/fake-signin/server.mjs'
+    claude=$(command -v claude)
+    codex=$(command -v codex)
+    mv -f "$claude.real" "$claude"
+    mv -f "$codex.real" "$codex"
     grep -v platform.claude.com /etc/hosts > /tmp/hosts.clean && cat /tmp/hosts.clean > /etc/hosts
     rm -rf /tmp/hosts.clean /tmp/fake-signin
     true
