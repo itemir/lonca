@@ -58,7 +58,9 @@ A repository can also carry its own setup script in a `lonca.json` file at its r
 
 Rebuild a workspace from its **⋯** menu to apply network, image or limit changes to it. Its files and conversations are kept. A container keeps its home directory too, but a virtual machine starts afresh, along with anything installed in it.
 
-If an operation fails or Lonca stops partway through it, the workspace remembers what was requested. Its retry button names that operation: retrying an archive finishes archiving, and retrying a delete finishes deleting. A failed cleanup remains visible until it succeeds. Creation and restoration copy only missing files, so retrying after a partial copy preserves edits already made in the workspace. Setup failures have their own status and can be rerun from the Setup tab.
+To close a workspace, use the trash icon on its row in the sidebar or at the top right of its panel. This archives it: its runtime is shut down and removed along with its checkout, so anything not committed is lost, while its branch and chat are kept. Archived workspaces are listed under **N archived** in the sidebar. Open one to restore it, or use its trash icon to delete it for good, along with any commits that were never pushed.
+
+If an operation fails or Lonca stops partway through it, the workspace remembers what was requested. Its retry button names that operation: retrying an archive finishes archiving, and retrying a delete finishes deleting. A failed cleanup stops the runtime and remains visible until it succeeds. If an archive can't finish, the trash icon offers to delete the workspace instead. Creation and restoration copy only missing files, so retrying after a partial copy preserves edits already made in the workspace. Setup failures have their own status and can be rerun from the Setup tab.
 
 Running agents stay tracked while Docker is unreachable. An accepted Stop is saved and completes when the process can be reached again, including after a Lonca restart. Surviving scripts regain their Stop controls when Docker reconnects. Shells can also be stopped or restarted, but their old terminal output and input connection cannot be restored; the terminal explains when this happens.
 
@@ -190,6 +192,7 @@ Recovery tests cover operations and their failure boundaries together:
 | Partial transcript appends, interrupted queue promotion, retained writes and automatic retries, flushing multiple conversations, deletion with pending writes | `tests/unit/transcript-persistence.test.ts` |
 | Recovered script controls in the browser | `tests/e2e/setup.spec.ts` |
 | A conversation that can't be read on opening or after a reconnect, and recovering from it, in the browser | `tests/e2e/hydration.spec.ts` |
+| Archiving out of a failed operation, restoring from it, and deleting after a failed archive or delete, in the browser | `tests/e2e/workspace-close.spec.ts` |
 
 The outage tests use a connection proxy for their own server. They leave the actual Docker daemon and unrelated workspaces running. Tests requiring real Docker fault injection are skipped in the sandbox suite; the partial-copy and terminal-control cases also run through the fake sandbox adapter.
 

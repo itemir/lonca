@@ -619,9 +619,11 @@ test.describe('with agents connected', () => {
     await page.getByRole('button', { name: 'Stop the run script' }).click();
     await expect(page.getByRole('button', { name: 'Start the run script' })).toBeVisible({ timeout: 15000 });
 
-    await page.getByRole('button', { name: 'Workspace options' }).click();
-    await page.getByRole('menuitem', { name: 'Delete' }).click();
-    await page.getByRole('dialog').getByRole('button', { name: 'Delete workspace' }).click();
+    await page.getByRole('button', { name: 'Archive this workspace' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Archive', exact: true }).click();
+    await expect(page.locator('.workspace-banner')).toContainText('archived', { timeout: 30000 });
+    await page.getByRole('button', { name: 'Delete this workspace' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Delete permanently' }).click();
     await expect(page).toHaveURL(`${lonca.url}/`);
     await until('the workspace to go', async () => (await lonca.workspace(fresh.id)) === undefined, 30000);
     expect(fs.existsSync(fresh.path)).toBe(false);
@@ -639,17 +641,15 @@ test.describe('with agents connected', () => {
     await composer().fill('');
   });
 
-  test('stops, wakes, archives and restores a workspace', async () => {
-    await page.getByRole('button', { name: 'Workspace options' }).click();
-    await page.getByRole('menuitem', { name: 'Stop container' }).click();
+  test('wakes a stopped workspace, then archives and restores it', async () => {
+    await lonca.api('POST', `/workspaces/${workspace.id}/stop`);
     await expect(page.locator('.workspace-banner')).toContainText('container is stopped');
     await shot('stopped');
     await page.locator('.workspace-banner').getByRole('button', { name: 'Start' }).click();
     await expect(page.locator('.workspace-banner')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'README.md' })).toBeVisible({ timeout: 15000 });
 
-    await page.getByRole('button', { name: 'Workspace options' }).click();
-    await page.getByRole('menuitem', { name: 'Archive' }).click();
+    await page.getByRole('button', { name: 'Archive this workspace' }).click();
     const dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('uncommitted');
     await shot('archive-confirm');
@@ -660,9 +660,8 @@ test.describe('with agents connected', () => {
     await expect(page.getByRole('dialog')).toContainText('outside the container');
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
 
-    await page.getByRole('button', { name: 'Workspace options' }).click();
-    await page.getByRole('menuitem', { name: 'Archive' }).click();
-    await dialog.getByRole('button', { name: 'Archive workspace' }).click();
+    await page.getByRole('button', { name: 'Archive this workspace' }).click();
+    await dialog.getByRole('button', { name: 'Archive', exact: true }).click();
     await expect(page.locator('.workspace-banner')).toContainText('archived', { timeout: 30000 });
     expect(fs.existsSync(workspace.path)).toBe(false);
     await expect(composer()).toBeDisabled();

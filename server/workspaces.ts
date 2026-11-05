@@ -551,21 +551,27 @@ async function teardown(workspace: Workspace, project: Project, deleteBranch: bo
   // Begin from a fresh runtime. Something an agent left running, such as a server it started
   // with nohup, would otherwise keep writing to the checkout while it's being removed.
   await stopContainer(runtimeHandle(workspace));
-  let containerId: string;
   try {
-    containerId = await ensureRuntime(workspace, project);
-  } catch {
-    // A bad custom image or a taken port must not make a workspace impossible to remove.
+    let containerId: string;
+    try {
+      containerId = await ensureRuntime(workspace, project);
+    } catch {
+      // A bad custom image or a taken port must not make a workspace impossible to remove.
+      await removeContainer(runtimeHandle(workspace));
+      containerId = await ensureRuntime(workspace, project, { bare: true });
+    }
+    await repoLock.run(project.id, () =>
+      execText(containerId, [
+        'bash', '-c', TEARDOWN_SCRIPT, 'lonca-teardown',
+        paths.repo(project.slug), workspace.path, workspace.branch, deleteBranch ? '1' : '0',
+      ], { timeoutMs: LONG_GIT_TIMEOUT_MS }),
+    );
     await removeContainer(runtimeHandle(workspace));
-    containerId = await ensureRuntime(workspace, project, { bare: true });
+  } catch (error) {
+    // The runtime was only started for this, and shouldn't stay up waiting for a retry.
+    await stopContainer(runtimeHandle(workspace)).catch(() => {});
+    throw error;
   }
-  await repoLock.run(project.id, () =>
-    execText(containerId, [
-      'bash', '-c', TEARDOWN_SCRIPT, 'lonca-teardown',
-      paths.repo(project.slug), workspace.path, workspace.branch, deleteBranch ? '1' : '0',
-    ], { timeoutMs: LONG_GIT_TIMEOUT_MS }),
-  );
-  await removeContainer(runtimeHandle(workspace));
   await removeTree(workspace.path);
 }
 

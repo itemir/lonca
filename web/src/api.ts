@@ -47,7 +47,7 @@ export const api = {
 
   renameWorkspace: (id: string, title: string) => request<Workspace>('PATCH', `/workspaces/${id}`, { title }),
   deleteWorkspace: (id: string) => request<void>('DELETE', `/workspaces/${id}`),
-  workspaceAction: (id: string, action: 'retry' | 'restore' | 'start' | 'stop' | 'archive' | 'recreate') =>
+  workspaceAction: (id: string, action: 'retry' | 'restore' | 'start' | 'archive' | 'recreate') =>
     request<void>('POST', `/workspaces/${id}/${action}`),
 
   listFiles: (id: string, path: string) => request<FileEntry[]>('GET', `/workspaces/${id}/files?${query({ path })}`),

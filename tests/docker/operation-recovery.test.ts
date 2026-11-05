@@ -88,6 +88,7 @@ chmod +x /usr/local/bin/git`);
     : lonca.api('POST', `/workspaces/${workspace.id}/archive`)).rejects.toThrow(/Injected prune failure/);
   expect(await lonca.workspace(workspace.id)).toMatchObject({ status: 'error', pendingOperation: operation });
   expect(fs.readdirSync(workspace.path)).toEqual([]);
+  expect(runtimeRunning(workspace.containerName)).toBe(false);
   await lonca.kill();
   await lonca.start();
   await retry(workspace, operation);

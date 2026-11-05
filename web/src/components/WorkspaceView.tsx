@@ -10,6 +10,7 @@ import { basename, runtimeName } from '../format.ts';
 import { useLayout } from '../layout.ts';
 import { attempt, tabKey, useStore, type WorkspaceTab } from '../store.ts';
 import { ChatTranscript } from './Chat.tsx';
+import { canClose, closeVerb, CloseWorkspaceDialog } from './CloseWorkspaceDialog.tsx';
 import { Composer } from './Composer.tsx';
 import { DiffTab, FileTab } from './FileViews.tsx';
 import { RightPanel } from './RightPanel.tsx';
@@ -161,6 +162,7 @@ function WorkspaceHeader({ workspace, project }: { workspace: Workspace; project
   const { sidebarOpen, toggleSidebar, rightOpen, toggleRight } = useLayout();
   const [confirm, setConfirm] = useState<ConfirmOptions | null>(null);
   const [renaming, setRenaming] = useState(false);
+  const [closing, setClosing] = useState(false);
   const running = workspace.status === 'ready';
 
   const openInEditor = (name: string, scheme: string) => setConfirm({
@@ -168,33 +170,6 @@ function WorkspaceHeader({ workspace, project }: { workspace: Workspace; project
     body: `${name} runs on your computer, outside the ${runtimeName(workspace)}, and can act on settings, tasks and git config an agent left in this workspace. Open it if you trust what the agent has written.`,
     action: `Open in ${name}`,
     onConfirm: () => window.open(`${scheme}://file${workspace.path}`),
-  });
-
-  const archive = async () => {
-    const changes = running ? await api.changes(workspace.id).catch(() => null) : null;
-    const uncommitted = changes?.uncommitted ?? 0;
-    const body = changes === null
-      ? `Its ${runtimeName(workspace)} and checkout are removed, along with any uncommitted changes. Commits stay on ${workspace.branch}, and you can restore it later.`
-      : uncommitted > 0
-        ? `Its ${runtimeName(workspace)} and checkout are removed. ${uncommitted} uncommitted ${uncommitted === 1 ? 'change is' : 'changes are'} lost; commits stay on ${workspace.branch}.`
-        : `Its ${runtimeName(workspace)} and checkout are removed. Commits stay on ${workspace.branch}, and you can restore it later.`;
-    setConfirm({
-      title: `Archive ${workspace.name}?`,
-      body,
-      action: 'Archive workspace',
-      onConfirm: () => void attempt(() => api.workspaceAction(workspace.id, 'archive')),
-    });
-  };
-
-  const remove = () => setConfirm({
-    title: `Delete ${workspace.name}?`,
-    body: `Its ${runtimeName(workspace)}, checkout, chat history and the branch ${workspace.branch} are deleted. Commits that were never pushed are lost.`,
-    action: 'Delete workspace',
-    danger: true,
-    onConfirm: async () => {
-      navigate('/');
-      await attempt(() => api.deleteWorkspace(workspace.id));
-    },
   });
 
   return (
@@ -211,18 +186,16 @@ function WorkspaceHeader({ workspace, project }: { workspace: Workspace; project
           trigger={<MoreHorizontal size={16} />}
           entries={[
             { label: 'Rename', icon: <Pencil size={14} />, onSelect: () => setRenaming(true) },
-            ...(workspace.status === 'stopped'
-              ? [{ label: `Start ${runtimeName(workspace)}`, icon: <Play size={14} />, onSelect: () => void attempt(() => api.workspaceAction(workspace.id, 'start')) }]
-              : [{ label: `Stop ${runtimeName(workspace)}`, icon: <Pause size={14} />, disabled: !running, onSelect: () => void attempt(() => api.workspaceAction(workspace.id, 'stop')) }]),
             { label: `Rebuild ${runtimeName(workspace)}`, icon: <RotateCcw size={14} />, disabled: !running && workspace.status !== 'stopped', onSelect: () => void attempt(() => api.workspaceAction(workspace.id, 'recreate')) },
             { label: 'Project settings', icon: <SettingsIcon size={14} />, onSelect: () => navigate(`/projects/${project.id}`) },
-            { label: 'Archive', icon: <Archive size={14} />, disabled: !['ready', 'stopped'].includes(workspace.status), onSelect: () => void archive() },
-            { label: 'Delete', icon: <Trash2 size={14} />, danger: true, onSelect: remove },
           ]}
         />
       </div>
       <span className="spacer" />
       <span className="workspace-name">{workspace.name}</span>
+      <IconButton className="icon-button-danger" label={`${closeVerb(workspace)} this workspace`} disabled={!canClose(workspace)} onClick={() => setClosing(true)}>
+        <Trash2 size={16} />
+      </IconButton>
       <Menu
         className="open-in"
         label="Open this workspace elsewhere"
@@ -237,6 +210,7 @@ function WorkspaceHeader({ workspace, project }: { workspace: Workspace; project
       <IconButton label={rightOpen ? 'Hide the side panel' : 'Show the side panel'} onClick={toggleRight}><PanelRight size={16} /></IconButton>
       {confirm && <ConfirmDialog {...confirm} onClose={() => setConfirm(null)} />}
       {renaming && <RenameDialog workspace={workspace} onClose={() => setRenaming(false)} />}
+      {closing && <CloseWorkspaceDialog workspace={workspace} onClose={() => setClosing(false)} />}
     </header>
   );
 }
@@ -388,7 +362,7 @@ export function WorkspaceView() {
   return (
     <div className="workspace">
       <div className="workspace-main">
-        <WorkspaceHeader workspace={workspace} project={project} />
+        <WorkspaceHeader key={workspace.id} workspace={workspace} project={project} />
         <div className="tab-bar" role="tablist">
           {sessions.map((session) => (
             <SessionTabLabel

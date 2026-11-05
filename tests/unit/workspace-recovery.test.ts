@@ -6,9 +6,9 @@ import type { Project, Session, Workspace, WorkspaceOperation } from '../../shar
 import { archiveWorkspace, deleteWorkspace, markInterruptedWork, retryWorkspace, runningContainer, setSetupScriptStarter } from '../../server/workspaces.ts';
 import { RuntimeStoppedError } from '../../server/util.ts';
 
-const { state, flushState, execText, ensureContainer } = vi.hoisted(() => ({
+const { state, flushState, execText, ensureContainer, stopContainer } = vi.hoisted(() => ({
   state: { projects: [] as Project[], workspaces: [] as Workspace[], sessions: [] as Session[] },
-  flushState: vi.fn(), execText: vi.fn(async () => ''), ensureContainer: vi.fn(async () => 'container'),
+  flushState: vi.fn(), execText: vi.fn(async () => ''), ensureContainer: vi.fn(async () => 'container'), stopContainer: vi.fn(async () => {}),
 }));
 
 vi.mock('../../server/store.ts', () => ({ state, flushState, saveState: vi.fn(), deleteTranscript: vi.fn(),
@@ -18,7 +18,7 @@ vi.mock('../../server/store.ts', () => ({ state, flushState, saveState: vi.fn(),
 vi.mock('../../server/system.ts', () => ({ system: { sandbox: { state: 'off' } }, secretEnv: () => [],
   ensureImage: async () => 'image', ensureSandboxImage: vi.fn(), ensureCustomTemplate: vi.fn(), checkSandboxes: vi.fn(),
 }));
-vi.mock('../../server/containers.ts', () => ({ ensureContainer, isContainerRunning: async () => true, stopContainer: vi.fn() }));
+vi.mock('../../server/containers.ts', () => ({ ensureContainer, isContainerRunning: async () => true, stopContainer }));
 vi.mock('../../server/docker.ts', () => ({ execText, exec: async () => ({ code: 0 }), homeVolume: () => 'home', removeContainer: vi.fn(), removeVolume: vi.fn() }));
 vi.mock('../../server/projects.ts', () => ({ refreshFromLocalRepo: vi.fn(), projectLifecycle: {} }));
 
@@ -58,6 +58,15 @@ it('does not touch runtime or checkout resources when saving operation intent fa
   expect(workspace).toMatchObject({ status: 'error', pendingOperation: 'archive' });
   expect(ensureContainer).not.toHaveBeenCalled();
   expect(execText).not.toHaveBeenCalled();
+});
+
+it.each(['archive', 'delete'] as const)('shuts the runtime down when %s fails starting it for cleanup', async (operation) => {
+  workspace.status = 'ready';
+  // Booting can fail with the runtime already up, for the fallback as well as the first attempt.
+  ensureContainer.mockRejectedValueOnce(new Error('boot failed')).mockRejectedValueOnce(new Error('boot failed again'));
+  await expect(operation === 'archive' ? archiveWorkspace(workspace) : deleteWorkspace(workspace)).rejects.toThrow('boot failed again');
+  expect(workspace).toMatchObject({ status: 'error', pendingOperation: operation });
+  expect(stopContainer.mock.invocationCallOrder.at(-1)).toBeGreaterThan(ensureContainer.mock.invocationCallOrder.at(-1)!);
 });
 
 it.each(['create', 'restore'] as WorkspaceOperation[])('keeps %s usable when launching its setup script fails', async (operation) => {
