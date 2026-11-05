@@ -66,7 +66,7 @@ export function BottomPanel({ workspace, project, onCollapse }: { workspace: Wor
                 <button type="button" role="tab" aria-selected={active} onClick={() => setSelection(terminal.id)}>
                   {terminal.title}
                 </button>
-                {shells.length > 1 && (
+                {(shells.length > 1 || terminal.disconnected) && (
                   <button type="button" className="tab-close" aria-label={`Close ${terminal.title}`} onClick={() => void attempt(() => api.closeTerminal(terminal.id))}>
                     <X size={12} />
                   </button>

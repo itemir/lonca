@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import type { AppState, TerminalInfo, Workspace } from '../../shared/types.ts';
-import { Lonca, makeFixtureRepo } from '../support/harness.ts';
+import { Lonca, dockerExec, makeFixtureRepo } from '../support/harness.ts';
 
 const lonca = new Lonca({ port: 48373, instance: 'terminal-window-ui', firstWorkspacePort: 58700 });
 let fixture: string;
@@ -179,6 +179,54 @@ test('lets a newer window replace an older one opened from another browser tab',
   await expect(screen(other)).toContainText(workspace.name);
 });
 
+test('keeps a disconnected window dismissed when its retry arrives', async ({ page }) => {
+  await page.context().addInitScript(`
+    const OriginalWebSocket = window.WebSocket;
+    window.WebSocket = class extends OriginalWebSocket {
+      constructor(...args) {
+        super(...args);
+        if (new URL(args[0]).pathname.endsWith('/window')) window.testTerminalSocket = this;
+      }
+    };
+  `);
+  const { workspace, terminal } = await openWorkspace(page);
+  const view = await moveToWindow(page);
+  await expect(screen(view)).toContainText(workspace.name);
+  await expect(away(page)).toBeVisible();
+
+  // Hold just this socket's retry, so the user can bring it back while disconnected.
+  await view.evaluate(`new Promise((resolve) => {
+    const socket = window.testTerminalSocket;
+    const onclose = socket.onclose;
+    socket.onclose = (event) => {
+      const setTimeout = window.setTimeout;
+      window.setTimeout = (callback) => { window.retryTerminal = callback; return 0; };
+      try { onclose.call(socket, event); }
+      finally { window.setTimeout = setTimeout; }
+      resolve();
+    };
+    socket.close();
+  })`);
+  await page.getByRole('button', { name: 'Bring it back' }).click();
+  await expect(screen(page)).toContainText(workspace.name);
+  expect((await terminalInfo(terminal.id))?.windowed).toBeUndefined();
+
+  const closing = view.waitForEvent('close');
+  // Let evaluate return before the retry causes the popup to close itself.
+  await view.evaluate('setTimeout(window.retryTerminal, 100)');
+  await closing;
+  await expect(away(page)).toBeHidden();
+  await run(page, 'echo still-in-the-panel');
+  await expect(screen(page)).toContainText('still-in-the-panel');
+  expect((await terminalInfo(terminal.id))?.windowed).toBeUndefined();
+
+  // A fresh, explicitly opened window is allowed after the old one was dismissed.
+  const reopened = await moveToWindow(page);
+  await expect(screen(reopened)).toContainText('still-in-the-panel');
+  await reopened.close();
+  await expect(away(page)).toBeHidden();
+});
+
 test('doesn’t answer old terminal queries at the prompt each time a view attaches', async ({ page }) => {
   const { workspace } = await openWorkspace(page);
   // The answer is read here, so it's only left on the prompt if the query gets answered again.
@@ -266,6 +314,34 @@ test('explains a blocked pop-up and leaves the terminal where it is', async ({ p
   await expect(screen(page)).toContainText(workspace.name);
   await expect(away(page)).toBeHidden();
   expect((await terminalInfo(terminal.id))?.windowed).toBeUndefined();
+});
+
+test('recovers and closes a legacy Run process even when it is the only terminal', async ({ page }) => {
+  const workspace = await lonca.waitForWorkspace((await lonca.api('POST', `/projects/${projectId}/workspaces`, {})).workspace.id);
+  await lonca.api('PATCH', `/projects/${projectId}`, { settings: { setupScript: 'exec sleep 600' } });
+  try {
+    await lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`);
+  } finally {
+    await lonca.api('PATCH', `/projects/${projectId}`, { settings: { setupScript: '' } });
+  }
+  const record = `/var/tmp/lonca/tty/${workspace.id}`;
+  const pid = dockerExec(workspace.containerName, `cat ${record}-setup.pid`).output;
+  expect(pid).toMatch(/^\d+$/);
+  await lonca.kill();
+  // The old Run feature used the same process records with a different suffix.
+  expect(dockerExec(workspace.containerName, `for suffix in pid pid.identity pid.launch; do mv ${record}-setup.$suffix ${record}-run.$suffix; done`).code).toBe(0);
+  await lonca.start();
+  const id = `${workspace.id}-run`;
+  await expect.poll(() => terminalInfo(id), { timeout: 20000 }).toMatchObject({ kind: 'shell', status: 'running', disconnected: true });
+  expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).toBe(0);
+
+  await page.goto(`${lonca.url}/w/${workspace.id}?token=${lonca.token}`);
+  await expect(page.getByRole('tab', { name: 'Recovered run script', exact: true })).toBeVisible();
+  expect((await lonca.api<AppState>('GET', '/state')).terminals.filter((entry) => entry.workspaceId === workspace.id)).toHaveLength(1);
+  await page.getByRole('button', { name: 'Close Recovered run script', exact: true }).click();
+  await expect.poll(() => dockerExec(workspace.containerName, `kill -0 ${pid}`).code).not.toBe(0);
+  await expect.poll(() => terminalInfo(id)).toBeUndefined();
+  await expect(screen(page)).toContainText(workspace.name);
 });
 
 test.describe('on a phone', () => {

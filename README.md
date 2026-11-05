@@ -34,7 +34,7 @@ Without it, workspaces run in hardened containers. Lonca picks it up by itself, 
 - **Projects and workspaces.** Add as many repositories as you like, and open as many workspaces in each as you need. Each one gets a city name, a branch such as `you/amman` from `origin/main`, and a virtual machine or container of its own.
 - **Claude and Codex.** Open several conversations in one workspace, each with its own agent, model and effort level. Conversations keep going if you close the browser or restart Lonca, and you can queue follow-ups while an agent works.
 - **Changes and checks.** Browse and search files, read a diff of everything on the branch, and follow a pull request's checks. Create PR asks the agent to commit, push and open one.
-- **Terminals.** Each workspace has real shells inside it, and a Setup tab if your project has a setup script. A shell can move to a separate browser window, which you can place, minimize or make full screen like any other. Closing that window brings the terminal back to the panel, still running. If your browser blocks the window, allow pop-ups for Lonca.
+- **Terminals.** Each workspace has real shells inside it, and a Setup tab if your project has a setup script. A shell can move to a separate browser window, which you can place, minimize or make full screen like any other. Closing that window brings the terminal back to the panel, still running. If your browser blocks the window, allow pop-ups for Lonca. Run scripts left running by an older version appear as Recovered run script terminals; closing one stops its processes.
 
 ## Project settings
 

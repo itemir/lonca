@@ -78,6 +78,11 @@ export function TerminalView({ id, active, autoFocus = true, onWindowClosed }: {
     let retry = 0;
     let retryTimer: number | undefined;
     let replaying = false;
+    // A popup keeps its identity through socket reconnects and page reloads. A dismissed
+    // window must not become a new owner just because its connection came back.
+    const windowKey = `lonca.terminal-window.${id}`;
+    const windowId = onWindowClosed ? sessionStorage.getItem(windowKey) ?? crypto.randomUUID() : undefined;
+    if (windowId) sessionStorage.setItem(windowKey, windowId);
     const encoder = new TextEncoder();
     const sendSize = () => {
       const socket = socketRef.current;
@@ -89,7 +94,9 @@ export function TerminalView({ id, active, autoFocus = true, onWindowClosed }: {
       if (!replaying && element.offsetWidth > 0 && element.offsetHeight > 0) fit.fit();
     };
     const connect = () => {
-      const socket = new WebSocket(socketUrl(`/ws/terminals/${id}${onWindowClosed ? '/window' : ''}`));
+      const url = new URL(socketUrl(`/ws/terminals/${id}${windowId ? '/window' : ''}`));
+      if (windowId) url.searchParams.set('windowId', windowId);
+      const socket = new WebSocket(url);
       socket.binaryType = 'arraybuffer';
       socketRef.current = socket;
       socket.onopen = () => {

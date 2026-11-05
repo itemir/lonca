@@ -44,6 +44,9 @@ class Terminal {
   private clients = new Set<WebSocket>();
   /** The window this terminal was moved to. One view at a time decides its size and answers its programs. */
   private window: WebSocket | null = null;
+  /** Stays known while its socket reconnects, so Bring it back can still dismiss it. */
+  private windowId: string | null = null;
+  private dismissedWindows = new Set<string>();
   private windowLeaving: ReturnType<typeof setTimeout> | undefined;
   private process: TtyProcess | null = null;
   private stream: Duplex | null = null;
@@ -173,14 +176,20 @@ exit 1
     }
   }
 
-  attach(socket: WebSocket, asWindow: boolean): void {
-    this.clients.add(socket);
-    if (asWindow) {
+  attach(socket: WebSocket, windowId?: string): void {
+    if (windowId) {
+      if (this.dismissedWindows.has(windowId)) {
+        socket.send(JSON.stringify({ type: 'window-closed' }));
+        socket.close();
+        return;
+      }
       // A newer window replaces an older one, as a window opened from another browser tab can.
-      this.dismissWindow();
+      this.dismissWindow(windowId);
+      this.windowId = windowId;
       this.window = socket;
       this.setWindowed(true);
     }
+    this.clients.add(socket);
     // A view answers what programs ask the terminal, and shouldn't again for what another already has.
     // What nobody has seen is still waiting for its answers, so that comes after the marker.
     const replay = Buffer.concat(this.chunks);
@@ -223,8 +232,10 @@ exit 1
   }
 
   /** Tells the window to close, which it can't do by itself just from losing its connection. */
-  private dismissWindow(): void {
+  private dismissWindow(reconnectingId?: string): void {
     clearTimeout(this.windowLeaving);
+    if (this.windowId && this.windowId !== reconnectingId) this.dismissedWindows.add(this.windowId);
+    this.windowId = null;
     const window = this.window;
     this.window = null;
     if (window?.readyState !== WebSocket.OPEN) return;
@@ -418,10 +429,10 @@ export function listTerminals(): TerminalInfo[] {
   return [...terminals.values()].map((terminal) => terminal.info);
 }
 
-export function attachTerminal(id: string, socket: WebSocket, asWindow: boolean): boolean {
+export function attachTerminal(id: string, socket: WebSocket, windowId?: string): boolean {
   const terminal = terminals.get(id);
   if (!terminal) return false;
-  terminal.attach(socket, asWindow);
+  terminal.attach(socket, windowId);
   return true;
 }
 
@@ -631,7 +642,7 @@ async function recoverWorkspace(workspace: Workspace): Promise<void> {
     : await recordStates(containerId, ['status', ...mine().filter((terminal) => terminal.unwatched).map((terminal) => terminal.pidFile)]);
   if (search) {
     for (const [file, record] of records) {
-      const id = /^([a-z0-9]{12}(?:-setup)?)\.pid$/.exec(path.posix.basename(file))?.[1];
+      const id = /^([a-z0-9]{12}(?:-(?:setup|run))?)\.pid$/.exec(path.posix.basename(file))?.[1];
       if (id && !terminals.has(id) && (record.state === 'leader' || record.state === 'jobs')) adopt(workspace, containerId, id, record.state);
     }
   }
@@ -645,9 +656,12 @@ async function recoverWorkspace(workspace: Workspace): Promise<void> {
 
 /** Gives back the controls of a terminal an earlier server started. */
 function adopt(workspace: Workspace, containerId: string, id: string, found: 'leader' | 'jobs'): void {
-  const kind = id.endsWith('-setup') ? 'setup' : 'shell';
-  if (kind !== 'shell' && id !== `${workspace.id}-${kind}`) return;
-  const title = kind === 'setup' ? 'Setup' : 'Recovered terminal';
+  const script = /-(setup|run)$/.exec(id)?.[1];
+  if (script && id !== `${workspace.id}-${script}`) return;
+  // Run scripts from older versions still own live processes. Give them ordinary terminal
+  // controls so closing or restarting one can stop its whole session after an upgrade.
+  const kind = script === 'setup' ? 'setup' : 'shell';
+  const title = kind === 'setup' ? 'Setup' : script === 'run' ? 'Recovered run script' : 'Recovered terminal';
   const terminal = new Terminal({ id, workspaceId: workspace.id, kind, title, status: 'running', exitCode: null });
   terminals.set(id, terminal);
   if (found === 'jobs') {

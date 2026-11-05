@@ -75,7 +75,12 @@ server.on('upgrade', (req, socket, head) => {
       return;
     }
     const terminal = /^\/ws\/terminals\/([\w-]+)(\/window)?$/.exec(url?.pathname ?? '');
-    if (!terminal || !attachTerminal(terminal[1], client, terminal[2] !== undefined)) client.close(4404, 'No such terminal');
+    const windowId = terminal?.[2] ? url?.searchParams.get('windowId') : undefined;
+    if (terminal?.[2] && (!windowId || !/^[\w-]{1,64}$/.test(windowId))) {
+      client.close(4400, 'A terminal window needs an identity');
+      return;
+    }
+    if (!terminal || !attachTerminal(terminal[1], client, windowId ?? undefined)) client.close(4404, 'No such terminal');
   });
 });
 
