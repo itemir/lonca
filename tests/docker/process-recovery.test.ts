@@ -52,23 +52,23 @@ afterAll(async () => {
   fs.rmSync(fixture, { recursive: true, force: true });
 });
 
-async function script(kind: 'setup' | 'run'): Promise<{ terminal: TerminalInfo; pid: string }> {
-  const command = `trap '' TERM HUP; while true; do echo tick >> .context/${kind}-heartbeat; sleep 0.2; done`;
-  await lonca.api('PATCH', `/projects/${project.id}`, { settings: { [kind === 'setup' ? 'setupScript' : 'runScript']: command } });
-  const terminal = await lonca.api<TerminalInfo>('POST', `/workspaces/${workspace.id}/scripts/${kind}`);
+async function script(): Promise<{ terminal: TerminalInfo; pid: string }> {
+  const command = "trap '' TERM HUP; while true; do echo tick >> .context/setup-heartbeat; sleep 0.2; done";
+  await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: command } });
+  const terminal = await lonca.api<TerminalInfo>('POST', `/workspaces/${workspace.id}/scripts/setup`);
   await until('the script PID', () => dockerExec(workspace.containerName, `test -s /var/tmp/lonca/tty/${terminal.id}.pid`).code === 0);
   return { terminal, pid: dockerExec(workspace.containerName, `cat /var/tmp/lonca/tty/${terminal.id}.pid`).output };
 }
 
-it.each(['setup', 'run'] as const)('recovers %s controls after restart and stops the surviving process group', async (kind) => {
-  const { terminal, pid } = await script(kind);
+it('recovers setup controls after restart and stops the surviving process group', async () => {
+  const { terminal, pid } = await script();
   await lonca.kill();
   await lonca.start();
   await until('recovered script controls', async () => (await lonca.api<AppState>('GET', '/state')).terminals.some((entry) => entry.id === terminal.id && entry.status === 'running'));
   expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).toBe(0);
-  await lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/${kind}`);
+  await lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/setup`);
   expect(dockerExec(workspace.containerName, `kill -0 -- -${pid}`).code).not.toBe(0);
-  const file = path.join(workspace.path, `.context/${kind}-heartbeat`);
+  const file = path.join(workspace.path, '.context/setup-heartbeat');
   const size = fs.statSync(file).size;
   await sleep(400);
   expect(fs.statSync(file).size).toBe(size);
@@ -76,11 +76,11 @@ it.each(['setup', 'run'] as const)('recovers %s controls after restart and stops
 });
 
 it('serializes Stop with an in-flight script replacement', async () => {
-  const { pid } = await script('run');
+  const { pid } = await script();
   // Replacement waits for a TERM-ignoring predecessor, leaving a deterministic Stop window.
-  const restarting = lonca.api<TerminalInfo>('POST', `/workspaces/${workspace.id}/scripts/run`);
+  const restarting = lonca.api<TerminalInfo>('POST', `/workspaces/${workspace.id}/scripts/setup`);
   await sleep(100);
-  const stopping = lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/run`);
+  const stopping = lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/setup`);
   const [replacement] = await Promise.all([restarting, stopping]);
   expect(dockerExec(workspace.containerName, `kill -0 -- -${pid}`).code).not.toBe(0);
   expect((await lonca.api<AppState>('GET', '/state')).terminals.find((entry) => entry.id === replacement.id)?.status).toBe('exited');
@@ -163,11 +163,11 @@ it.each([
   }
 });
 
-it.each(['setup', 'run'] as const)('stops %s jobs in separate groups after their script leader exits', async (kind) => {
-  const name = `${kind}-job`;
+it('stops setup jobs in separate groups after their script leader exits', async () => {
+  const name = 'setup-job';
   const command = `set -m; ${heartbeatJob(name, true)} & wait`;
-  await lonca.api('PATCH', `/projects/${project.id}`, { settings: { [kind === 'setup' ? 'setupScript' : 'runScript']: command } });
-  const terminal = await lonca.api<TerminalInfo>('POST', `/workspaces/${workspace.id}/scripts/${kind}`);
+  await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: command } });
+  const terminal = await lonca.api<TerminalInfo>('POST', `/workspaces/${workspace.id}/scripts/setup`);
   const file = path.join(workspace.path, `.context/${name}`);
   await until('the job heartbeat', () => fs.existsSync(file));
   const pid = fs.readFileSync(`${file}.pid`, 'utf8');
@@ -176,7 +176,7 @@ it.each(['setup', 'run'] as const)('stops %s jobs in separate groups after their
   await lonca.kill();
   await lonca.start();
   await until('recovered script job controls', async () => (await lonca.api<AppState>('GET', '/state')).terminals.some((entry) => entry.id === terminal.id && entry.status === 'running'));
-  await lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/${kind}`);
+  await lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/setup`);
   await until('the script job to be reaped', () => dockerExec(workspace.containerName, `kill -0 ${pid}`).code !== 0, 5000);
   const size = fs.statSync(file).size;
   await sleep(300);
@@ -206,23 +206,23 @@ it('recovers a terminal even when another one’s record is damaged', async () =
 });
 
 it.skipIf(IN_SANDBOX)('does not report a successful script Stop while Docker is unreachable', async () => {
-  const { pid } = await script('run');
+  const { pid } = await script();
   await lonca.kill();
   offline = true;
   for (const socket of sockets) socket.destroy();
   await lonca.start();
   try {
-    await expect(lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/run`)).rejects.toThrow();
+    await expect(lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/setup`)).rejects.toThrow();
     expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).toBe(0);
   } finally {
     offline = false;
-    await lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/run`);
+    await lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/setup`);
   }
   expect(dockerExec(workspace.containerName, `kill -0 -- -${pid}`).code).not.toBe(0);
 });
 
 it.skipIf(IN_SANDBOX)('retains connected script controls when its disconnect probe cannot reach Docker', async () => {
-  const { terminal, pid } = await script('run');
+  const { terminal, pid } = await script();
   offline = true;
   for (const socket of sockets) socket.destroy();
   try {
@@ -232,7 +232,7 @@ it.skipIf(IN_SANDBOX)('retains connected script controls when its disconnect pro
   } finally {
     offline = false;
   }
-  await lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/run`);
+  await lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/setup`);
   expect(dockerExec(workspace.containerName, `kill -0 -- -${pid}`).code).not.toBe(0);
 });
 
@@ -372,7 +372,7 @@ it.skipIf(IN_SANDBOX)('keeps an accepted agent Stop and its held queue across a 
 });
 
 it.skipIf(IN_SANDBOX)('retries an interrupted workspace Stop without running scripts again', async () => {
-  const { pid } = await script('run');
+  const { pid } = await script();
   const stopping = lonca.api('POST', `/workspaces/${workspace.id}/stop`).catch(() => {});
   await until('Stop intent to be saved', async () => (await lonca.workspace(workspace.id)).status === 'stopping');
   await lonca.kill();

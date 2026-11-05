@@ -33,7 +33,7 @@ afterAll(async () => {
 describe('repository setup scripts', () => {
   it('exposes and reruns the repository script, including after a server restart', async () => {
     expect(project.settings.setupScript).toBe('');
-    expect(await lonca.api('GET', `/workspaces/${workspace.id}/scripts`)).toEqual({ setup: true, run: false });
+    expect(await lonca.api('GET', `/workspaces/${workspace.id}/scripts`)).toEqual({ setup: true });
     expect(dockerExec(workspace.containerName, 'cat .context/setup-runs').output).toBe('repo');
     await lonca.kill();
     await lonca.start();
@@ -69,7 +69,7 @@ describe('repository setup scripts', () => {
     await until('override to finish', async () => (await setupStep())?.status === 'done');
     await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: '' } });
     fs.writeFileSync(path.join(workspace.path, 'lonca.json'), '{');
-    expect(await lonca.api('GET', `/workspaces/${workspace.id}/scripts`)).toEqual({ setup: false, run: false });
+    expect(await lonca.api('GET', `/workspaces/${workspace.id}/scripts`)).toEqual({ setup: false });
     await expect(lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`)).rejects.toThrow(/400.*no setup script/);
   });
 });

@@ -77,12 +77,7 @@ export function ProjectSettings() {
           <label className="field">
             <span className="field-label">Setup script</span>
             <textarea className="input input-mono" rows={4} placeholder="npm install" value={form.setupScript} onChange={(event) => update({ setupScript: event.target.value })} />
-            <span className="field-help">Runs in the workspace when it’s created. Output is in the Setup tab.</span>
-          </label>
-          <label className="field">
-            <span className="field-label">Run script</span>
-            <textarea className="input input-mono" rows={3} placeholder="npm run dev -- --host 0.0.0.0 --port $LONCA_PORT" value={form.runScript} onChange={(event) => update({ runScript: event.target.value })} />
-            <span className="field-help">Started from the Run tab. Each workspace publishes ten ports on localhost, starting at $LONCA_PORT. Servers must listen on 0.0.0.0.</span>
+            <span className="field-help">Runs in the workspace when it’s created or restored. Output is in the Setup tab.</span>
           </label>
         </section>
 

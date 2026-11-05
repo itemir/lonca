@@ -34,7 +34,7 @@ Without it, workspaces run in hardened containers. Lonca picks it up by itself, 
 - **Projects and workspaces.** Add as many repositories as you like, and open as many workspaces in each as you need. Each one gets a city name, a branch such as `you/amman` from `origin/main`, and a virtual machine or container of its own.
 - **Claude and Codex.** Open several conversations in one workspace, each with its own agent, model and effort level. Conversations keep going if you close the browser or restart Lonca, and you can queue follow-ups while an agent works.
 - **Changes and checks.** Browse and search files, read a diff of everything on the branch, and follow a pull request's checks. Create PR asks the agent to commit, push and open one.
-- **Terminals.** Each workspace has real shells inside it, plus Setup and Run tabs for your project's scripts.
+- **Terminals.** Each workspace has real shells inside it, and a Setup tab if your project has a setup script. A shell can move to a separate browser window, which you can place, minimize or make full screen like any other. Closing that window brings the terminal back to the panel, still running. If your browser blocks the window, allow pop-ups for Lonca.
 
 ## Project settings
 
@@ -42,8 +42,7 @@ Open a project's settings from the **⋯** menu beside its name.
 
 | Setting | What it does |
 | --- | --- |
-| Setup script | Runs in the workspace when it's created, for example `npm install`. |
-| Run script | Starts from the Run tab, for example `npm run dev -- --host 0.0.0.0 --port $LONCA_PORT`. |
+| Setup script | Runs in the workspace when it's created or restored, for example `npm install`. |
 | Files to copy | Patterns for ignored files to copy from your local checkout, such as `.env*`. Off by default, because agents can read whatever is in their workspace. |
 | Network access | Internet only (the default), or internet plus this computer and your local network, including other workspaces' published ports. |
 | Memory and CPU limits | Limits for each workspace. |
@@ -68,7 +67,7 @@ Messages and queue changes are saved before they are accepted. A completed turn 
 
 Unread agent output survives workspace restarts. If the runtime stops, start the workspace to recover the remaining conversation before follow-ups run. Rebuilding or archiving first recovers any pending output. Explicit workspace deletion can discard that output once its processes are confirmed stopped, including when an occupied port prevents the old runtime from starting. Background reads, automatically opened terminals, terminal recovery and resize checks leave stopped runtimes stopped. The exception is a read that overlaps an `sbx stop` run outside Lonca: `sbx exec` starts a stopped virtual machine, so it can come back, and stopping it again fixes that. Use Start, send a message, or choose Send now to wake a workspace.
 
-Inside a workspace, `LONCA_PORT` is the first of ten ports published on your `localhost`. A server has to listen on `0.0.0.0` for you to reach it. `LONCA_WORKSPACE_NAME`, `LONCA_WORKSPACE_PATH`, `LONCA_DEFAULT_BRANCH` and `LONCA_PROJECT` are set too.
+Inside a workspace, `LONCA_PORT` is the first of ten ports published on your `localhost`. A server has to listen on `0.0.0.0` for you to reach it, for example `npm run dev -- --host 0.0.0.0 --port $LONCA_PORT` in a terminal. The first port is linked from the top of a conversation and from the menu beside the trash icon. `LONCA_WORKSPACE_NAME`, `LONCA_WORKSPACE_PATH`, `LONCA_DEFAULT_BRANCH` and `LONCA_PROJECT` are set too.
 
 ## Signing in
 
@@ -183,7 +182,7 @@ Recovery tests cover operations and their failure boundaries together:
 | Interrupted create, restore, start, stop, rebuild, archive, delete; failure to save intent; setup launch failure; duplicate deletion | `tests/unit/workspace-recovery.test.ts` |
 | Partial create/restore file copies; archive/delete/stop failures before cleanup; failures and server crashes during cleanup | `tests/docker/operation-recovery.test.ts` |
 | Rebuild retries and interrupted rebuilds; concurrent wake requests; queued work; agents reconnecting before Stop; session and project removal | `tests/docker/recovery.test.ts` |
-| Surviving setup/run scripts and shells, including job groups whose shell exited; concurrent script restart/Stop; a 70-second Docker outage; Stop surviving a server crash; failed state writes before direct/queued agent launches | `tests/docker/process-recovery.test.ts` |
+| Surviving setup scripts and shells, including job groups whose shell exited; concurrent script restart/Stop; a 70-second Docker outage; Stop surviving a server crash; failed state writes before direct/queued agent launches | `tests/docker/process-recovery.test.ts` |
 | Failed Stop persistence during agent recovery and uncertain startup; shutdown grace, held queues, and lifecycle retries after writes recover | `tests/docker/agent-persistence.test.ts` |
 | Completed and recovered transcripts across immediate crashes; failed transcript/state writes; durable message acceptance, queue changes, and lost-conversation retries; queued work and running agents through unreadable transcripts; shutdown with unwritable storage | `tests/docker/transcript-persistence.test.ts` |
 | Failed launch acknowledgments and output reads; missing or inconsistent completion receipts; partial records; queued work during replay; missing or damaged raw output; runtime restarts, and recovery before rebuild/archive | `tests/docker/agent-output.test.ts` |
@@ -192,7 +191,8 @@ Recovery tests cover operations and their failure boundaries together:
 | Pending terminal resizes while a sandbox is stopped, missing or unreachable; resizing after recovery; stale resizes after terminal exit | `tests/unit/sandbox-terminal.test.ts` |
 | Terminal recovery during runtime shutdown, preserved script exit codes, and scans limited to workspaces present at server startup | `tests/unit/terminal-recovery.test.ts` |
 | Partial transcript appends, interrupted queue promotion, retained writes and automatic retries, flushing multiple conversations, deletion with pending writes | `tests/unit/transcript-persistence.test.ts` |
-| Recovered script controls in the browser | `tests/e2e/setup.spec.ts` |
+| Recovered script controls, and when the Setup tab appears, in the browser | `tests/e2e/setup.spec.ts` |
+| Moving a terminal to its own window and back, through reloads, exits and a blocked pop-up, in the browser | `tests/e2e/terminal-window.spec.ts` |
 | A conversation that can't be read on opening or after a reconnect, and recovering from it, in the browser | `tests/e2e/hydration.spec.ts` |
 | Archiving out of a failed operation, restoring from it, and deleting after a failed archive or delete, in the browser | `tests/e2e/workspace-close.spec.ts` |
 

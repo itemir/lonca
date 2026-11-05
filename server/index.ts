@@ -14,7 +14,7 @@ import { flushState, flushTranscripts, saveState, state } from './store.ts';
 import {
   checkDocker, checkSandboxes, ensureImage, ensureSandboxImage, onSandboxesReady, refreshAgents, refreshCatalog, system,
 } from './system.ts';
-import { attachTerminal, closeWorkspaceTerminals, reconcileTerminals, runScript } from './terminals.ts';
+import { attachTerminal, closeWorkspaceTerminals, reconcileTerminals, runSetupScript } from './terminals.ts';
 import { reapLeftoverLogins } from './logins.ts';
 import { abortImports, reconcileProjects } from './projects.ts';
 import { errorMessage } from './util.ts';
@@ -37,7 +37,7 @@ function describeMe(): AppState['me'] {
 }
 
 setSetupScriptStarter(async (workspace, script) => {
-  await runScript(workspace, 'setup', script);
+  await runSetupScript(workspace, script);
 });
 
 onWorkspaceTeardown(closeWorkspaceTerminals);
@@ -74,8 +74,8 @@ server.on('upgrade', (req, socket, head) => {
       client.on('close', unsubscribe);
       return;
     }
-    const terminal = /^\/ws\/terminals\/([\w-]+)$/.exec(url?.pathname ?? '');
-    if (!terminal || !attachTerminal(terminal[1], client)) client.close(4404, 'No such terminal');
+    const terminal = /^\/ws\/terminals\/([\w-]+)(\/window)?$/.exec(url?.pathname ?? '');
+    if (!terminal || !attachTerminal(terminal[1], client, terminal[2] !== undefined)) client.close(4404, 'No such terminal');
   });
 });
 

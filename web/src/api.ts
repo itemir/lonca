@@ -72,9 +72,10 @@ export const api = {
   createTerminal: (workspaceId: string) => request<TerminalInfo>('POST', `/workspaces/${workspaceId}/terminals`),
   restartTerminal: (workspaceId: string, id: string) => request<void>('POST', `/workspaces/${workspaceId}/terminals/${id}/restart`),
   closeTerminal: (id: string) => request<void>('DELETE', `/terminals/${id}`),
-  scripts: (workspaceId: string) => request<{ setup: boolean; run: boolean }>('GET', `/workspaces/${workspaceId}/scripts`),
-  runScript: (workspaceId: string, kind: 'setup' | 'run') => request<TerminalInfo>('POST', `/workspaces/${workspaceId}/scripts/${kind}`),
-  stopScript: (workspaceId: string, kind: 'setup' | 'run') => request<void>('DELETE', `/workspaces/${workspaceId}/scripts/${kind}`),
+  closeTerminalWindow: (id: string) => request<void>('DELETE', `/terminals/${id}/window`),
+  scripts: (workspaceId: string) => request<{ setup: boolean }>('GET', `/workspaces/${workspaceId}/scripts`),
+  runSetupScript: (workspaceId: string) => request<TerminalInfo>('POST', `/workspaces/${workspaceId}/scripts/setup`),
+  stopSetupScript: (workspaceId: string) => request<void>('DELETE', `/workspaces/${workspaceId}/scripts/setup`),
 
   createSession: (workspaceId: string, options: { agent?: AgentId; model?: string; effort?: string } = {}) =>
     request<Session>('POST', `/workspaces/${workspaceId}/sessions`, options),

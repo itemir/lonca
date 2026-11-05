@@ -51,9 +51,9 @@ it('recovers preexisting terminals and retires them without exec when their runt
   state.workspaces.push(workspace);
   const terminals = await import('../../server/terminals.ts');
   const { TTY_DIR } = await import('../../server/config.ts');
-  execText.mockResolvedValue(`${TTY_DIR}/abcdefghijkl-run.pid\tleader\n`);
+  execText.mockResolvedValue(`${TTY_DIR}/abcdefghijkl-setup.pid\tleader\n`);
   await terminals.reconcileTerminals();
-  expect(terminals.listTerminals()).toEqual([expect.objectContaining({ id: 'abcdefghijkl-run', status: 'running', disconnected: true })]);
+  expect(terminals.listTerminals()).toEqual([expect.objectContaining({ id: 'abcdefghijkl-setup', status: 'running', disconnected: true })]);
   execText.mockClear();
   isContainerRunning.mockResolvedValue(false);
   await terminals.reconcileTerminals();
@@ -64,7 +64,7 @@ it('recovers preexisting terminals and retires them without exec when their runt
 it.each([false, true])('defers an interrupted terminal check and retains its result with runtime running=%s', async (running) => {
   const terminals = await import('../../server/terminals.ts');
   state.workspaces.push(workspace);
-  const terminal = await terminals.runScript(workspace, 'setup', 'sleep 600');
+  const terminal = await terminals.runSetupScript(workspace, 'sleep 600');
   execText.mockClear();
   // Shutdown closes the exec stream before the runtime stops reporting running.
   stream.end();

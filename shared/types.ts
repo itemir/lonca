@@ -14,7 +14,6 @@ export type Catalog = Record<AgentId, { label: string; models: ModelOption[] }>;
 export interface ProjectSettings {
   defaultBranch: string;
   setupScript: string;
-  runScript: string;
   /** Globs of untracked files copied from a local repository into new workspaces. */
   filesToCopy: string[];
   /** Custom image built `FROM` the Lonca workspace image. Blank uses the default. */
@@ -207,7 +206,7 @@ export interface Session {
 export interface TerminalInfo {
   id: string;
   workspaceId: string;
-  kind: 'shell' | 'setup' | 'run';
+  kind: 'shell' | 'setup';
   title: string;
   status: 'running' | 'exited';
   exitCode: number | null;
@@ -215,6 +214,8 @@ export interface TerminalInfo {
   disconnected?: boolean;
   /** Its own process has ended, but something it started is still running. */
   jobsOnly?: boolean;
+  /** It has been moved to a window of its own, so the panel doesn't show it. */
+  windowed?: boolean;
 }
 
 export interface AgentStatus {

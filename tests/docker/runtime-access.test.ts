@@ -17,7 +17,7 @@ beforeAll(async () => {
   await until('initial server checks', async () => (await lonca.api<AppState>('GET', '/state')).system.agentsChecked);
   const project = await lonca.waitForProject((await lonca.api('POST', '/projects', { path: fixture })).id);
   await lonca.api('PATCH', `/projects/${project.id}`, {
-    settings: { network: 'host', runScript: 'true', env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}` } },
+    settings: { network: 'host', env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}` } },
   });
   await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-runtime-access-not-a-real-key' });
   workspace = await lonca.waitForWorkspace((await lonca.api('POST', `/projects/${project.id}/workspaces`, {})).workspace.id);
@@ -42,7 +42,7 @@ const passive = [
   ['GET', '/files?path=.'], ['GET', '/file?path=src%2Findex.js'],
   ['GET', '/search?q=hello&mode=content'], ['GET', '/changes'],
   ['GET', '/diff?path=src%2Findex.js&untracked=0'], ['GET', '/scripts'],
-  ['POST', '/terminals'], ['POST', '/scripts/run'], ['POST', '/attachments?name=test.txt'],
+  ['POST', '/terminals'], ['POST', '/scripts/setup'], ['POST', '/attachments?name=test.txt'],
 ] as const;
 
 it.each(passive)('does not wake an externally stopped runtime for %s %s', async (method, route) => {
@@ -51,6 +51,18 @@ it.each(passive)('does not wake an externally stopped runtime for %s %s', async 
   await expect(lonca.api(method, `/workspaces/${workspace.id}${route}`)).rejects.toThrow(/409.*stopped/);
   expect(runtimeRunning(workspace.containerName)).toBe(false);
   expect(await lonca.workspace(workspace.id)).toMatchObject({ status: 'stopped' });
+});
+
+it('does not wake an externally stopped runtime to run a configured setup script', async () => {
+  await lonca.api('PATCH', `/projects/${workspace.projectId}`, { settings: { setupScript: 'true' } });
+  try {
+    stopRuntime();
+    await expect(lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`)).rejects.toThrow(/409.*stopped/);
+    expect(runtimeRunning(workspace.containerName)).toBe(false);
+    expect(await lonca.workspace(workspace.id)).toMatchObject({ status: 'stopped' });
+  } finally {
+    await lonca.api('PATCH', `/projects/${workspace.projectId}`, { settings: { setupScript: '' } });
+  }
 });
 
 it('does not recreate a removed runtime for a read, but explicit Start recreates it', async () => {

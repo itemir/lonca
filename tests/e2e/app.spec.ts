@@ -733,10 +733,9 @@ test.describe('with agents connected', () => {
     await page.getByRole('button', { name: 'Close made-by-claude.txt' }).click();
   });
 
-  test('project settings drive setup and run scripts', async () => {
+  test('project settings drive setup scripts, and a server in a terminal opens on the published port', async () => {
     await page.goto(`${lonca.url}/projects/${agentProject.id}`);
     await page.getByLabel('Setup script').fill('echo preparing && echo ready > setup-done.txt');
-    await page.getByLabel('Run script').fill('python3 -m http.server $LONCA_PORT --bind 0.0.0.0');
     await page.getByRole('button', { name: 'Save changes' }).click();
     await expect(page.locator('.toast')).toContainText('Saved');
     await shot('project-settings');
@@ -750,16 +749,20 @@ test.describe('with agents connected', () => {
     await page.getByRole('tab', { name: 'Setup' }).click();
     await expect(terminalText()).toContainText('preparing');
 
-    await page.getByRole('tab', { name: 'Run' }).click();
-    await expect(page.locator('.port-link')).toContainText(`localhost:${fresh.port}`);
+    await expect(page.getByRole('link', { name: `localhost:${fresh.port}` })).toHaveAttribute('href', `http://localhost:${fresh.port}`);
+    await page.getByRole('button', { name: 'Open this workspace elsewhere' }).click();
+    await expect(page.getByRole('menuitem', { name: `Open localhost:${fresh.port}` })).toBeEnabled();
+    await page.getByRole('button', { name: 'Open this workspace elsewhere' }).click();
     await expect(page.getByRole('button', { name: 'Hide terminals' })).toBeInViewport();
-    await page.getByRole('button', { name: 'Start the run script' }).click();
+
+    await page.getByRole('tab', { name: 'Terminal', exact: true }).click();
+    await expect(terminalText()).toContainText(`lonca@${fresh.name}`, { timeout: 20000 });
+    await page.locator('.terminal-view:visible .xterm-screen').click();
+    await page.keyboard.type('python3 -m http.server $LONCA_PORT --bind 0.0.0.0\n');
     await expect(terminalText()).toContainText(/Serving HTTP/, { timeout: 15000 });
     const response = await until('the published port', () => fetch(`http://127.0.0.1:${fresh.port}/setup-done.txt`), 15000);
     expect(await response.text()).toContain('ready');
-    await shot('run-script');
-    await page.getByRole('button', { name: 'Stop the run script' }).click();
-    await expect(page.getByRole('button', { name: 'Start the run script' })).toBeVisible({ timeout: 15000 });
+    await shot('server-in-terminal');
 
     await page.getByRole('button', { name: 'Archive this workspace' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Archive', exact: true }).click();

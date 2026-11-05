@@ -156,7 +156,7 @@ it.each(['create', 'restore'] as const)('resumes partial file copying during %s 
 
 it.each(['archive', 'delete', 'stop'] as const)('can finish %s even when a lost terminal has a damaged PID record', async (operation) => {
   const workspace = await create();
-  expect(dockerExec(workspace.containerName, `echo damaged > /var/tmp/lonca/tty/${workspace.id}-run.pid`).code).toBe(0);
+  expect(dockerExec(workspace.containerName, `echo damaged > /var/tmp/lonca/tty/${workspace.id}-setup.pid`).code).toBe(0);
   if (operation === 'delete') await lonca.api('DELETE', `/workspaces/${workspace.id}`);
   else await lonca.api('POST', `/workspaces/${workspace.id}/${operation}`);
   if (operation === 'delete') expect(await lonca.workspace(workspace.id)).toBeUndefined();

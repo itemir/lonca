@@ -467,9 +467,9 @@ describe('terminals', () => {
     const info = await lonca.api('POST', `/workspaces/${a.workspace.id}/terminals`);
     const first = await lonca.openTerminal(info.id);
     await until('a prompt', () => first.output().includes(IN_SANDBOX ? '$ ' : '%'), 10000);
-    first.send('echo "whoami=$(whoami) host=$(hostname) cwd=$PWD"\n');
+    first.send('echo "whoami=$(whoami) host=$(hostname) cwd=$PWD port=$LONCA_PORT"\n');
     await until('command output', () => first.output().includes(IN_SANDBOX ? 'whoami=agent host=' : `whoami=lonca host=${a.workspace.name}`), 10000);
-    expect(first.output()).toContain(`cwd=${a.workspace.path}`);
+    expect(first.output()).toContain(`cwd=${a.workspace.path} port=${a.workspace.port}`);
     first.socket.send(JSON.stringify({ type: 'resize', cols: 123, rows: 45 }));
     await sleep(200);
     first.send('stty size\n');
@@ -504,10 +504,8 @@ describe('terminals', () => {
     expect(await attempt(`?token=${lonca.token}`, 'http://localhost:20000')).toBe('refused');
   });
 
-  it('runs setup and run scripts from project settings', async () => {
-    await lonca.api('PATCH', `/projects/${project.id}`, {
-      settings: { setupScript: 'echo setup-ran > setup.txt; echo finished-setup', runScript: 'echo run-started; sleep 1000' },
-    });
+  it('runs setup scripts from project settings', async () => {
+    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: 'echo setup-ran > setup.txt; echo finished-setup' } });
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
     await until('the setup script', async () => {
@@ -516,18 +514,19 @@ describe('terminals', () => {
     }, 30000);
     expect(fs.readFileSync(path.join(workspace.path, 'setup.txt'), 'utf8')).toContain('setup-ran');
 
-    const run = await lonca.api('POST', `/workspaces/${workspace.id}/scripts/run`);
-    const terminal = await lonca.openTerminal(run.id);
-    await until('run output', () => terminal.output().includes('run-started'), 10000);
-    await lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/run`);
-    await until('the run script to stop', async () => {
+    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: 'echo rerun-started; sleep 1000' } });
+    const rerun = await lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`);
+    const terminal = await lonca.openTerminal(rerun.id);
+    await until('rerun output', () => terminal.output().includes('rerun-started'), 10000);
+    await lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/setup`);
+    await until('the rerun to stop', async () => {
       const state = await lonca.api('GET', '/state');
-      return state.terminals.find((entry: { id: string }) => entry.id === run.id)?.status === 'exited';
+      return state.terminals.find((entry: { id: string }) => entry.id === rerun.id)?.status === 'exited';
     }, 15000);
     expect(dockerExec(workspace.containerName, 'pgrep -f "sleep 1000"').code).not.toBe(0);
     terminal.socket.close();
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
-    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: '', runScript: '' } });
+    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: '' } });
   });
 });
 
@@ -586,27 +585,27 @@ describe('terminals and scripts, without a restart', () => {
 
 describe('scripts across restarts', () => {
   it('won’t run two copies, whether from a double click or a restart', async () => {
-    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { runScript: 'echo started; exec sleep 4321' } });
+    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: 'echo started; exec sleep 4321' } });
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
     // Anchored, so it doesn't count the shell this very command runs in.
     const copies = () => dockerExec(workspace.containerName, `pgrep -fc '^sleep 4321'`).output;
 
     await Promise.all([
-      lonca.api('POST', `/workspaces/${workspace.id}/scripts/run`),
-      lonca.api('POST', `/workspaces/${workspace.id}/scripts/run`),
+      lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`),
+      lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`),
     ]);
     await until('one copy', () => copies() === '1', 15000);
 
     await lonca.kill();
     await lonca.start();
     expect(copies()).toBe('1');
-    await lonca.api('POST', `/workspaces/${workspace.id}/scripts/run`);
+    await lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`);
     await sleep(1500);
     await until('one copy after the restart', () => copies() === '1', 15000);
 
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
-    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { runScript: '' } });
+    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: '' } });
   });
 
   it('recovers the status and Stop control of setup after a restart', async () => {
@@ -625,24 +624,24 @@ describe('scripts across restarts', () => {
   });
 
   it('kills a surviving script that ignores TERM before replacing its PID file', async () => {
-    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { runScript: "trap '' TERM; exec sleep 43219" } });
+    await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: "trap '' TERM; exec sleep 43219" } });
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
     const pids = () => dockerExec(workspace.containerName, "pgrep -f '^sleep 43219$'").output.split('\n').filter(Boolean);
     try {
-      await lonca.api('POST', `/workspaces/${workspace.id}/scripts/run`);
+      await lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`);
       await until('the original script', () => pids().length === 1, 15000);
       const originalPid = pids()[0];
       await lonca.kill();
       await lonca.start();
       expect(pids()).toEqual([originalPid]);
-      await lonca.api('POST', `/workspaces/${workspace.id}/scripts/run`);
+      await lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`);
       await until('the replacement script', () => pids().length === 1 && pids()[0] !== originalPid, 15000);
-      await lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/run`);
+      await lonca.api('DELETE', `/workspaces/${workspace.id}/scripts/setup`);
       await until('the replacement to stop', () => pids().length === 0, 15000);
     } finally {
       await lonca.api('DELETE', `/workspaces/${workspace.id}`);
-      await lonca.api('PATCH', `/projects/${project.id}`, { settings: { runScript: '' } });
+      await lonca.api('PATCH', `/projects/${project.id}`, { settings: { setupScript: '' } });
     }
   });
 });

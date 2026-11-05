@@ -1496,6 +1496,15 @@ a.crumb:hover { color: var(--text); }
   gap: 1px;
   padding: 0 8px 0 6px;
   border-bottom: 1px solid var(--line-strong);
+}
+
+.bottom-tab-list {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 1px;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -1523,25 +1532,6 @@ a.crumb:hover { color: var(--text); }
   border-radius: 50%;
   background: var(--added);
 }
-
-.script-strip {
-  flex: none;
-  padding: 4px 12px;
-  border-bottom: 1px solid var(--line);
-}
-
-.port-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-2);
-  font-family: var(--mono);
-  font-size: 11.5px;
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.port-link:hover { color: var(--text); }
 
 .terminal-stack {
   flex: 1;
@@ -1573,6 +1563,19 @@ a.crumb:hover { color: var(--text); }
   border-top: 1px solid var(--line);
   color: var(--text-3);
   font-size: 12.5px;
+}
+
+/* The window has the terminal, so what's left here gives its room back to the files. */
+.terminal-away { align-items: baseline; justify-content: space-between; border-top: 0; }
+.terminal-away .link-button { flex: none; }
+.right-bottom:has(.terminal-away) { height: auto !important; }
+.right-bottom:has(.terminal-away) .resize-handle { display: none; }
+
+.terminal-window {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
 }
 
 .bottom-reopen {
@@ -2044,10 +2047,14 @@ a.home-row:hover { background: var(--panel); }
 
   .workspace-header .icon-button { position: relative; }
   .workspace-header .icon-button::after { content: ''; position: absolute; inset: -9px -4px; }
+
+  .bottom-tabs { height: 44px; }
+  .bottom-tabs .icon-button, .terminal-tab .tab-close { width: 44px; height: 44px; }
 }
 
-/* An editor can't open from a phone, and the header needs the room for the trash icon. */
+/* An editor can't open from a phone, and the header needs the room for the trash icon. Nor is
+   there anywhere for a separate window to go. */
 
 @media (max-width: 720px) and (pointer: coarse) {
-  .open-in { display: none; }
+  .open-in, .terminal-window-button { display: none; }
 }
