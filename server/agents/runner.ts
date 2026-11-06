@@ -2,7 +2,6 @@ import crypto from 'node:crypto';
 import type { AgentId, AgentWork, Attachment, ChatItem, LeadChoice, Project, Session, ToolItem, TurnOutcome, UserItem, Workspace } from '../../shared/types.ts';
 import { MAX_AUTONOMOUS_TURNS } from '../../shared/lead.ts';
 import { RUNS_DIR } from '../config.ts';
-import { codexSetup } from '../boundary.ts';
 import { execEnv } from '../env.ts';
 import { exec, execStream, execText, isSandboxRunning, sandboxState, type OutputStream } from '../sandbox.ts';
 import { publish } from '../events.ts';
@@ -11,7 +10,7 @@ import { deleteTranscript, flushState, flushTranscript, getProject, getSession, 
 import { markAgentRejected, system } from '../system.ts';
 import { dropTranscript, transcriptFor } from '../transcript.ts';
 import { HttpError, KeyedQueue, errorMessage, newId, sleep } from '../util.ts';
-import { onWorkspaceReady, onWorkspaceTeardown, publishWorkspace, runningSandbox, startWorkspace } from '../workspaces.ts';
+import { onWorkspaceReady, onWorkspaceTeardown, publishWorkspace, runningSandbox, setUpCodex, startWorkspace } from '../workspaces.ts';
 import { claudeAdapter } from './claude.ts';
 import { codexAdapter } from './codex.ts';
 import { playbookFor } from './playbook.ts';
@@ -647,10 +646,7 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
     const sandbox = await runningSandbox(workspace);
     run.sandbox = sandbox;
     const attachments = item.attachments ?? [];
-    if (session.agent === 'codex') {
-      const setup = codexSetup(project);
-      await execText(sandbox, setup.command, { stdin: setup.stdin });
-    }
+    if (session.agent === 'codex') await setUpCodex(workspace, project);
     await execText(sandbox, ['mkdir', '-p', run.dir, ...(session.work ? [scratchDir(session.id)] : [])]);
     await execText(sandbox, ['bash', '-c', 'cat > "$0"', `${run.dir}/prompt`], {
       stdin: userPrompt([playbookUpdate(session, project), item.context, item.text].filter(Boolean).join('\n\n'), attachments),

@@ -348,8 +348,8 @@ export interface SandboxSpec {
   agentState: string;
   /** Applied before anything runs in the VM, including one that was made before these changed. */
   secrets: ProxySecret[];
-  /** Finishes preparing the VM once it's booted. */
-  setup?: SandboxSetup;
+  /** Finishes preparing the VM once it's booted, which can be a long time after this is asked for. */
+  setup?: () => SandboxSetup;
   firstPort?: number;
   network: 'internet' | 'host';
   memoryGb?: number;
@@ -431,8 +431,9 @@ export function ensureSandbox(spec: SandboxSpec, { start = true }: { start?: boo
     }
     forgetListing();
     for (const secret of spec.secrets) await sbx(secretArgs(spec.name, secret));
-    const boot: SandboxSetup = { command: ['bash', '-c', SANDBOX_BOOT, 'lonca-boot', spec.agentState] };
-    for (const { command, stdin } of [boot, ...(spec.setup ? [spec.setup] : [])]) {
+    const boot = (): SandboxSetup => ({ command: ['bash', '-c', SANDBOX_BOOT, 'lonca-boot', spec.agentState] });
+    for (const step of [boot, ...(spec.setup ? [spec.setup] : [])]) {
+      const { command, stdin } = step();
       const result = await exec(spec.name, command, { stdin, timeoutMs: 30000 });
       if (result.code !== 0) throw new SandboxError(`The sandbox didn’t finish starting: ${result.stderr.toString('utf8').trim()}`);
     }

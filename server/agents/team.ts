@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { AgentId, AgentJob, ChatItem, LeadChoice, Session, TextItem, ToolItem, UserItem, Workspace } from '../../shared/types.ts';
+import type { AgentId, AgentJob, ChatItem, LeadChoice, NoticeItem, Session, TextItem, ToolItem, UserItem, Workspace } from '../../shared/types.ts';
 import { canRun, isWorking, leadBlocker } from '../../shared/lead.ts';
 import { notifyUser } from '../notify.ts';
 import { getProject, getSession, getWorkspace, state } from '../store.ts';
@@ -172,7 +172,9 @@ function latestRun(items: ChatItem[]): ChatItem[] {
 function readAgent(lead: Session, call: ToolCall): string {
   const agent = agentArg(lead, call.args);
   const items = latestRun(transcriptFor(agent.id).items);
-  const heading = `${nameOf(agent)}: ${stateOf(agent)}.${agent.work?.filesChanged ? ' The workspace\'s files changed during its latest turn, which it was told not to do.' : ''}`;
+  // Whatever stopped an agent can have stopped it before it said anything itself.
+  const problems = items.filter((item): item is NoticeItem => item.type === 'notice' && item.level !== 'info').map((item) => item.text).join('\n').slice(-READ_LIMIT);
+  const heading = `${nameOf(agent)}: ${stateOf(agent)}.${problems ? `\n\nWhat went wrong in its latest turn:\n${problems}` : ''}`;
   if (agent.unread) {
     agent.unread = false;
     publishSession(agent);
@@ -184,7 +186,7 @@ function readAgent(lead: Session, call: ToolCall): string {
   }
   const report = items.filter((item): item is TextItem => item.type === 'text' && !item.parentId).map((item) => item.text).join('\n\n');
   if (report.length > READ_LIMIT) return `${heading}\n\n${report.slice(-READ_LIMIT)}\n\n(Only the end of a longer report is shown.)`;
-  return `${heading}\n\n${report || 'It hasn\'t written anything yet.'}`;
+  return `${heading}\n\n${report || (agent.status === 'running' ? 'It hasn\'t written anything yet.' : 'It didn\'t write anything.')}`;
 }
 
 function teamStatus(lead: Session, workspace: Workspace): string {

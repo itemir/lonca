@@ -101,7 +101,7 @@ function ensureWorkspaceSandbox(workspace: Workspace, project: Project, options:
     mounts: [workspace.path, paths.repo(project.slug)],
     agentState: paths.agentState(workspace.id),
     secrets: proxySecrets(),
-    setup: codexSetup(project),
+    setup: () => codexSetup(project),
     firstPort: workspace.port,
     network: settings.network,
     memoryGb: settings.memoryGb,
@@ -116,20 +116,29 @@ function projectOf(workspace: Workspace): Project {
   return project;
 }
 
-/** Observes a workspace's sandbox without waking it for reads or automatic terminals. */
+const codexSetups = new KeyedQueue();
+
+/** One at a time in each VM, with the settings as they are by then, so that the last to run has the latest. */
+export function setUpCodex(workspace: Workspace, project: Project): Promise<void> {
+  return codexSetups.run(workspace.id, async () => {
+    const { command, stdin } = codexSetup(project);
+    await execText(workspace.sandboxName, command, { stdin });
+  });
+}
+
 /** A project's own key is in each VM's Codex login, so a change to it has to reach those running. */
 export async function applyCodexSetup(project: Project): Promise<void> {
-  const { command, stdin } = codexSetup(project);
   const ready = state.workspaces.filter((workspace) => workspace.projectId === project.id && workspace.status === 'ready');
   await Promise.all(ready.map(async (workspace) => {
     try {
-      if (await isSandboxRunning(workspace.sandboxName)) await execText(workspace.sandboxName, command, { stdin });
+      if (await isSandboxRunning(workspace.sandboxName)) await setUpCodex(workspace, project);
     } catch (error) {
       console.error(`could not update Codex’s key in ${workspace.name}:`, errorMessage(error));
     }
   }));
 }
 
+/** Observes a workspace's sandbox without waking it for reads or automatic terminals. */
 export async function runningSandbox(workspace: Workspace): Promise<string> {
   if (workspace.status !== 'ready') {
     throw new HttpError(409, `${workspace.name} is ${workspace.status}`);

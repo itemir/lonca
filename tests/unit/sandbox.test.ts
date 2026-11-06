@@ -8,7 +8,7 @@ const spec: SandboxSpec = {
   mounts: ['/home/me/.lonca/projects/app/workspaces/amman', '/home/me/.lonca/projects/app/repo.git'],
   agentState: '/home/me/.lonca/agent-state/w1',
   secrets: [],
-  setup: { command: ['true'] },
+  setup: () => ({ command: ['true'] }),
   network: 'internet',
 };
 

@@ -379,6 +379,37 @@ describe('a Lead and its agents', () => {
   });
 });
 
+describe('an agent that fails', () => {
+  it('tells the Lead why, in either view of it', async () => {
+    const { workspace, lead } = await newWorkspace();
+    mock.refuseCodex = true;
+    try {
+      await send(lead.id, spawn('Failing', 'look at something', { model: CODEX_MODEL }));
+      await until('it to fail', async () => (await agents(workspace))[0]?.lastOutcome === 'failed', 100000);
+      await settled(lead);
+    } finally {
+      mock.refuseCodex = false;
+    }
+    const [agent] = await agents(workspace);
+    for (const [args, expected] of [
+      [{ id: agent.id }, 'It didn\'t write anything.'],
+      [{ id: agent.id, view: 'activity' }, 'It hasn\'t used any tools'],
+    ] as const) {
+      const reads = async () => teamTools(await lonca.items(lead.id)).filter((item) => item.title.startsWith('Read'));
+      const before = (await reads()).length;
+      await send(lead.id, tool('read_agent', args));
+      const read = await until('the read', async () => {
+        const all = await reads();
+        return all.length > before && all.at(-1)!.status !== 'running' ? all.at(-1) : null;
+      });
+      expect(read.output).toContain('failed');
+      expect(read.output).toContain('unexpected status 401');
+      expect(read.output).toContain(expected);
+      await settled(lead);
+    }
+  });
+});
+
 describe('one writer at a time, from the buttons', () => {
   it('refuses Try now and Send now while another writes, and warns about a message typed to one', async () => {
     const { workspace, lead } = await newWorkspace();

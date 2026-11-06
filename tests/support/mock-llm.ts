@@ -238,8 +238,11 @@ export function startMockLlm(port = 0): Promise<MockLlm> {
       }
     });
   });
-  return new Promise((resolve) => {
-    server.listen(port, '0.0.0.0', () => {
+  return new Promise((resolve, reject) => {
+    // Not one the system picks: those overlap the ports tests give to workspaces, and a workspace
+    // publishing this one would take its traffic, leaving every CLI with an empty reply.
+    const listen = () => server.listen(port || 41000 + Math.floor(Math.random() * 5000), '0.0.0.0');
+    server.on('listening', () => {
       mock.port = (server.address() as AddressInfo).port;
       mock.close = () => new Promise((done) => {
         server.closeAllConnections();
@@ -247,6 +250,12 @@ export function startMockLlm(port = 0): Promise<MockLlm> {
       });
       resolve(mock);
     });
+    let attempts = 0;
+    server.on('error', (error: NodeJS.ErrnoException) => {
+      if (port || error.code !== 'EADDRINUSE' || ++attempts > 20) reject(error);
+      else listen();
+    });
+    listen();
   });
 }
 

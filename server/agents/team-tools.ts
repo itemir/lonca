@@ -33,7 +33,7 @@ export const TEAM_TOOLS = [
   },
   {
     name: 'read_agent',
-    description: 'Read what an agent reported at the end of its latest turn, or with view "activity", what it did during that turn.',
+    description: 'Read what an agent reported at the end of its latest turn, or with view "activity", what it did during that turn. Either says what went wrong, if anything did.',
     inputSchema: {
       type: 'object',
       properties: {
