@@ -10,7 +10,7 @@ const { state, execs } = vi.hoisted(() => ({
 vi.mock('../../server/store.ts', () => ({
   state,
   getProject: () => undefined,
-  getWorkspace: () => undefined,
+  getWorkspace: (id: string) => state.workspaces.find((workspace) => workspace.id === id),
   getSecrets: () => ({}),
   boundaryValue: () => undefined,
   flushState: vi.fn(),

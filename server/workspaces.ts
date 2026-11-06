@@ -15,6 +15,7 @@ import { HttpError, KeyedQueue, RuntimeStoppedError, errorMessage, newId, remove
 
 const lifecycle = new KeyedQueue();
 const repoLock = new KeyedQueue();
+const codexSetups = new KeyedQueue();
 // Names belong to a project, but port blocks are shared by every workspace.
 const allocation = new KeyedQueue();
 
@@ -94,7 +95,8 @@ function workspaceEnv(workspace: Workspace, project: Project): string[] {
 function ensureWorkspaceSandbox(workspace: Workspace, project: Project, options: { bare?: boolean; start?: boolean } = {}): Promise<string> {
   const bare = options.bare ? { firstPort: undefined, memoryGb: 0, cpus: 0 } : {};
   const settings = project.settings;
-  return ensureSandbox({
+  // Boot writes Codex's login too, so an update must wait until that write has finished.
+  return codexSetups.run(workspace.id, () => ensureSandbox({
     name: workspace.sandboxName,
     image: async () => (!options.bare && settings.image ? ensureCustomTemplate(settings.image) : ensureSandboxImage()),
     env: workspaceEnv(workspace, project),
@@ -107,7 +109,7 @@ function ensureWorkspaceSandbox(workspace: Workspace, project: Project, options:
     memoryGb: settings.memoryGb,
     cpus: settings.cpus,
     ...bare,
-  }, { start: options.start });
+  }, { start: options.start }));
 }
 
 function projectOf(workspace: Workspace): Project {
@@ -115,8 +117,6 @@ function projectOf(workspace: Workspace): Project {
   if (!project) throw new HttpError(404, 'This workspace’s project no longer exists');
   return project;
 }
-
-const codexSetups = new KeyedQueue();
 
 /** One at a time in each VM, with the settings as they are by then, so that the last to run has the latest. */
 export function setUpCodex(workspace: Workspace, project: Project): Promise<void> {
@@ -128,14 +128,17 @@ export function setUpCodex(workspace: Workspace, project: Project): Promise<void
 
 /** A project's own key is in each VM's Codex login, so a change to it has to reach those running. */
 export async function applyCodexSetup(project: Project): Promise<void> {
-  const ready = state.workspaces.filter((workspace) => workspace.projectId === project.id && workspace.status === 'ready');
-  await Promise.all(ready.map(async (workspace) => {
+  const workspaces = state.workspaces.filter((workspace) => workspace.projectId === project.id);
+  await Promise.all(workspaces.map((workspace) => lifecycle.run(workspace.id, async () => {
+    // Creation or rebuilding may already have written an older key. Wait for it to finish,
+    // and check then: a Stop or deletion that came first mustn't be undone by this update.
+    if (getWorkspace(workspace.id) !== workspace) return;
     try {
       if (await isSandboxRunning(workspace.sandboxName)) await setUpCodex(workspace, project);
     } catch (error) {
       console.error(`could not update Codex’s key in ${workspace.name}:`, errorMessage(error));
     }
-  }));
+  })));
 }
 
 /** Observes a workspace's sandbox without waking it for reads or automatic terminals. */

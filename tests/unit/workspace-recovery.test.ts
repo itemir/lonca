@@ -98,6 +98,7 @@ it.each(['in progress', 'completed'] as const)('does not overwrite a newer lifec
   let reject!: (error: Error) => void;
   ensureSandbox.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
   const lookup = runningSandbox(workspace);
+  await vi.waitFor(() => expect(reject).toBeTypeOf('function'));
   workspace.status = phase === 'in progress' ? 'rebuilding' : 'ready';
   workspace.pendingOperation = phase === 'in progress' ? 'rebuild' : undefined;
   workspace.updatedAt = 2;
