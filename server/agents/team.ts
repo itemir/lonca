@@ -30,8 +30,8 @@ function nameOf(session: Session): string {
 
 function stateOf(session: Session): string {
   if (session.status === 'running') return 'working';
-  if (session.held && session.lastOutcome !== 'limit') return 'stopped by the user';
-  if (session.queue.length > 0) return 'queued';
+  if (session.userStopped) return 'stopped by the user';
+  if (session.queue.length > 0 && !session.held) return 'queued';
   switch (session.lastOutcome) {
     case 'limit': return 'paused at a usage limit';
     case 'failed': return 'failed';
@@ -153,14 +153,17 @@ async function messageAgent(lead: Session, workspace: Workspace, call: ToolCall)
   const newJob = job && job !== agent.work?.job;
   // Its job is what the one-writer rule goes by, so that can't change in the middle of a turn.
   if (newJob && agent.status === 'running') throw new ToolError(`${nameOf(agent)} is still working. Give it a new job once it's finished.`);
-  // One the user stopped isn't about to start anything.
-  if (!agent.held) {
+  // Earlier messages still carry the old job's instructions, even while their queue is held.
+  if (newJob && agent.queue.length > 0) throw new ToolError(`${nameOf(agent)} has messages waiting. Let them finish before changing its job.`);
+  // Messages can resume a Lead stop; user stops and automatic pauses keep them waiting.
+  if (!agent.held || (!agent.userStopped && agent.lastOutcome === 'stopped')) {
     checkRoom(workspace, agent);
     checkOneWriter(lead, job ?? agent.work?.job, agent);
   }
   if (newJob && agent.work) persistSession(agent, { work: { ...agent.work, job } });
   await deliver(agent, call, newJob ? `${newJobNote(job)}\n\n${text}` : text);
-  if (agent.held) return `${nameOf(agent)} was stopped by the user, so your message waits until they release it. Tell them if you need it.`;
+  if (agent.userStopped) return `${nameOf(agent)} was stopped by the user, so your message waits until they release it. Tell them if you need it.`;
+  if (agent.held) return `${nameOf(agent)} is paused, so your message is queued. Use retry_agent when it can continue.`;
   return `Sent to ${nameOf(agent)}. End your turn: Lonca wakes you when it answers.`;
 }
 
@@ -220,7 +223,7 @@ async function retrySession(session: Session, from: UserItem['from'], id?: strin
 
 async function retryAgent(lead: Session, workspace: Workspace, call: ToolCall): Promise<string> {
   const agent = agentArg(lead, call.args);
-  if (agent.held && agent.lastOutcome !== 'limit') return `${nameOf(agent)} was stopped by the user. Ask them before it continues.`;
+  if (agent.userStopped) return `${nameOf(agent)} was stopped by the user. Ask them before it continues.`;
   if (transcriptFor(agent.id).find(call.id)) return `Asked ${nameOf(agent)} to try again.`;
   checkRoom(workspace, agent);
   checkOneWriter(lead, agent.work?.job, agent);
@@ -364,8 +367,9 @@ setTeamHooks({
 
 /** Stopped by the user means stopped until the user says otherwise, whatever a Lead or a wake wants. */
 export function holdWhenStopped(session: Session): void {
-  if (!session.role || session.held) return;
+  if (!session.role || session.userStopped) return;
   session.held = true;
+  session.userStopped = true;
   publishSession(session);
 }
 

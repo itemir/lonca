@@ -26,7 +26,7 @@ export const TEAM_TOOLS = [
       properties: {
         id: { type: 'string', description: 'The agent\'s id.' },
         text: { type: 'string', description: 'What to tell it.' },
-        job: { type: 'string', enum: ['analyze', 'implement', 'review'], description: 'Give it a different job from now on.' },
+        job: { type: 'string', enum: ['analyze', 'implement', 'review'], description: 'Give it a different job once its current turn and queued messages have finished.' },
       },
       required: ['id', 'text'],
     },

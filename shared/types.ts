@@ -250,8 +250,10 @@ export interface Session {
   stopRequested?: { holdQueue: boolean };
   /** Ids of user items waiting for the current turn to finish. */
   queue: string[];
-  /** The user pressed Stop with messages queued, so they wait for a decision. */
+  /** Queued messages wait for a decision, including after a stop, usage limit or failure. */
   held?: boolean;
+  /** A team session stopped by the user. Only another user action can release it. */
+  userStopped?: boolean;
   hasMessages: boolean;
   createdAt: number;
   updatedAt: number;

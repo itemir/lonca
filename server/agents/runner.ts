@@ -759,8 +759,19 @@ export interface MessageOptions {
   id?: string;
   from?: UserItem['from'];
   summary?: string;
-  /** Leave messages waiting if the user stopped this session. Only the user can release them. */
+  /** Respect user stops and automatic pauses when sending on behalf of the Lead. */
   keepHeld?: boolean;
+}
+
+/** Releasing a queue also applies to a Stop whose process is still being retired or recovered. */
+function releaseQueueHold(session: Session, patch: Partial<Session>): void {
+  persistSession(session, {
+    ...patch, held: false, userStopped: undefined,
+    ...(session.stopRequested ? { stopRequested: { holdQueue: false } } : {}),
+  });
+  const run = runs.get(session.id);
+  // Change the live run only after saving the release, so a failed write doesn't release work.
+  if (run?.stopped) run.holdQueue = false;
 }
 
 export async function sendMessage(sessionId: string, text: string, attachments: Attachment[], options: MessageOptions = {}): Promise<UserItem> {
@@ -798,13 +809,16 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
       workspace.leadLockedAt = Date.now();
     }
     // Accept the text and its queue reservation together before acknowledging it or starting a CLI.
-    persistSession(session, {
+    const patch: Partial<Session> = {
       hasMessages: true,
       title: !session.hasMessages && session.title === 'Untitled' ? titleFrom(text) : session.title,
-      queue: [...session.queue, item.id], held: options.keepHeld ? session.held : false,
+      queue: [...session.queue, item.id],
       ...(session.role === 'lead' && fromUser ? { autonomousTurns: 0, unread: false } : {}),
       ...(session.work && fromUser ? { work: { ...session.work, userNote: text.slice(0, 1000) } } : {}),
-    });
+    };
+    const keepHeld = options.keepHeld && session.held && (session.userStopped || session.lastOutcome !== 'stopped');
+    if (keepHeld) persistSession(session, { ...patch, held: true });
+    else releaseQueueHold(session, patch);
   } catch (error) {
     if (locksLead) delete workspace.leadLockedAt;
     transcript?.remove(item.id);
@@ -840,7 +854,7 @@ export async function flushQueue(sessionId: string): Promise<void> {
   const workspace = getWorkspace(session.workspaceId);
   if (!workspace) throw new HttpError(404, 'No such workspace');
   if (NOT_ACCEPTING.has(workspace.status)) throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
-  persistSession(session, { held: false, ...(session.role === 'lead' ? { autonomousTurns: 0 } : {}) });
+  releaseQueueHold(session, session.role === 'lead' ? { autonomousTurns: 0 } : {});
   if ((workspace.status === 'stopped' || workspace.status === 'ready') && session.queue.length > 0) await startWorkspace(workspace);
   startNextQueued(session);
 }
@@ -953,7 +967,7 @@ export async function closeLead(session: Session): Promise<void> {
       if (item?.type === 'user' && !item.from) transcript.upsert({ ...item, queued: false });
       else transcript.remove(id);
     }
-    persistSession(session, { closedAt: Date.now(), queue: [], held: false, unread: false });
+    persistSession(session, { closedAt: Date.now(), queue: [], held: false, userStopped: undefined, unread: false });
   } finally {
     deletingSessions.delete(session.id);
   }

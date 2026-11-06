@@ -379,6 +379,70 @@ describe('a Lead and its agents', () => {
   });
 });
 
+describe('queued jobs and Lead stops', () => {
+  it('keeps the old job until earlier queued messages have finished', async () => {
+    const { workspace, lead } = await newWorkspace();
+    await send(lead.id, spawn('Queued writer', 'SLOW start writing', { job: 'implement' }));
+    await until('the writer to run', async () => (await agents(workspace))[0]?.status === 'running');
+    await lonca.waitForIdle(lead.id);
+    const [writer] = await agents(workspace);
+    const queued = await send(writer.id, 'RUN: echo queued-write > queued-write.txt');
+    await lonca.api('POST', `/sessions/${writer.id}/interrupt`);
+    await until('the writer to stop', async () => (await lonca.session(writer.id)).status === 'idle');
+
+    await send(lead.id, tool('message_agent', { id: writer.id, job: 'review', text: 'Review only; do not change files.' }));
+    const refused = await waitForTool(lead, (item) => item.title === 'Messaged');
+    expect(refused.status).toBe('error');
+    expect(refused.output).toContain('messages waiting');
+    expect(await lonca.session(writer.id)).toMatchObject({ work: { job: 'implement' }, held: true, queue: [queued.id] });
+    await lonca.waitForIdle(lead.id);
+
+    await send(lead.id, spawn('Other writer', 'SLOW keep writing', { job: 'implement' }));
+    await until('the other writer to run', async () => (await agents(workspace))[1]?.status === 'running');
+    await expect(lonca.api('POST', `/sessions/${writer.id}/queue/flush`)).rejects.toThrow(/only one agent/);
+    expect(sandboxExec(workspace.sandboxName, `test ! -f '${workspace.path}/queued-write.txt'`).code).toBe(0);
+    await lonca.api('POST', `/workspaces/${workspace.id}/agents/stop`);
+    await settled(lead);
+  });
+
+  it.each(['message_agent', 'retry_agent'])('lets the Lead resume its own stopped agent with %s after a restart', async (method) => {
+    const { workspace, lead } = await newWorkspace();
+    await send(lead.id, spawn('Lead stopped writer', 'SLOW start writing', { job: 'implement' }));
+    await until('the writer to run', async () => (await agents(workspace))[0]?.status === 'running');
+    await lonca.waitForIdle(lead.id);
+    const [writer] = await agents(workspace);
+    const queued = await send(writer.id, 'RUN: echo resumed > resumed-by-lead.txt');
+    await send(lead.id, tool('stop_agent', { id: writer.id }));
+    await waitForTool(lead, (item) => item.title === 'Stopped');
+    await until('the writer to stop', async () => (await lonca.session(writer.id)).status === 'idle');
+    await lonca.waitForIdle(lead.id);
+    expect(await lonca.session(writer.id)).toMatchObject({ held: true, queue: [queued.id], lastOutcome: 'stopped' });
+    await lonca.kill();
+    await lonca.start();
+
+    // Releasing the Lead's hold still has to obey the one-writer rule.
+    await send(lead.id, spawn('Busy writer', 'SLOW keep writing', { job: 'implement' }));
+    await until('the other writer to run', async () => (await agents(workspace))[1]?.status === 'running');
+    await lonca.waitForIdle(lead.id);
+    const args = { id: writer.id, ...(method === 'message_agent' ? { text: 'Carry on with the queued work.' } : {}) };
+    await send(lead.id, tool(method, args));
+    const blocked = await waitForTool(lead, (item) => item.name.includes(method));
+    expect(blocked.status).toBe('error');
+    expect(blocked.output).toContain('only one agent');
+    expect(await lonca.session(writer.id)).toMatchObject({ held: true, queue: [queued.id] });
+    await lonca.waitForIdle(lead.id);
+    const other = (await agents(workspace))[1];
+    await lonca.api('POST', `/sessions/${other.id}/interrupt`);
+    await until('the other writer to stop', async () => (await lonca.session(other.id)).status === 'idle');
+
+    await send(lead.id, tool(method, args));
+    await waitForTool(lead, (item) => item.name.includes(method) && item.status === 'done');
+    await settled(lead);
+    expect(await lonca.session(writer.id)).toMatchObject({ held: false, queue: [], lastOutcome: 'completed' });
+    expect(sandboxExec(workspace.sandboxName, `cat '${workspace.path}/resumed-by-lead.txt'`).output).toBe('resumed');
+  });
+});
+
 describe('an agent that fails', () => {
   it('tells the Lead why, in either view of it', async () => {
     const { workspace, lead } = await newWorkspace();
