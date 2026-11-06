@@ -30,15 +30,16 @@ export function placeholderEnv(): string[] {
   return [`${token.startsWith('sk-ant-oat') ? 'CLAUDE_CODE_OAUTH_TOKEN' : 'ANTHROPIC_API_KEY'}=${CLAUDE_PLACEHOLDER}`];
 }
 
-const CODEX_CONFIG = 'cli_auth_credentials_store = "file"';
+const CODEX_STORE = 'cli_auth_credentials_store = "file"';
 // A ChatGPT sign-in is used at this address. Codex keeps its built-in provider rather than a custom
 // one because it refuses to resume a conversation under a provider that's no longer configured.
-const CODEX_CONFIG_CHATGPT = `${CODEX_CONFIG}\nopenai_base_url = "https://chatgpt.com/backend-api/codex"`;
+const CODEX_ADDRESS = 'openai_base_url = "https://chatgpt.com/backend-api/codex"';
 
 // Agents can start at the same moment, and a CLI reading these mustn't find them missing or half
 // written. So they're replaced whole, and only when they differ. That also drops a link to the old
-// shared login, or a login someone ran by hand. A config.toml that's neither of Lonca's two is
-// someone's own, so it stays.
+// shared login, or a login someone ran by hand. Only Lonca's lines of config.toml change, because
+// Codex adds its own there, such as which directories it trusts. One that says where to send
+// requests or how to keep the login some other way is someone's own, so it stays.
 const CODEX_SETUP = String.raw`
 set -eu
 mkdir -p "$HOME/.codex"
@@ -49,9 +50,16 @@ replace() {
   mv -f "$new" "$1"
 }
 replace "$HOME/.codex/auth.json" "$(cat)"
-case "$(cat "$HOME/.codex/config.toml" 2>/dev/null || true)" in
-  ''|"$1"|"$2") replace "$HOME/.codex/config.toml" "$3" ;;
+rest=$(cat "$HOME/.codex/config.toml" 2>/dev/null | grep -vxF -e "$1" -e "$2" || true)
+case "$rest" in
+  *model_provider*|*openai_base_url*|*cli_auth_credentials_store*) exit 0 ;;
 esac
+wanted="$1"
+[ -z "$3" ] || wanted="$wanted
+$3"
+[ -z "$rest" ] || wanted="$wanted
+$rest"
+replace "$HOME/.codex/config.toml" "$wanted"
 `;
 
 /** A project's own key, which isn't one for the proxy to swap. */
@@ -65,7 +73,7 @@ export function codexSetup(project: Project): SandboxSetup {
   const projectKey = projectCodexKey(project);
   const usesKey = projectKey || boundaryValue('codex')?.startsWith('sk-');
   return {
-    command: ['bash', '-c', CODEX_SETUP, 'lonca-codex-setup', CODEX_CONFIG, CODEX_CONFIG_CHATGPT, usesKey ? CODEX_CONFIG : CODEX_CONFIG_CHATGPT],
+    command: ['bash', '-c', CODEX_SETUP, 'lonca-codex-setup', CODEX_STORE, CODEX_ADDRESS, usesKey ? '' : CODEX_ADDRESS],
     // Codex ignores OPENAI_API_KEY in its environment, so a project's key goes in this file. It's
     // sent this way because anything on this computer can read the arguments of a command.
     stdin: JSON.stringify({ OPENAI_API_KEY: projectKey ?? CODEX_PLACEHOLDER }),

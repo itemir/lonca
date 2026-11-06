@@ -246,10 +246,31 @@ describe('setting Codex up in a VM', () => {
     fs.writeFileSync(path.join(home, '.codex', 'config.toml'), PLAIN);
     run(boundary.codexSetup(project()));
     expect(config()).toBe(CHATGPT);
-    const own = 'model_provider = "mine"\n';
-    fs.writeFileSync(path.join(home, '.codex', 'config.toml'), own);
+    for (const own of [
+      'model_provider = "mine"\n',
+      'cli_auth_credentials_store = "file"\nopenai_base_url = "http://localhost:1234/v1"\n',
+      'cli_auth_credentials_store = "keyring"\n',
+    ]) {
+      fs.writeFileSync(path.join(home, '.codex', 'config.toml'), own);
+      run(boundary.codexSetup(project()));
+      expect(config()).toBe(own);
+    }
+  });
+
+  it('keeps what Codex adds to the config, and still follows a change of address', () => {
+    const added = '\n[projects."/workspaces/prague"]\ntrust_level = "trusted"\n';
+    fs.mkdirSync(path.join(home, '.codex'));
+    fs.writeFileSync(path.join(home, '.codex', 'config.toml'), CHATGPT + added);
     run(boundary.codexSetup(project()));
-    expect(config()).toBe(own);
+    expect(config()).toBe(CHATGPT + added);
+    run(boundary.codexSetup(project({ OPENAI_API_KEY: 'sk-own' })));
+    expect(config()).toBe(PLAIN + added);
+    run(boundary.codexSetup(project()));
+    expect(config()).toBe(CHATGPT + added);
+    // An older VM's, from before there was an address to set.
+    fs.writeFileSync(path.join(home, '.codex', 'config.toml'), PLAIN + added);
+    run(boundary.codexSetup(project()));
+    expect(config()).toBe(CHATGPT + added);
   });
 
   it('leaves files alone when they’re already right, so a CLI starting now can’t find them missing', () => {
