@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { AgentId, AgentWork, Attachment, ChatItem, LeadChoice, Project, Session, ToolItem, TurnOutcome, UserItem, Workspace } from '../../shared/types.ts';
+import type { AgentId, AgentJob, AgentWork, Attachment, ChatItem, LeadChoice, Project, Session, ToolItem, TurnOutcome, UserItem, Workspace } from '../../shared/types.ts';
 import { MAX_AUTONOMOUS_TURNS } from '../../shared/lead.ts';
 import { RUNS_DIR } from '../config.ts';
 import { execEnv } from '../env.ts';
@@ -81,6 +81,8 @@ interface ActiveRun {
   reportedFailure: boolean;
   /** Someone asked for this to stop, as opposed to it being cut off. */
   stopped: boolean;
+  /** The exact playbook sent in this turn, acknowledged only when the turn completes. */
+  playbookVersion?: string;
 }
 
 const runs = new Map<string, ActiveRun>();
@@ -93,18 +95,28 @@ export function publishSession(session: Session): void {
   saveState();
 }
 
-/** Save chat records before any state that depends on them, without an intervening await. */
-export function persistSession(session: Session, patch: Partial<Session>): void {
+export interface ToolReceipt {
+  lead: Session;
+  id: string;
+  reply: { text: string; failed?: boolean };
+}
+
+/** Save chat records, the mutation and its optional tool receipt without an intervening await. */
+export function persistSession(session: Session, patch: Partial<Session>, receipt?: ToolReceipt): void {
   flushTranscript(session.id);
   const previous = Object.fromEntries(Object.keys(patch).map((key) => [key, session[key as keyof Session]]));
+  const replies = receipt?.lead.toolReplies;
   Object.assign(session, patch);
+  if (receipt) receipt.lead.toolReplies = { ...replies, [receipt.id]: receipt.reply };
   try {
     flushState({ required: true });
   } catch (error) {
     Object.assign(session, previous);
+    if (receipt) receipt.lead.toolReplies = replies;
     throw error;
   }
   publishSession(session);
+  if (receipt && receipt.lead !== session) publishSession(receipt.lead);
 }
 
 export function leadOf(workspaceId: string): Session | undefined {
@@ -551,6 +563,7 @@ async function retireRun(run: ActiveRun, extra: () => Partial<Session> = () => (
       const patch = extra();
       persistSession(session, {
         ...patch, ...outcomeOf(run, session), status: 'idle', activeRunId: null, activeMessageId: undefined, stopRequested: undefined,
+        ...(session.role === 'lead' ? { toolReplies: undefined } : {}),
         // Whatever is queued would only meet the same limit.
         held: run.outcome === 'limit' || (run.holdQueue && (patch.queue ?? session.queue).length > 0) ? true : session.held,
       });
@@ -581,6 +594,7 @@ function outcomeOf(run: ActiveRun, session: Session): Partial<Session> {
   if (!run.outcome) return {};
   return {
     lastOutcome: run.outcome,
+    ...(run.outcome === 'completed' && run.playbookVersion ? { playbookVersion: run.playbookVersion } : {}),
     limitResetsAt: run.outcome === 'limit' ? run.limitResetsAt : undefined,
     ...(session.work ? {
       // Whoever stopped it knows, so nobody needs telling.
@@ -594,13 +608,12 @@ function outcomeOf(run: ActiveRun, session: Session): Partial<Session> {
  * Claude keeps the instructions from a conversation's first turn when it resumes one, whatever it's
  * given later, so a Lead has to be told when they've changed.
  */
-function playbookUpdate(session: Session, project: Project): string | undefined {
-  if (session.role !== 'lead') return undefined;
-  const { content } = playbookFor(project);
-  const version = crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
-  const changed = session.resumeId && session.playbookVersion && session.playbookVersion !== version;
-  session.playbookVersion = version;
-  return changed ? `Update from Lonca: the user changed your playbook. From now on, follow this instead of the one you started with:\n\n${content}` : undefined;
+function playbookUpdate(session: Session, run: ActiveRun, content: string | undefined): string | undefined {
+  if (content === undefined) return undefined;
+  // Older hashes meant only "prepared", so those Leads need one confirmed delivery too.
+  run.playbookVersion = `delivered:${crypto.createHash('sha256').update(content).digest('hex').slice(0, 16)}`;
+  return session.resumeId && session.playbookVersion !== run.playbookVersion
+    ? `Update from Lonca: this is your current playbook. From now on, follow this instead of the one you started with:\n\n${content}` : undefined;
 }
 
 /** What a turn's processes are given, which isn't the same for a Lead and the agents it starts. */
@@ -637,6 +650,7 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
     // Keep the accepted item queued until its promotion and run ID are both saved.
     persistSession(session, {
       status: 'running', activeRunId: runId, activeMessageId: item.id, stopRequested: undefined,
+      ...(session.role === 'lead' ? { toolReplies: undefined } : {}),
       queue: session.queue.filter((id) => id !== item.id),
       lastOutcome: undefined, limitResetsAt: undefined,
       ...(session.role === 'lead' && item.from === 'lonca' ? { autonomousTurns: (session.autonomousTurns ?? 0) + 1 } : {}),
@@ -647,9 +661,11 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
     run.sandbox = sandbox;
     const attachments = item.attachments ?? [];
     if (session.agent === 'codex') await setUpCodex(workspace, project);
+    // Both prompts use one snapshot, even if the user edits the playbook while startup awaits I/O.
+    const playbook = session.role === 'lead' ? playbookFor(project).content : undefined;
     await execText(sandbox, ['mkdir', '-p', run.dir, ...(session.work ? [scratchDir(session.id)] : [])]);
     await execText(sandbox, ['bash', '-c', 'cat > "$0"', `${run.dir}/prompt`], {
-      stdin: userPrompt([playbookUpdate(session, project), item.context, item.text, currentJobNote(session)].filter(Boolean).join('\n\n'), attachments),
+      stdin: userPrompt([playbookUpdate(session, run, playbook), item.context, item.text, currentJobNote(session)].filter(Boolean).join('\n\n'), attachments),
     });
     if (session.role === 'lead') {
       await execText(sandbox, ['bash', '-c', 'mkdir -p "$0/replies" && cat > "$0/lonca-tools.py"', run.dir], { stdin: leadToolsScript(TEAM_TOOLS) });
@@ -660,7 +676,7 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
       return;
     }
     const command = adapter.command({
-      session, workspace, project, attachments, systemPrompt: sessionPrompt(session, workspace, project),
+      session, workspace, project, attachments, systemPrompt: sessionPrompt(session, workspace, project, playbook),
       ...(session.role === 'lead' ? { tools: { command: 'python3', args: ['-I', `${run.dir}/lonca-tools.py`, run.dir] } } : {}),
     });
     launchAttempted = true;
@@ -761,14 +777,17 @@ export interface MessageOptions {
   summary?: string;
   /** Respect user stops and automatic pauses when sending on behalf of the Lead. */
   keepHeld?: boolean;
+  /** A Lead's job change is accepted with its message, rather than ahead of it. */
+  job?: AgentJob;
+  receipt?: ToolReceipt;
 }
 
 /** Releasing a queue also applies to a Stop whose process is still being retired or recovered. */
-function releaseQueueHold(session: Session, patch: Partial<Session>): void {
+function releaseQueueHold(session: Session, patch: Partial<Session>, receipt?: ToolReceipt): void {
   persistSession(session, {
     ...patch, held: false, userStopped: undefined,
     ...(session.stopRequested ? { stopRequested: { holdQueue: false } } : {}),
-  });
+  }, receipt);
   const run = runs.get(session.id);
   // Change the live run only after saving the release, so a failed write doesn't release work.
   if (run?.stopped) run.holdQueue = false;
@@ -815,10 +834,11 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
       queue: [...session.queue, item.id],
       ...(session.role === 'lead' && fromUser ? { autonomousTurns: 0, unread: false } : {}),
       ...(session.work && fromUser ? { work: { ...session.work, userNote: text.slice(0, 1000) } } : {}),
+      ...(session.work && options.job ? { work: { ...session.work, job: options.job } } : {}),
     };
     const keepHeld = options.keepHeld && session.held && (session.userStopped || session.lastOutcome !== 'stopped');
-    if (keepHeld) persistSession(session, { ...patch, held: true });
-    else releaseQueueHold(session, patch);
+    if (keepHeld) persistSession(session, { ...patch, held: true }, options.receipt);
+    else releaseQueueHold(session, patch, options.receipt);
   } catch (error) {
     if (locksLead) delete workspace.leadLockedAt;
     transcript?.remove(item.id);
@@ -847,7 +867,7 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
 }
 
 /** Releases waiting messages, saving a Lead retry's receipt in the same state write. */
-export async function flushQueue(sessionId: string, retryId?: string): Promise<void> {
+export async function flushQueue(sessionId: string, retryId?: string, receipt?: ToolReceipt): Promise<void> {
   const session = getSession(sessionId);
   if (!session) throw new HttpError(404, 'No such session');
   if (retryId && session.queueRetryIds?.includes(retryId)) return;
@@ -858,7 +878,7 @@ export async function flushQueue(sessionId: string, retryId?: string): Promise<v
   releaseQueueHold(session, {
     ...(session.role === 'lead' ? { autonomousTurns: 0 } : {}),
     ...(retryId ? { queueRetryIds: [...(session.queueRetryIds ?? []), retryId] } : {}),
-  });
+  }, receipt);
   if ((workspace.status === 'stopped' || workspace.status === 'ready') && session.queue.length > 0) await startWorkspace(workspace);
   startNextQueued(session);
 }
@@ -898,10 +918,10 @@ function stopProcess(run: ActiveRun): void {
   }, STOP_GRACE_MS);
 }
 
-export async function interruptSession(sessionId: string, { holdQueue = true }: { holdQueue?: boolean } = {}): Promise<void> {
+export async function interruptSession(sessionId: string, { holdQueue = true, receipt }: { holdQueue?: boolean; receipt?: ToolReceipt } = {}): Promise<void> {
   const run = runs.get(sessionId);
+  const session = getSession(sessionId);
   if (!run) {
-    const session = getSession(sessionId);
     // Recovery hasn't registered this run yet. It may still be changing files, even if its sandbox is unreachable.
     if (session?.activeRunId) {
       throw new HttpError(409, 'Lonca is reconnecting to this agent. Try Stop again after it reconnects.');
@@ -912,16 +932,20 @@ export async function interruptSession(sessionId: string, { holdQueue = true }: 
       delete session.activeMessageId;
       publishSession(session);
     }
+    // An idle stop is still an accepted call; replay must not stop some later turn.
+    if (session && receipt) persistSession(session, {}, receipt);
     return;
   }
+  // A Lead stop and its receipt are saved together before signalling. A crash after this write
+  // recovers stopRequested for this run, while a replay only returns the saved reply.
+  if (session && receipt) persistSession(session, { stopRequested: { holdQueue: run.holdQueue || holdQueue } }, receipt);
   run.interrupted = true;
   run.stopped = true;
   run.holdQueue ||= holdQueue;
-  // Signal first. Saving is what fails when an agent fills the disk, and Stop mustn't depend on it.
-  // The signal goes out after this synchronous save anyway, so a crash can't come between them.
+  // A user's Stop must still signal when the disk is full. Lead calls save first for replay.
+  // Signalling and the synchronous save share this event-loop turn.
   if (run.launched) stopProcess(run);
-  const session = getSession(sessionId);
-  if (session) {
+  if (session && !receipt) {
     session.stopRequested = { holdQueue: run.holdQueue };
     publishSession(session);
     try {

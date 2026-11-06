@@ -6,8 +6,8 @@ import { boundaryValue, getSecrets } from './store.ts';
 
 // A virtual machine never holds a credential. Docker Sandboxes' proxy, on this computer, adds them
 // to requests on their way out, so all that's inside is a placeholder for it to swap. It reads each
-// one from a file for every request, so signing in or out reaches running VMs with nothing else to
-// do.
+// one from a file for every request, so refreshed credentials reach running VMs without copying
+// secrets there. Codex's endpoint is also updated when the kind of sign-in changes.
 
 const CLAUDE_PLACEHOLDER = 'sk-ant-oat01-lonca-placeholder';
 const CODEX_PLACEHOLDER = 'oai-oat01-lonca-placeholder';

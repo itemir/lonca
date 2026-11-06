@@ -7,6 +7,7 @@ import type {
 } from '../shared/types.ts';
 import { DEFAULT_CATALOG } from '../shared/catalog.ts';
 import { paths } from './config.ts';
+import { stopLegacyContainers, type SavedWorkspace } from './legacy.ts';
 
 interface StateFile {
   version: 1;
@@ -46,7 +47,7 @@ export function writeAtomic(file: string, content: string, mode: number): void {
 }
 
 /** Workspaces saved when some could run in containers. Those get a VM the next time they start. */
-function upgradeWorkspace(saved: Workspace & { containerName?: string; runtime?: string }): Workspace {
+function upgradeWorkspace(saved: SavedWorkspace): Workspace {
   const { containerName, runtime: _runtime, ...workspace } = saved;
   return {
     ...workspace,
@@ -58,6 +59,7 @@ function upgradeWorkspace(saved: Workspace & { containerName?: string; runtime?:
 function load(): StateFile {
   try {
     const parsed = JSON.parse(fs.readFileSync(paths.state, 'utf8')) as StateFile;
+    stopLegacyContainers(parsed.workspaces);
     return {
       ...parsed,
       workspaces: parsed.workspaces.map(upgradeWorkspace),

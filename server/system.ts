@@ -350,10 +350,21 @@ async function renewCodexLogin(): Promise<void> {
   }
 }
 
+let updateCodexSetups: () => Promise<void> = async () => {};
+
+/** Workspaces supply this so checking a sign-in also updates terminal/script configuration. */
+export function setCodexSetupUpdater(update: () => Promise<void>): void {
+  updateCodexSetups = update;
+}
+
 /** What's saved here decides this. The CLIs' own status commands only read the same things. */
 async function readAgentStatus(): Promise<void> {
   await renewCodexLogin();
   shareCodexCredentialWithProxy();
+  // API keys and ChatGPT logins use different endpoints. Wait for the same serialized setup
+  // used by project-key changes before reporting the sign-in ready, including during provisioning.
+  // Refreshing also retries VMs that were unreachable at the time of the original change.
+  await updateCodexSetups();
   const token = getSecrets().claudeToken;
   system.agents.claude = {
     signedIn: Boolean(token),

@@ -126,7 +126,7 @@ export function setUpCodex(workspace: Workspace, project: Project): Promise<void
   });
 }
 
-/** A project's own key is in each VM's Codex login, so a change to it has to reach those running. */
+/** Update running VMs for project keys and for global API-key/ChatGPT endpoint changes. */
 export async function applyCodexSetup(project: Project): Promise<void> {
   const workspaces = state.workspaces.filter((workspace) => workspace.projectId === project.id);
   await Promise.all(workspaces.map((workspace) => lifecycle.run(workspace.id, async () => {

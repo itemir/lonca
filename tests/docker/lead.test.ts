@@ -123,8 +123,10 @@ describe('a workspace’s Lead', () => {
     const own = await lonca.api<Playbook>('PUT', '/playbook', { project: project.id, content: 'PROJECT-PLAYBOOK-MARKER' });
     expect(own.source).toBe('project');
     // A resumed CLI keeps what it was first told, so the change comes with the next message.
-    expect(await toldInTurn('two')).toContain('the user changed your playbook');
-    expect(await toldInTurn('nothing has changed')).not.toContain('nothing has changed the user changed');
+    expect(await toldInTurn('two')).toContain('this is your current playbook');
+    const unchanged = JSON.parse((await toldInTurn('nothing has changed'))!);
+    const lastUser = unchanged.messages.filter((message: { role: string }) => message.role === 'user').at(-1);
+    expect(JSON.stringify(lastUser)).not.toContain('this is your current playbook');
     expect((await lonca.api<Playbook>('DELETE', `/playbook?project=${project.id}`)).source).toBe('global');
     const restored = await lonca.api<Playbook>('DELETE', '/playbook');
     expect(restored.source).toBe('template');
@@ -140,7 +142,7 @@ describe('a workspace’s Lead', () => {
     await lonca.waitForIdle(fresh.id);
     const told = mock.requests.slice(before).find((request) => request.body.includes('You are the Lead'))?.body;
     expect(told).toContain('FOR-THE-NEXT-LEAD');
-    expect(told).not.toContain('the user changed your playbook');
+    expect(told).not.toContain('this is your current playbook');
     await lonca.api('DELETE', `/playbook?project=${project.id}`);
   });
 });

@@ -66,9 +66,9 @@ export function scratchDir(sessionId: string): string {
 }
 
 /** Everything a session's CLI is told about its situation. Read on every turn, so edits apply from the next one. */
-export function sessionPrompt(session: Session, workspace: Workspace, project: Project): string {
+export function sessionPrompt(session: Session, workspace: Workspace, project: Project, playbook?: string): string {
   const base = systemPrompt(workspace, project);
-  if (session.role === 'lead') return [base, LEAD_PROTOCOL, playbookFor(project).content].join('\n\n');
+  if (session.role === 'lead') return [base, LEAD_PROTOCOL, playbook ?? playbookFor(project).content].join('\n\n');
   if (session.role === 'agent') return [base, agentInstructions(session)].join('\n\n');
   return base;
 }

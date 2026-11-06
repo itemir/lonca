@@ -11,6 +11,7 @@ import type { ToolCall } from './process.ts';
 import { newJobNote } from './prompt.ts';
 import {
   agentsOf, closeLead, createLead, createSession, flushQueue, interruptSession, leadOf, notice, persistSession, publishSession, sendMessage, setTeamHooks, startNextQueued,
+  type ToolReceipt,
 } from './runner.ts';
 
 const READ_LIMIT = 30000;
@@ -119,19 +120,29 @@ function findModel(workspace: Workspace, id: string): { agent: AgentId; efforts:
   throw new ToolError(`There's no model called ${id}. You can use:\n${usableModels(workspace)}`);
 }
 
-// A call is handled again if the server stops before its reply is written, so what it
-// creates is named after it, and a repeat finds what's already there.
-function deliver(session: Session, call: ToolCall, text: string): Promise<unknown> {
-  if (transcriptFor(session.id).find(call.id)) return Promise.resolve();
-  return sendMessage(session.id, text, [], { id: call.id, from: 'lead', keepHeld: true });
+/** Older servers had no receipts. A transcript write alone wasn't acceptance until state saved. */
+function acceptedMessage(session: Session, id: string): boolean {
+  const item = transcriptFor(session.id).find(id);
+  return item?.type === 'user' && (!item.queued || session.queue.includes(id));
+}
+
+// Save acceptance before starting work, so replay can return the same reply even if
+// the user cancels the message or deletes its agent before that reply reaches the CLI.
+function deliver(session: Session, call: ToolCall, text: string, receipt: ToolReceipt, job?: AgentJob): Promise<unknown> {
+  if (acceptedMessage(session, call.id)) {
+    // A call accepted by an older server may have only its transcript item as evidence.
+    persistSession(session, {}, receipt);
+    return Promise.resolve();
+  }
+  return sendMessage(session.id, text, [], { id: call.id, from: 'lead', keepHeld: true, receipt, job });
 }
 
 async function spawnAgent(lead: Session, workspace: Workspace, call: ToolCall): Promise<string> {
+  const task = textArg(call.args, 'task');
   const id = crypto.createHash('sha256').update(call.id).digest('hex').slice(0, 12);
   let agent = getSession(id);
   if (!agent) {
     const label = textArg(call.args, 'label').trim().replace(/\s+/g, ' ').slice(0, LABEL_LENGTH);
-    const task = textArg(call.args, 'task');
     const job = jobArg(call.args) ?? 'analyze';
     const model = findModel(workspace, textArg(call.args, 'model'));
     const effort = typeof call.args.effort === 'string' ? call.args.effort : model.defaultEffort;
@@ -139,11 +150,10 @@ async function spawnAgent(lead: Session, workspace: Workspace, call: ToolCall): 
     checkRoom(workspace);
     checkOneWriter(lead, job);
     agent = createSession(workspace, { id, role: 'agent', title: label, agent: model.agent, model: call.args.model as string, effort, work: { job } });
-    await deliver(agent, call, task);
-  } else {
-    await deliver(agent, call, textArg(call.args, 'task'));
   }
-  return `Started ${nameOf(agent)}. End your turn: Lonca wakes you when it finishes.`;
+  const text = `Started ${nameOf(agent)}. End your turn: Lonca wakes you when it finishes.`;
+  await deliver(agent, call, task, { lead, id: call.id, reply: { text } });
+  return text;
 }
 
 async function messageAgent(lead: Session, workspace: Workspace, call: ToolCall): Promise<string> {
@@ -160,11 +170,13 @@ async function messageAgent(lead: Session, workspace: Workspace, call: ToolCall)
     checkRoom(workspace, agent);
     checkOneWriter(lead, job ?? agent.work?.job, agent);
   }
-  if (newJob && agent.work) persistSession(agent, { work: { ...agent.work, job } });
-  await deliver(agent, call, newJob ? `${newJobNote(job)}\n\n${text}` : text);
-  if (agent.userStopped) return `${nameOf(agent)} was stopped by the user, so your message waits until they release it. Tell them if you need it.`;
-  if (agent.held) return `${nameOf(agent)} is paused, so your message is queued. Use retry_agent when it can continue.`;
-  return `Sent to ${nameOf(agent)}. End your turn: Lonca wakes you when it answers.`;
+  const reply = agent.userStopped
+    ? `${nameOf(agent)} was stopped by the user, so your message waits until they release it. Tell them if you need it.`
+    : agent.held && agent.lastOutcome !== 'stopped'
+      ? `${nameOf(agent)} is paused, so your message is queued. Use retry_agent when it can continue.`
+      : `Sent to ${nameOf(agent)}. End your turn: Lonca wakes you when it answers.`;
+  await deliver(agent, call, newJob ? `${newJobNote(job)}\n\n${text}` : text, { lead, id: call.id, reply: { text: reply } }, job);
+  return reply;
 }
 
 function latestRun(items: ChatItem[]): ChatItem[] {
@@ -203,8 +215,9 @@ function teamStatus(lead: Session, workspace: Workspace): string {
 
 async function stopAgent(lead: Session, call: ToolCall): Promise<string> {
   const agent = agentArg(lead, call.args);
-  await interruptSession(agent.id, { holdQueue: true });
-  return `Stopping ${nameOf(agent)}. Its conversation is kept.`;
+  const text = `Stopping ${nameOf(agent)}. Its conversation is kept.`;
+  await interruptSession(agent.id, { holdQueue: true, receipt: { lead, id: call.id, reply: { text } } });
+  return text;
 }
 
 const TRYING_AGAIN = 'Trying again';
@@ -215,25 +228,39 @@ function continuation(session: Session): string {
 }
 
 /** Works for a usage limit or a failure, which a conversation survives. */
-async function retrySession(session: Session, from: UserItem['from'], id?: string): Promise<void> {
+async function retrySession(session: Session, from: UserItem['from'], id?: string, receipt?: ToolReceipt): Promise<void> {
   if (session.status === 'running') throw new HttpError(409, `${nameOf(session)} is already working.`);
-  if (session.queue.length > 0) return flushQueue(session.id, id);
-  await sendMessage(session.id, continuation(session), [], { id, from, summary: TRYING_AGAIN });
+  if (session.queue.length > 0) return flushQueue(session.id, id, receipt);
+  await sendMessage(session.id, continuation(session), [], { id, from, summary: TRYING_AGAIN, receipt });
 }
 
 async function retryAgent(lead: Session, workspace: Workspace, call: ToolCall): Promise<string> {
   const agent = agentArg(lead, call.args);
   if (agent.userStopped) return `${nameOf(agent)} was stopped by the user. Ask them before it continues.`;
-  if (agent.queueRetryIds?.includes(call.id) || transcriptFor(agent.id).find(call.id)) return `Asked ${nameOf(agent)} to try again.`;
+  if (agent.queueRetryIds?.includes(call.id) || acceptedMessage(agent, call.id)) return `Asked ${nameOf(agent)} to try again.`;
   checkRoom(workspace, agent);
   checkOneWriter(lead, agent.work?.job, agent);
-  await retrySession(agent, 'lead', call.id);
-  return `Asked ${nameOf(agent)} to try again. End your turn: Lonca wakes you when it finishes.`;
+  const text = `Asked ${nameOf(agent)} to try again. End your turn: Lonca wakes you when it finishes.`;
+  await retrySession(agent, 'lead', call.id, { lead, id: call.id, reply: { text } });
+  return text;
 }
 
-async function handleToolCall(lead: Session, call: ToolCall): Promise<{ text: string; failed?: boolean }> {
+export async function handleToolCall(lead: Session, call: ToolCall): Promise<{ text: string; failed?: boolean }> {
+  const accepted = lead.toolReplies?.[call.id];
+  if (accepted) return accepted;
   const workspace = getWorkspace(lead.workspaceId);
   if (!workspace) return { text: 'This workspace no longer exists.', failed: true };
+  const reply = await dispatchToolCall(lead, workspace, call);
+  if (!['spawn_agent', 'message_agent', 'stop_agent', 'retry_agent'].includes(call.tool)) return reply;
+  // Mutations save their reply with acceptance. Save refusals and legacy deduplication too:
+  // replay must not turn "ask the user" or "wait for room" into new work after state changes.
+  const recorded = lead.toolReplies?.[call.id];
+  if (recorded) return recorded;
+  persistSession(lead, {}, { lead, id: call.id, reply });
+  return reply;
+}
+
+async function dispatchToolCall(lead: Session, workspace: Workspace, call: ToolCall): Promise<{ text: string; failed?: boolean }> {
   try {
     switch (call.tool) {
       case 'spawn_agent': return { text: await spawnAgent(lead, workspace, call) };

@@ -237,6 +237,8 @@ export interface Session {
   autonomousTurns?: number;
   /** Identifies the playbook a Lead was last told about. */
   playbookVersion?: string;
+  /** Mutating tool calls and their replies, retained until this Lead's turn is saved as finished. */
+  toolReplies?: Record<string, { text: string; failed?: boolean }>;
   agent: AgentId;
   model: string;
   effort: string;

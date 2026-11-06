@@ -54,6 +54,7 @@ const hold = async (name) => {
     fs.writeFileSync(root + '/setup-entered', '');
     if (first) await hold('setup');
     fs.writeFileSync(root + '/auth.json', Buffer.concat(chunks));
+    fs.writeFileSync(root + '/endpoint', args.at(-1));
   }
   if (args.includes('lonca-worktree')) {
     fs.writeFileSync(root + '/worktree-entered', '');
@@ -153,5 +154,28 @@ it('leaves a workspace stopped when a credential update was requested while it w
   expect(fs.readFileSync(file('running'), 'utf8')).toBe('0');
   expect(key()).toBe('sk-first');
   await lifecycle.startWorkspace(workspace);
+  expect(key()).toBe(PLACEHOLDER);
+});
+
+it.each(['boot', 'create'] as const)('keeps a global API-key endpoint change made during %s', async (operation) => {
+  project.settings.env = {};
+  const { setBoundaryValue } = await import('../../server/store.ts');
+  setBoundaryValue('codex', undefined);
+  const hold = operation === 'boot' ? 'setup' : 'worktree';
+  fs.writeFileSync(file(`hold-${hold}`), '');
+  const boot = operation === 'boot'
+    ? track(lifecycle.runningSandbox(workspace))
+    : track(new Promise<void>((resolve) => {
+      lifecycle.setSetupScriptStarter(async () => resolve());
+      workspace.status = 'error';
+      workspace.pendingOperation = 'create';
+      lifecycle.retryWorkspace(workspace);
+    }));
+  await vi.waitFor(() => expect(fs.existsSync(file(`${hold}-entered`))).toBe(true));
+  setBoundaryValue('codex', 'sk-global-latest');
+  const update = track(lifecycle.applyCodexSetup(project));
+  release(hold);
+  await Promise.all([boot, update]);
+  expect(fs.readFileSync(file('endpoint'), 'utf8')).toBe('');
   expect(key()).toBe(PLACEHOLDER);
 });
