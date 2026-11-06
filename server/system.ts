@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { AgentId, AgentStatus, Catalog, LoginMethod, ModelOption, SystemStatus } from '../shared/types.ts';
 import { PREFIX, paths } from './config.ts';
 import { publish } from './events.ts';
-import { SandboxError, buildTemplate, detectSandboxes, ensureSandbox, exec, isSandboxRunning, removeSandbox, templateLoaded, templateTag } from './sandbox.ts';
+import { SandboxError, buildTemplate, cleanUpTemplateBuild, detectSandboxes, ensureSandbox, exec, isSandboxRunning, removeSandbox, templateLoaded, templateTag } from './sandbox.ts';
 import { getSecrets, saveState, setBoundaryValue, state, writeAtomic } from './store.ts';
 import { errorMessage } from './util.ts';
 
@@ -69,12 +69,23 @@ function imageFailed(error: unknown): void {
 }
 
 let building: Promise<string> | null = null;
+let oldBuildCleared: Promise<void> | null = null;
+
+/** Every entry point waits for startup cleanup before any build can own the builder. */
+function clearOldBuild(): Promise<void> {
+  oldBuildCleared ??= cleanUpTemplateBuild().catch((error) => {
+    oldBuildCleared = null;
+    throw error;
+  });
+  return oldBuildCleared;
+}
 
 function runBuild(options: { fresh?: boolean }): Promise<string> {
   building ??= (async () => {
     const tag = templateTag();
     imageBuilding();
     try {
+      await clearOldBuild();
       await buildTemplate(tag, options, imageLog());
       imageReady();
       // The helper moves to the new template the next time it's needed.
@@ -94,8 +105,12 @@ function runBuild(options: { fresh?: boolean }): Promise<string> {
 
 /** Returns the template sandboxes start from, building it the first time. */
 export async function ensureSandboxImage(): Promise<string> {
+  await clearOldBuild();
+  if (building) return building;
   const tag = templateTag();
-  if (!building && (await templateLoaded(tag))) {
+  const loaded = await templateLoaded(tag);
+  if (building) return building;
+  if (loaded) {
     if (system.image.state !== 'ready') imageReady();
     return tag;
   }

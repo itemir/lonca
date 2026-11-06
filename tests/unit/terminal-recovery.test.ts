@@ -14,7 +14,7 @@ vi.mock('../../server/events.ts', () => ({ publish: vi.fn() }));
 vi.mock('../../server/store.ts', () => ({ state, flushState: vi.fn(), getProject: vi.fn() }));
 vi.mock('../../server/system.ts', () => ({ system: { sandbox: { state: 'ready' } } }));
 vi.mock('../../server/workspaces.ts', () => ({
-  publishWorkspace: vi.fn(), runningSandbox: async () => 'test',
+  publishWorkspace: vi.fn(), runningSandbox: async () => 'test', setUpCodex: vi.fn(),
 }));
 
 let workspace: Workspace;

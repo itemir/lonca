@@ -119,7 +119,7 @@ function projectOf(workspace: Workspace): Project {
 }
 
 /** One at a time in each VM, with the settings as they are by then, so that the last to run has the latest. */
-export function setUpCodex(workspace: Workspace, project: Project): Promise<void> {
+export function setUpCodex(workspace: Workspace, project: Project = projectOf(workspace)): Promise<void> {
   return codexSetups.run(workspace.id, async () => {
     const { command, stdin } = codexSetup(project);
     await execText(workspace.sandboxName, command, { stdin });

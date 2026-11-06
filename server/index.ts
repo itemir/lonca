@@ -13,7 +13,6 @@ import { subscribe } from './events.ts';
 import { setClientFocus } from './notify.ts';
 import { flushState, flushTranscripts, saveState, state } from './store.ts';
 import { checkSandboxes, ensureSandboxImage, moveCodexLogin, onSandboxesReady, refreshAgents, refreshCodexCatalog, setCodexSetupUpdater, system } from './system.ts';
-import { cleanUpTemplateBuild } from './sandbox.ts';
 import { attachTerminal, closeWorkspaceTerminals, reconcileTerminals, runSetupScript } from './terminals.ts';
 import { reapLeftoverLogins } from './logins.ts';
 import { abortImports, reconcileProjects } from './projects.ts';
@@ -97,8 +96,6 @@ server.on('upgrade', (req, socket, head) => {
 
 let prepared = false;
 let preparing = false;
-// Only once, before this server has started a build of its own.
-let buildCleared = false;
 
 /** Work that needs Docker Sandboxes. Runs once it's usable, which may be long after startup. */
 async function prepare(): Promise<void> {
@@ -116,10 +113,6 @@ async function prepare(): Promise<void> {
     preparing = false;
   }
   try {
-    if (!buildCleared) {
-      buildCleared = true;
-      await cleanUpTemplateBuild();
-    }
     await ensureSandboxImage();
     await reapLeftoverLogins();
     await refreshAgents();

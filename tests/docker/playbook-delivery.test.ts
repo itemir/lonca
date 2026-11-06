@@ -48,7 +48,7 @@ it('delivers a playbook edit on retry after its first attempted delivery fails t
   await lonca.waitForIdle(lead.id);
   const failed = await lonca.session(lead.id);
   expect(failed.lastOutcome).toBe('failed');
-  expect(failed.playbookVersion).toBe(first.playbookVersion);
+  expect(failed.playbookVersion).toBeUndefined();
   expect(mock.requests.slice(failedBefore).some((request) => request.body.includes('TURN-THAT-NEVER-LAUNCHED'))).toBe(false);
   await lonca.kill();
   await lonca.start();
@@ -62,6 +62,37 @@ it('delivers a playbook edit on retry after its first attempted delivery fails t
   expect(request).toBeDefined();
   expect(request!.body).toContain('NEW-PLAYBOOK-DELIVERY');
   expect(resumed.playbookVersion).not.toBe(first.playbookVersion);
+});
+
+it.each(['stop', 'crash', 'graceful restart'])('delivers a reverted playbook after %s during the edited turn', async (mode) => {
+  const original = `ORIGINAL-PLAYBOOK-${mode}`;
+  const edited = `EDITED-PLAYBOOK-${mode}`;
+  await lonca.api('PUT', '/playbook', { content: original });
+  await send(`BEFORE-EDIT-${mode}`);
+  await lonca.waitForIdle(lead.id);
+  const first = await lonca.session(lead.id);
+  expect(first.playbookVersion).toBeTruthy();
+
+  await lonca.api('PUT', '/playbook', { content: edited });
+  const before = mock.requests.length;
+  await send(`SLOW EDITED-TURN-${mode}`);
+  await until('the edited playbook to reach the model', () => mock.requests.slice(before).some((request) => request.body.includes(edited)));
+  if (mode === 'stop') await lonca.api('POST', `/sessions/${lead.id}/interrupt`);
+  else {
+    if (mode === 'crash') await lonca.kill();
+    else await lonca.stop();
+    await lonca.start();
+  }
+  await lonca.waitForIdle(lead.id);
+
+  await lonca.api('PUT', '/playbook', { content: original });
+  const reverted = mock.requests.length;
+  await send(`AFTER-REVERT-${mode}`);
+  await lonca.waitForIdle(lead.id);
+  const request = mock.requests.slice(reverted).find((entry) => entry.body.includes('You are the Lead'))!;
+  const messages = JSON.parse(request.body).messages as { role: string; content: unknown }[];
+  expect(JSON.stringify(messages.filter((entry) => entry.role === 'user').at(-1))).toContain(original);
+  expect(await lonca.session(lead.id)).toMatchObject({ lastOutcome: 'completed', playbookVersion: first.playbookVersion });
 });
 
 it('repairs an old prepared hash that was saved without delivering the edit', async () => {

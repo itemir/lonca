@@ -1027,9 +1027,13 @@ describe('signing in', () => {
 
       await lonca.api('PATCH', `/projects/${project.id}`, { settings: { network: 'host', env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`, ANTHROPIC_API_KEY: 'sk-mock', CODEX_API_KEY: 'sk-mock' } } });
       await lonca.api('POST', `/workspaces/${ws.id}/recreate`);
+      const before = mock.requests.length;
       await lonca.api('POST', `/sessions/${created.session.id}/messages`, { text: 'second try', attachments: [] });
       const claude = await lonca.waitForIdle(created.session.id, 60000);
-      expect(texts(claude).at(-1)).toContain('You said: second try');
+      expect(texts(claude).at(-1)).toContain('Mock Claude here.');
+      const request = mock.requests.slice(before).findLast((entry) => entry.path.endsWith('/messages') && entry.body.includes('You are the Lead'))!;
+      const messages = JSON.parse(request.body).messages as { role: string; content: unknown }[];
+      expect(JSON.stringify(messages.filter((entry) => entry.role === 'user').at(-1))).toContain('second try');
       expect(claude.at(-1)).toMatchObject({ type: 'result', failed: false });
 
       // Codex won't resume a conversation under another provider, so this keeps the built-in

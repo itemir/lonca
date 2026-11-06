@@ -9,7 +9,7 @@ import { publish } from './events.ts';
 import { flushState, getProject, state } from './store.ts';
 import { system } from './system.ts';
 import { HttpError, KeyedQueue, errorMessage, newId } from './util.ts';
-import { publishWorkspace, runningSandbox } from './workspaces.ts';
+import { publishWorkspace, runningSandbox, setUpCodex } from './workspaces.ts';
 
 const SCROLLBACK_BYTES = 512 * 1024;
 const MAX_CLIENT_BACKLOG = 4 * 1024 * 1024;
@@ -447,6 +447,7 @@ async function startShell(workspace: Workspace): Promise<TerminalInfo> {
   const project = getProject(workspace.projectId);
   const sandbox = await runningSandbox(workspace);
   if (workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
+  await setUpCodex(workspace);
   const existing = [...terminals.values()].filter((terminal) => terminal.info.workspaceId === workspace.id && terminal.info.kind === 'shell');
   const id = newId();
   const terminal = new Terminal({
@@ -469,6 +470,7 @@ export function restartShell(workspace: Workspace, id: string): Promise<void> {
     if (terminal.info.status === 'running' && !terminal.info.disconnected) return;
     const sandbox = await runningSandbox(workspace);
     if (workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
+    await setUpCodex(workspace);
     await terminal.stop();
     await terminal.start(sandbox, ['bash', '--login'], { env: execEnv(getProject(workspace.projectId)), workdir: workspace.path });
   });
@@ -525,6 +527,7 @@ export function runSetupScript(workspace: Workspace, script: string): Promise<Te
 async function startScript(workspace: Workspace, script: string): Promise<TerminalInfo> {
   const sandbox = await runningSandbox(workspace);
   if (workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
+  await setUpCodex(workspace);
   const id = `${workspace.id}-setup`;
   let terminal = terminals.get(id);
   if (terminal) {

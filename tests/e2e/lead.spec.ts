@@ -237,6 +237,45 @@ test('a usage limit pauses the Lead, with a way to try again or move to another 
   await expect(page.locator('.model-button')).toContainText('GPT-5.5');
 });
 
+test('a replacement Lead shows its retired locked model and can move to an available one', async ({ page }) => {
+  const { workspace, lead } = await newWorkspace({ agent: 'claude', model: 'claude-sonnet-5-5', effort: 'low' });
+  await lonca.api('POST', `/sessions/${lead.id}/messages`, { text: 'Lock the Lead model with a completed turn.' });
+  await lonca.waitForIdle(lead.id);
+  await lonca.api('POST', `/sessions/${lead.id}/close`, {});
+  await lonca.stop();
+  const stateFile = path.join(lonca.home, 'state.json');
+  const state = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as { workspaces: Workspace[] };
+  const retired = 'claude-retired-test-model';
+  // A previously available model can disappear while a workspace keeps its locked choice.
+  state.workspaces.find((entry) => entry.id === workspace.id)!.lead!.model = retired;
+  fs.writeFileSync(stateFile, JSON.stringify(state));
+  await lonca.start();
+
+  await page.goto(`${lonca.url}/w/${workspace.id}?token=${lonca.token}`);
+  await page.getByRole('button', { name: 'Start a new Lead', exact: true }).click();
+  await expect(page.locator('.composer-bar .model-button')).toContainText(retired);
+  await expect(page.locator('.workspace-banner')).toContainText('is no longer available');
+  await expect(page.getByRole('button', { name: 'Use another model' })).toBeVisible();
+  await shot(page, 'replacement-lead-retired');
+  await page.reload();
+  await expect(page.locator('.composer-bar .model-button')).toContainText(retired);
+  await page.getByRole('button', { name: 'Use another model' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Move the Lead to another model' });
+  await dialog.locator('.model-button').click();
+  await dialog.getByRole('button', { name: 'Sonnet 5.5' }).click();
+  await dialog.getByRole('button', { name: 'Low', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Move the Lead' }).click();
+  await expect(page.locator('.composer-bar .model-button')).toContainText('Sonnet 5.5');
+  await expect(page.locator('.workspace-banner')).toHaveCount(0);
+  await say(page, 'Continue with the available model.');
+  await expect(page.locator('.user-message').last()).toContainText('Continue with the available model.');
+  const current = (await lonca.api<{ sessions: Session[] }>('GET', '/state')).sessions.find((entry) => entry.workspaceId === workspace.id && entry.role === 'lead' && !entry.closedAt)!;
+  await lonca.waitForIdle(current.id);
+  expect(await lonca.session(current.id)).toMatchObject({ model: 'claude-sonnet-5-5', lastOutcome: 'completed' });
+  await expect(page.locator('.result-row').last()).toBeVisible();
+  await shot(page, 'replacement-lead-recovered');
+});
+
 test('the default Lead and playbook are set in Settings, and a project can have its own', async ({ page }) => {
   await page.goto(`${lonca.url}/settings?token=${lonca.token}`);
   await expect(page.getByRole('heading', { name: 'Sign-ins' })).toBeVisible();

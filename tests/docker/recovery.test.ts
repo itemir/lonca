@@ -64,7 +64,9 @@ it('queues messages during a rebuild and runs them in the replacement runtime', 
     const result = continued.findLast((item) => item.type === 'result');
     expect(result, JSON.stringify(continued)).toMatchObject({ failed: false });
     expect(result?.interrupted).not.toBe(true);
-    expect(continued.some((item) => item.type === 'text' && item.text.includes('Continue this conversation after rebuild'))).toBe(true);
+    const request = mock.requests.findLast((entry) => entry.path.endsWith('/messages') && entry.body.includes('You are the Lead'))!;
+    const messages = JSON.parse(request.body).messages as { role: string; content: unknown }[];
+    expect(JSON.stringify(messages.filter((entry) => entry.role === 'user').at(-1))).toContain('Continue this conversation after rebuild');
     expect((await lonca.workspace(workspace.id)).status).toBe('ready');
   } finally {
     await rebuilding;

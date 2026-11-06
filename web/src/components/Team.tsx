@@ -144,9 +144,10 @@ export function SessionBanner({ session }: { session: Session }) {
   const catalog = useStore((store) => store.catalog);
   const system = useStore((store) => store.system);
   const [switching, setSwitching] = useState(false);
-  const project = useStore((store) => store.projects.find((entry) => entry.id === store.workspaces.find((workspace) => workspace.id === session.workspaceId)?.projectId));
-  // Until a Lead's first message, its model can simply be changed in its tab.
-  if (session.closedAt || (session.role === 'lead' && !session.hasMessages)) return null;
+  const workspace = useStore((store) => store.workspaces.find((entry) => entry.id === session.workspaceId));
+  const project = useStore((store) => store.projects.find((entry) => entry.id === workspace?.projectId));
+  // Only an unlocked workspace lets a new Lead's model be changed in its tab.
+  if (session.closedAt || (session.role === 'lead' && !session.hasMessages && !workspace?.leadLockedAt)) return null;
   const provider = catalog[session.agent].label;
   const name = modelLabel(catalog, session.agent, session.model);
   const blocker = session.role === 'lead' ? leadBlocker(session, catalog, system, project) : session.lastOutcome === 'limit' ? 'limit' : null;

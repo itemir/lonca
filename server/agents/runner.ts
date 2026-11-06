@@ -174,7 +174,10 @@ export function createLead(workspace: Workspace, choice: Partial<LeadChoice> = {
   };
   const session = createSession(workspace, { ...wanted, role: 'lead', title: 'Lead' });
   // A locked model that has since gone from the catalog stays what it was, so that this can say so.
-  if (workspace.leadLockedAt) Object.assign(session, workspace.lead);
+  if (workspace.leadLockedAt) {
+    Object.assign(session, workspace.lead);
+    publishSession(session);
+  }
   workspace.lead = { agent: session.agent, model: session.model, effort: session.effort };
   publishWorkspace(workspace);
   return session;
@@ -612,7 +615,11 @@ function playbookUpdate(session: Session, run: ActiveRun, content: string | unde
   if (content === undefined) return undefined;
   // Older hashes meant only "prepared", so those Leads need one confirmed delivery too.
   run.playbookVersion = `delivered:${crypto.createHash('sha256').update(content).digest('hex').slice(0, 16)}`;
-  return session.resumeId && session.playbookVersion !== run.playbookVersion
+  const changed = session.playbookVersion !== run.playbookVersion;
+  // The CLI may retain this edit even if the turn stops or the server crashes. Invalidate the
+  // old acknowledgment before delivery, so reverting the edit will still be sent next time.
+  if (changed && session.playbookVersion) persistSession(session, { playbookVersion: undefined });
+  return session.resumeId && changed
     ? `Update from Lonca: this is your current playbook. From now on, follow this instead of the one you started with:\n\n${content}` : undefined;
 }
 
