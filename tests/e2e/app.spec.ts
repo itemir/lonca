@@ -895,17 +895,18 @@ test.describe('how workspaces are isolated', () => {
     });
   });
 
-  test('says when it’s signed out, and picks up once it’s signed in', async () => {
+  test('says when it’s signed out, and picks up once it’s signed in, even from a terminal', async () => {
     const flag = path.join(FAKE_SBX_DIR, 'signed-out');
     fs.writeFileSync(flag, '');
     await settingsOn({}, async (view) => {
       await expect(row(view)).toContainText('isn’t signed in', { timeout: 30000 });
-      await expect(row(view)).toContainText('sbx login');
+      await expect(row(view).getByRole('button', { name: 'Sign in to Docker' })).toBeVisible();
       await shotOfRow(view, 'settings-isolation-signed-out');
 
+      // As `sbx login` in a terminal would. Lonca keeps checking while it can't run workspaces.
       fs.rmSync(flag);
-      await row(view).getByRole('button', { name: 'Check again' }).click();
       await expect(row(view)).toContainText('Each new workspace gets its own virtual machine', { timeout: 30000 });
+      await expect(row(view).getByRole('button', { name: 'Sign out of Docker' })).toBeVisible();
       await expect(row(view).getByRole('button', { name: 'Check again' })).toHaveCount(0);
       await shotOfRow(view, 'settings-isolation-vm');
     });

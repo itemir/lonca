@@ -2,10 +2,13 @@ import type { AgentId, LoginMethod } from '../shared/types.ts';
 import { LOGIN_COLS, LOGIN_ROWS } from './agents/login.ts';
 import { TTY_DIR } from './config.ts';
 import { publish } from './events.ts';
+import { DockerLoginManager } from './docker-login.ts';
 import { type LoginProcess, LoginManager, listenForReturn } from './login.ts';
-import { exec, execText, execTty } from './sandbox.ts';
+import { afterSignInChange, exec, execText, execTty, startSbxLogin } from './sandbox.ts';
 import { secretsStatus, state, updateSecrets } from './store.ts';
-import { adoptCodexLogin, agentLoginCommand, checkClaudeCredential, clearAgentRejected, helperRunning, helperSandbox, refreshAgents } from './system.ts';
+import {
+  adoptCodexLogin, agentLoginCommand, checkClaudeCredential, checkSandboxes, clearAgentRejected, helperRunning, helperSandbox, onSandboxesFoundReady, refreshAgents, setDockerLogin, system,
+} from './system.ts';
 import { newId } from './util.ts';
 import { applyCodexSetupEverywhere } from './workspaces.ts';
 
@@ -83,6 +86,27 @@ export const logins = new LoginManager({
   },
   publish: (agent, login) => publish({ type: 'login', agent, login }),
 });
+
+export const dockerLogins = new DockerLoginManager({
+  async spawn() {
+    const login = await startSbxLogin();
+    login.stdout.setEncoding('utf8');
+    return {
+      onOutput: (listener) => login.stdout.on('data', listener),
+      exited: login.exited,
+      kill: login.kill,
+    };
+  },
+  async check() {
+    afterSignInChange();
+    await checkSandboxes({ fresh: true });
+    return system.sandbox.state;
+  },
+  publish: setDockerLogin,
+});
+
+// Including when that's from `sbx login` in a terminal, with nobody looking at Lonca.
+onSandboxesFoundReady(() => dockerLogins.sandboxesReady());
 
 /** A sign-in can't outlive the server that was following it, but its CLI would keep waiting. */
 export async function reapLeftoverLogins(): Promise<void> {

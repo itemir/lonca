@@ -229,24 +229,33 @@ function ClaudeSteps({ login, code, setCode, codeError, setCodeError, onUseAsKey
   );
 }
 
-function CodexSteps({ login }: { login: LoginState | undefined }) {
+/** A one-time code to enter or check on a sign-in page, and the page, which the person goes to themselves. */
+export function DeviceCodeSteps({ url: link, code, ending, title, hint, openLabel, copyOnOpen }: {
+  url: string | undefined;
+  code: string | undefined;
+  /** Approved, and only the last of it is left. */
+  ending: boolean;
+  title: string;
+  hint: (host: string) => string;
+  openLabel: string;
+  /** For a page where the code has to be typed in. */
+  copyOnOpen: boolean;
+}) {
   const [opened, setOpened] = useState(false);
   const [copied, copy] = useCopied();
-  const url = safeUrl(login?.url);
-  const code = login?.code;
-  const ending = login?.phase === 'saving';
+  const url = safeUrl(link);
   return (
     <ol className="login-steps">
       <li className={`login-step ${opened || ending ? 'step-past' : 'step-now'}`}>
         <span className="login-step-number" aria-hidden="true">1</span>
         <div className="login-step-body">
-          <div className="login-step-title">Enter this code on the sign-in page</div>
+          <div className="login-step-title">{title}</div>
           <div className="login-code-box">
             {code
               ? <><span className="login-code">{code}</span><button type="button" className="button button-small" onClick={() => copy(code)}>{copied ? 'Copied' : 'Copy'}</button></>
               : <span className="login-code-waiting">{ending ? 'Finishing up…' : 'Getting your code…'}</span>}
           </div>
-          {url && <p className="login-hint">Only enter it on {hostOf(url)}, and only if you started this sign-in. It expires after a few minutes.</p>}
+          {url && <p className="login-hint">{hint(hostOf(url))}</p>}
           <div className="login-actions">
             {url && code ? (
               <a
@@ -255,14 +264,14 @@ function CodexSteps({ login }: { login: LoginState | undefined }) {
                 target="_blank"
                 rel="noreferrer"
                 onClick={() => {
-                  copy(code);
+                  if (copyOnOpen) copy(code);
                   setOpened(true);
                 }}
               >
-                {opened ? 'Open again' : 'Copy code and open'}
+                {opened ? 'Open again' : openLabel}
               </a>
             ) : (
-              <button type="button" className="button button-primary" disabled>Copy code and open</button>
+              <button type="button" className="button button-primary" disabled>{openLabel}</button>
             )}
             {url && <CopyLink url={url} />}
           </div>
@@ -278,6 +287,20 @@ function CodexSteps({ login }: { login: LoginState | undefined }) {
         </div>
       </li>
     </ol>
+  );
+}
+
+function CodexSteps({ login }: { login: LoginState | undefined }) {
+  return (
+    <DeviceCodeSteps
+      url={login?.url}
+      code={login?.code}
+      ending={login?.phase === 'saving'}
+      title="Enter this code on the sign-in page"
+      hint={(host) => `Only enter it on ${host}, and only if you started this sign-in. It expires after a few minutes.`}
+      openLabel="Copy code and open"
+      copyOnOpen
+    />
   );
 }
 

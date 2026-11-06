@@ -1,5 +1,5 @@
 import type {
-  AgentId, Attachment, ChangeSet, Checks, FileContent, FileEntry, LeadChoice, LoginMethod, LoginState, Playbook, Project, ProjectSettings, SearchHit, Session,
+  AgentId, Attachment, ChangeSet, Checks, DockerLoginState, FileContent, FileEntry, LeadChoice, LoginMethod, LoginState, Playbook, Project, ProjectSettings, SearchHit, Session,
   SessionSnapshot, TerminalInfo, UserItem, Workspace, AppState, AppSettings,
 } from '../../shared/types.ts';
 import { accessToken } from './auth.ts';
@@ -111,4 +111,7 @@ export const api = {
   refreshAgents: () => request<void>('POST', '/agents/refresh'),
   rebuildImage: () => request<void>('POST', '/image/rebuild'),
   checkSandboxes: () => request<void>('POST', '/sandboxes/check'),
+  startDockerLogin: () => request<DockerLoginState | null>('POST', '/sandboxes/login'),
+  cancelDockerLogin: () => request<void>('DELETE', '/sandboxes/login'),
+  signOutOfDocker: () => request<void>('POST', '/sandboxes/logout'),
 };

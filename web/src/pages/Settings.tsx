@@ -1,10 +1,11 @@
-import { useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Check, PanelLeft } from 'lucide-react';
 import type { AgentId, AppSettings } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { ModelPicker } from '../components/ModelPicker.tsx';
 import { PlaybookEditor } from '../components/PlaybookEditor.tsx';
-import { IconButton, Spinner } from '../components/ui.tsx';
+import { DockerLoginDialog } from '../components/DockerLoginDialog.tsx';
+import { ConfirmDialog, IconButton, Spinner } from '../components/ui.tsx';
 import { useLayout } from '../layout.ts';
 import { attempt, signInBlocker, useStore } from '../store.ts';
 
@@ -71,14 +72,36 @@ function GithubCard() {
 
 const SANDBOX_DOCS = 'https://docs.docker.com/ai/sandboxes/';
 
+function SignOutWarning() {
+  return (
+    <div className="close-body">
+      <p>This signs Docker Sandboxes out on this whole computer, not just in Lonca. <code>sbx</code> in your terminal is signed out too.</p>
+      <p className="close-warning">It also stops every sandbox running on this computer: all of Lonca’s workspaces, any agents working in them, and sandboxes that aren’t Lonca’s.</p>
+      <p>Workspaces can’t run again until you sign back in. Their files and conversations are kept.</p>
+    </div>
+  );
+}
+
 function IsolationCard() {
   const sandbox = useStore((store) => store.system.sandbox);
+  // A sign-in carries on through a page reload, so its window comes back with it.
+  const [signingIn, setSigningIn] = useState(() => {
+    const phase = useStore.getState().system.dockerLogin?.phase;
+    return phase === 'starting' || phase === 'waiting' || phase === 'checking';
+  });
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
   const [checking, setChecking] = useState(false);
   const ready = sandbox.state === 'ready';
   const check = () => {
     setChecking(true);
     void attempt(() => api.checkSandboxes()).finally(() => setChecking(false));
   };
+  const signOut = () => {
+    setSigningOut(true);
+    void attempt(() => api.signOutOfDocker()).finally(() => setSigningOut(false));
+  };
+  const closeSignIn = useCallback(() => setSigningIn(false), []);
   return (
     <div className="settings-block">
       <div className="settings-row">
@@ -93,18 +116,30 @@ function IsolationCard() {
             {sandbox.state === 'unavailable' && `Docker Sandboxes isn’t working, so workspaces can’t run: ${sandbox.detail}`}
           </span>
         </div>
-        {!ready && sandbox.state !== 'unsupported' && (
+        {sandbox.state === 'signed-out' && (
+          <button type="button" className="button button-primary" onClick={() => setSigningIn(true)}>Sign in to Docker</button>
+        )}
+        {!ready && sandbox.state !== 'unsupported' && sandbox.state !== 'signed-out' && (
           <button type="button" className="button" disabled={checking} onClick={check}>{checking ? <><Spinner size={12} /> Checking…</> : 'Check again'}</button>
+        )}
+        {ready && (
+          <button type="button" className="button" disabled={signingOut} onClick={() => setConfirmSignOut(true)}>
+            {signingOut ? <><Spinner size={12} /> Signing out…</> : 'Sign out of Docker'}
+          </button>
         )}
       </div>
       {sandbox.state === 'not-installed' && (sandbox.install
         ? <><p className="field-help">To install it, run this in a terminal, then check again:</p><pre className="isolation-command">{sandbox.install}</pre></>
         : <p className="field-help"><a href={SANDBOX_DOCS} target="_blank" rel="noreferrer">Install Docker Sandboxes</a>, then check again.</p>)}
-      {sandbox.state === 'signed-out' && <p className="field-help">Run <code>sbx login</code> in a terminal, then check again.</p>}
+      {sandbox.state === 'signed-out' && <p className="field-help">Docker Sandboxes needs a Docker account. Signing in here also signs in <code>sbx</code> in your terminal, since it’s one login for this computer.</p>}
       {ready && sandbox.sshAgentForwarding && (
         <p className="field-help">
           Lonca keeps your SSH keys out of its virtual machines. On Docker Sandboxes 0.50, running <code>sbx exec</code> on one from a terminal lends it your keys until Lonca next runs a command there. To rule that out on any version, run <code>sbx settings set ssh.agentForwardingEnabled false</code> and <code>sbx daemon restart</code>.
         </p>
+      )}
+      {signingIn && <DockerLoginDialog onClose={closeSignIn} />}
+      {confirmSignOut && (
+        <ConfirmDialog title="Sign out of Docker?" body={<SignOutWarning />} action="Sign out of Docker" danger focusCancel onConfirm={signOut} onClose={() => setConfirmSignOut(false)} />
       )}
     </div>
   );

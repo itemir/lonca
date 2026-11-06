@@ -76,7 +76,7 @@ export function App() {
           <div className="banner banner-error">Workspaces can’t run on this computer: {sandbox.detail}</div>
         )}
         {connected && sandbox.state === 'signed-out' && (
-          <div className="banner banner-error">Workspaces can’t run because Docker Sandboxes isn’t signed in. Run <code>sbx login</code> in a terminal, and Lonca will pick it up.</div>
+          <div className="banner banner-error">Workspaces can’t run because Docker Sandboxes isn’t signed in. Sign in from <Link to="/settings">Settings</Link>.</div>
         )}
         {connected && sandbox.state === 'unavailable' && (
           <div className="banner banner-error">Workspaces can’t run because Docker Sandboxes isn’t working: {sandbox.detail}</div>
