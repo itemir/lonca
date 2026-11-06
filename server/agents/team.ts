@@ -217,14 +217,14 @@ function continuation(session: Session): string {
 /** Works for a usage limit or a failure, which a conversation survives. */
 async function retrySession(session: Session, from: UserItem['from'], id?: string): Promise<void> {
   if (session.status === 'running') throw new HttpError(409, `${nameOf(session)} is already working.`);
-  if (session.queue.length > 0) return flushQueue(session.id);
+  if (session.queue.length > 0) return flushQueue(session.id, id);
   await sendMessage(session.id, continuation(session), [], { id, from, summary: TRYING_AGAIN });
 }
 
 async function retryAgent(lead: Session, workspace: Workspace, call: ToolCall): Promise<string> {
   const agent = agentArg(lead, call.args);
   if (agent.userStopped) return `${nameOf(agent)} was stopped by the user. Ask them before it continues.`;
-  if (transcriptFor(agent.id).find(call.id)) return `Asked ${nameOf(agent)} to try again.`;
+  if (agent.queueRetryIds?.includes(call.id) || transcriptFor(agent.id).find(call.id)) return `Asked ${nameOf(agent)} to try again.`;
   checkRoom(workspace, agent);
   checkOneWriter(lead, agent.work?.job, agent);
   await retrySession(agent, 'lead', call.id);

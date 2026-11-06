@@ -781,6 +781,45 @@ describe('closing a Lead', () => {
 });
 
 describe('restarts', () => {
+  it('does not repeat completed queued work when a retry reply cannot be saved', async () => {
+    const { workspace, lead } = await newWorkspace();
+    await send(lead.id, spawn('Retry once', 'SLOW wait for follow-up', { job: 'implement' }));
+    await until('the agent to run', async () => (await agents(workspace))[0]?.status === 'running');
+    await lonca.waitForIdle(lead.id);
+    const [agent] = await agents(workspace);
+    const queued = await send(agent.id, 'RUN: echo retried >> retry-count.txt');
+    await send(lead.id, tool('stop_agent', { id: agent.id }));
+    await waitForTool(lead, (item) => item.title === 'Stopped');
+    await until('the agent to stop', async () => (await lonca.session(agent.id)).status === 'idle');
+    await lonca.waitForIdle(lead.id);
+    expect(await lonca.session(agent.id)).toMatchObject({ held: true, queue: [queued.id] });
+
+    const before = mock.requests.length;
+    await send(lead.id, `SLOW ${tool('retry_agent', { id: agent.id })}`);
+    await until('the retry model request', () => mock.requests.slice(before).some((request) => request.body.includes('SLOW TOOL: retry_agent')));
+    const run = (await lonca.session(lead.id)).activeRunId;
+    const replies = `/var/tmp/lonca/agent-runs/${run}/replies`;
+    // Only the tool reply fails to save. The queue release and its agent's work still succeed.
+    expect(sandboxExec(workspace.sandboxName, `chmod a-w '${replies}'`).code).toBe(0);
+    const logStart = lonca.log.length;
+    try {
+      await until('the queued work to finish', async () => (await lonca.session(agent.id)).lastOutcome === 'completed');
+      await until('the reply write to fail', () => lonca.log.slice(logStart).includes('could not answer a tool call'));
+      expect(sandboxExec(workspace.sandboxName, `cat '${workspace.path}/retry-count.txt'`).output).toBe('retried');
+      const accepted = users(await lonca.items(agent.id)).map((item) => item.id);
+      await lonca.kill();
+      expect(sandboxExec(workspace.sandboxName, `chmod u+w '${replies}'`).code).toBe(0);
+      await lonca.start();
+      const reply = await waitForTool(lead, (item) => item.title === 'Asked to try again:');
+      expect(reply.status).toBe('done');
+      await settled(lead);
+      expect(sandboxExec(workspace.sandboxName, `cat '${workspace.path}/retry-count.txt'`).output).toBe('retried');
+      expect(users(await lonca.items(agent.id)).map((item) => item.id)).toEqual(accepted);
+    } finally {
+      sandboxExec(workspace.sandboxName, `chmod u+w '${replies}'`);
+    }
+  });
+
   it('handles a tool call the Lead made while the server was down', async () => {
     const { workspace, lead } = await newWorkspace();
     await send(lead.id, `SLOW ${spawn('Born during downtime', 'hello')}`);

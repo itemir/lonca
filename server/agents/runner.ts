@@ -846,15 +846,19 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
   return canStart && !session.queue.includes(item.id) ? { ...item, queued: false } : item;
 }
 
-/** Sends messages left waiting after the user pressed Stop. */
-export async function flushQueue(sessionId: string): Promise<void> {
+/** Releases waiting messages, saving a Lead retry's receipt in the same state write. */
+export async function flushQueue(sessionId: string, retryId?: string): Promise<void> {
   const session = getSession(sessionId);
   if (!session) throw new HttpError(404, 'No such session');
+  if (retryId && session.queueRetryIds?.includes(retryId)) return;
   if (deletingSessions.has(sessionId)) throw new HttpError(409, 'This conversation is closing.');
   const workspace = getWorkspace(session.workspaceId);
   if (!workspace) throw new HttpError(404, 'No such workspace');
   if (NOT_ACCEPTING.has(workspace.status)) throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
-  releaseQueueHold(session, session.role === 'lead' ? { autonomousTurns: 0 } : {});
+  releaseQueueHold(session, {
+    ...(session.role === 'lead' ? { autonomousTurns: 0 } : {}),
+    ...(retryId ? { queueRetryIds: [...(session.queueRetryIds ?? []), retryId] } : {}),
+  });
   if ((workspace.status === 'stopped' || workspace.status === 'ready') && session.queue.length > 0) await startWorkspace(workspace);
   startNextQueued(session);
 }
