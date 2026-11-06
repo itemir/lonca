@@ -27,7 +27,7 @@ import { sessionSnapshot } from './transcript.ts';
 import { HttpError, errorMessage, newId } from './util.ts';
 import {
   archiveWorkspace, configuredSetupScript, createWorkspace, deleteWorkspace, publishWorkspace, rebuildWorkspace, restoreWorkspace,
-  applyCodexSetup, retryWorkspace, runningSandbox, startWorkspace, stopWorkspace,
+  applyCodexSetup, applyCodexSetupEverywhere, retryWorkspace, runningSandbox, startWorkspace, stopWorkspace,
 } from './workspaces.ts';
 
 const execFileAsync = promisify(execFile);
@@ -524,6 +524,7 @@ export function createApi(me: AppState['me']): Router {
     if (check === 'refused') throw new HttpError(400, 'OpenAI didn’t accept this key.');
     await logins.cancel('codex');
     saveCodexApiKey(key);
+    applyCodexSetupEverywhere();
     clearAgentRejected('codex');
     await refreshAgents();
     res.json({ verified: check === 'accepted' });
@@ -533,8 +534,10 @@ export function createApi(me: AppState['me']): Router {
     const agent = agentParam(req);
     // Finishing one that's under way would sign back in.
     await logins.cancel(agent);
-    if (agent === 'codex') signOutCodex();
-    else {
+    if (agent === 'codex') {
+      signOutCodex();
+      applyCodexSetupEverywhere();
+    } else {
       updateSecrets({ claudeToken: '' });
       publishSettings();
     }

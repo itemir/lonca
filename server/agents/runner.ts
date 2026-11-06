@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type { AgentId, AgentJob, AgentWork, Attachment, ChatItem, LeadChoice, Project, Session, ToolItem, TurnOutcome, UserItem, Workspace } from '../../shared/types.ts';
-import { MAX_AUTONOMOUS_TURNS } from '../../shared/lead.ts';
+import { MAX_AUTONOMOUS_TURNS, staysHeld } from '../../shared/lead.ts';
 import { RUNS_DIR } from '../config.ts';
 import { execEnv } from '../env.ts';
 import { exec, execStream, execText, isSandboxRunning, sandboxState, type OutputStream } from '../sandbox.ts';
@@ -613,8 +613,7 @@ function outcomeOf(run: ActiveRun, session: Session): Partial<Session> {
  */
 function playbookUpdate(session: Session, run: ActiveRun, content: string | undefined): string | undefined {
   if (content === undefined) return undefined;
-  // Older hashes meant only "prepared", so those Leads need one confirmed delivery too.
-  run.playbookVersion = `delivered:${crypto.createHash('sha256').update(content).digest('hex').slice(0, 16)}`;
+  run.playbookVersion = crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
   const changed = session.playbookVersion !== run.playbookVersion;
   // The CLI may retain this edit even if the turn stops or the server crashes. Invalidate the
   // old acknowledgment before delivery, so reverting the edit will still be sent next time.
@@ -843,8 +842,7 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
       ...(session.work && fromUser ? { work: { ...session.work, userNote: text.slice(0, 1000) } } : {}),
       ...(session.work && options.job ? { work: { ...session.work, job: options.job } } : {}),
     };
-    const keepHeld = options.keepHeld && session.held && (session.userStopped || session.lastOutcome !== 'stopped');
-    if (keepHeld) persistSession(session, { ...patch, held: true }, options.receipt);
+    if (options.keepHeld && staysHeld(session)) persistSession(session, { ...patch, held: true }, options.receipt);
     else releaseQueueHold(session, patch, options.receipt);
   } catch (error) {
     if (locksLead) delete workspace.leadLockedAt;
@@ -874,18 +872,14 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
 }
 
 /** Releases waiting messages, saving a Lead retry's receipt in the same state write. */
-export async function flushQueue(sessionId: string, retryId?: string, receipt?: ToolReceipt): Promise<void> {
+export async function flushQueue(sessionId: string, receipt?: ToolReceipt): Promise<void> {
   const session = getSession(sessionId);
   if (!session) throw new HttpError(404, 'No such session');
-  if (retryId && session.queueRetryIds?.includes(retryId)) return;
   if (deletingSessions.has(sessionId)) throw new HttpError(409, 'This conversation is closing.');
   const workspace = getWorkspace(session.workspaceId);
   if (!workspace) throw new HttpError(404, 'No such workspace');
   if (NOT_ACCEPTING.has(workspace.status)) throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
-  releaseQueueHold(session, {
-    ...(session.role === 'lead' ? { autonomousTurns: 0 } : {}),
-    ...(retryId ? { queueRetryIds: [...(session.queueRetryIds ?? []), retryId] } : {}),
-  }, receipt);
+  releaseQueueHold(session, session.role === 'lead' ? { autonomousTurns: 0 } : {}, receipt);
   if ((workspace.status === 'stopped' || workspace.status === 'ready') && session.queue.length > 0) await startWorkspace(workspace);
   startNextQueued(session);
 }

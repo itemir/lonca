@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type { AgentId, AgentJob, ChatItem, LeadChoice, NoticeItem, Session, TextItem, ToolItem, UserItem, Workspace } from '../../shared/types.ts';
-import { canRun, isWorking, leadBlocker } from '../../shared/lead.ts';
+import { canRun, isWorking, leadBlocker, staysHeld } from '../../shared/lead.ts';
 import { notifyUser } from '../notify.ts';
 import { getProject, getSession, getWorkspace, state } from '../store.ts';
 import { system } from '../system.ts';
@@ -8,7 +8,6 @@ import { transcriptFor } from '../transcript.ts';
 import { HttpError } from '../util.ts';
 import { publishWorkspace, startWorkspace } from '../workspaces.ts';
 import type { ToolCall } from './process.ts';
-import { newJobNote } from './prompt.ts';
 import {
   agentsOf, closeLead, createLead, createSession, flushQueue, interruptSession, leadOf, notice, persistSession, publishSession, sendMessage, setTeamHooks, startNextQueued,
   type ToolReceipt,
@@ -120,20 +119,9 @@ function findModel(workspace: Workspace, id: string): { agent: AgentId; efforts:
   throw new ToolError(`There's no model called ${id}. You can use:\n${usableModels(workspace)}`);
 }
 
-/** Older servers had no receipts. A transcript write alone wasn't acceptance until state saved. */
-function acceptedMessage(session: Session, id: string): boolean {
-  const item = transcriptFor(session.id).find(id);
-  return item?.type === 'user' && (!item.queued || session.queue.includes(id));
-}
-
-// Save acceptance before starting work, so replay can return the same reply even if
-// the user cancels the message or deletes its agent before that reply reaches the CLI.
+// The receipt is saved with the message, so replay can return the same reply even if the user
+// cancels the message or deletes its agent before that reply reaches the CLI.
 function deliver(session: Session, call: ToolCall, text: string, receipt: ToolReceipt, job?: AgentJob): Promise<unknown> {
-  if (acceptedMessage(session, call.id)) {
-    // A call accepted by an older server may have only its transcript item as evidence.
-    persistSession(session, {}, receipt);
-    return Promise.resolve();
-  }
   return sendMessage(session.id, text, [], { id: call.id, from: 'lead', keepHeld: true, receipt, job });
 }
 
@@ -165,17 +153,17 @@ async function messageAgent(lead: Session, workspace: Workspace, call: ToolCall)
   if (newJob && agent.status === 'running') throw new ToolError(`${nameOf(agent)} is still working. Give it a new job once it's finished.`);
   // Earlier messages still carry the old job's instructions, even while their queue is held.
   if (newJob && agent.queue.length > 0) throw new ToolError(`${nameOf(agent)} has messages waiting. Let them finish before changing its job.`);
-  // Messages can resume a Lead stop; user stops and automatic pauses keep them waiting.
-  if (!agent.held || (!agent.userStopped && agent.lastOutcome === 'stopped')) {
+  // Held messages aren't about to start anything.
+  if (!staysHeld(agent)) {
     checkRoom(workspace, agent);
     checkOneWriter(lead, job ?? agent.work?.job, agent);
   }
   const reply = agent.userStopped
     ? `${nameOf(agent)} was stopped by the user, so your message waits until they release it. Tell them if you need it.`
-    : agent.held && agent.lastOutcome !== 'stopped'
+    : staysHeld(agent)
       ? `${nameOf(agent)} is paused, so your message is queued. Use retry_agent when it can continue.`
       : `Sent to ${nameOf(agent)}. End your turn: Lonca wakes you when it answers.`;
-  await deliver(agent, call, newJob ? `${newJobNote(job)}\n\n${text}` : text, { lead, id: call.id, reply: { text: reply } }, job);
+  await deliver(agent, call, text, { lead, id: call.id, reply: { text: reply } }, job);
   return reply;
 }
 
@@ -230,14 +218,13 @@ function continuation(session: Session): string {
 /** Works for a usage limit or a failure, which a conversation survives. */
 async function retrySession(session: Session, from: UserItem['from'], id?: string, receipt?: ToolReceipt): Promise<void> {
   if (session.status === 'running') throw new HttpError(409, `${nameOf(session)} is already working.`);
-  if (session.queue.length > 0) return flushQueue(session.id, id, receipt);
+  if (session.queue.length > 0) return flushQueue(session.id, receipt);
   await sendMessage(session.id, continuation(session), [], { id, from, summary: TRYING_AGAIN, receipt });
 }
 
 async function retryAgent(lead: Session, workspace: Workspace, call: ToolCall): Promise<string> {
   const agent = agentArg(lead, call.args);
   if (agent.userStopped) return `${nameOf(agent)} was stopped by the user. Ask them before it continues.`;
-  if (agent.queueRetryIds?.includes(call.id) || acceptedMessage(agent, call.id)) return `Asked ${nameOf(agent)} to try again.`;
   checkRoom(workspace, agent);
   checkOneWriter(lead, agent.work?.job, agent);
   const text = `Asked ${nameOf(agent)} to try again. End your turn: Lonca wakes you when it finishes.`;

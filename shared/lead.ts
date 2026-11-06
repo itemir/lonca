@@ -7,6 +7,11 @@ export function isWorking(session: Session): boolean {
   return session.status === 'running' || (session.queue.length > 0 && !session.held);
 }
 
+/** Whether a message from the Lead leaves this session's queue waiting. Only a Stop by the Lead is lifted by its next message. */
+export function staysHeld(session: Session): boolean {
+  return Boolean(session.held) && (Boolean(session.userStopped) || session.lastOutcome !== 'stopped');
+}
+
 /** Whether a workspace in this project can run this CLI. A project can bring its own key, which sign-in status doesn't know about. */
 export function canRun(agent: AgentId, system: SystemStatus, project: Pick<Project, 'settings'> | undefined): boolean {
   const status = system.agents[agent];

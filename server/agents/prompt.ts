@@ -38,11 +38,6 @@ const JOB_INSTRUCTIONS: Record<AgentJob, string> = {
   implement: 'Your job is to implement. You\'re the only agent changing files right now. Commit your work on this branch when it\'s ready, and say what you ran to check it. Don\'t push: the Lead does that.',
 };
 
-/** Keep the job change visible in the Lead's message. */
-export function newJobNote(job: AgentJob): string {
-  return `Update from the Lead: your job has changed, and this replaces what you were told about your job. ${JOB_INSTRUCTIONS[job]}`;
-}
-
 /**
  * Claude keeps its original system prompt. Restate the saved job after each request, since a queued
  * job-change notice can be cancelled and a retry can repeat instructions for an older job.

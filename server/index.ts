@@ -12,12 +12,12 @@ import { HTTP_PORT, LONCA_HOME, WEB_DIST } from './config.ts';
 import { subscribe } from './events.ts';
 import { setClientFocus } from './notify.ts';
 import { flushState, flushTranscripts, saveState, state } from './store.ts';
-import { checkSandboxes, ensureSandboxImage, moveCodexLogin, onSandboxesReady, refreshAgents, refreshCodexCatalog, setCodexSetupUpdater, system } from './system.ts';
+import { checkSandboxes, ensureSandboxImage, moveCodexLogin, onSandboxesReady, refreshAgents, refreshCodexCatalog, system } from './system.ts';
 import { attachTerminal, closeWorkspaceTerminals, reconcileTerminals, runSetupScript } from './terminals.ts';
 import { reapLeftoverLogins } from './logins.ts';
 import { abortImports, reconcileProjects } from './projects.ts';
 import { errorMessage } from './util.ts';
-import { applyCodexSetup, markInterruptedWork, onWorkspaceTeardown, reconcileWorkspaces, setSetupScriptStarter } from './workspaces.ts';
+import { markInterruptedWork, onWorkspaceTeardown, reconcileWorkspaces, setSetupScriptStarter } from './workspaces.ts';
 
 function hostGitConfig(key: string): string {
   try {
@@ -147,7 +147,6 @@ async function watchSandboxes(): Promise<void> {
   }
 }
 
-setCodexSetupUpdater(async () => { await Promise.all(state.projects.map(applyCodexSetup)); });
 moveCodexLogin();
 reconcileProjects();
 markInterruptedWork();

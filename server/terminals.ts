@@ -439,6 +439,15 @@ export function closeTerminalWindow(id: string): void {
   terminals.get(id)?.closeWindow();
 }
 
+/** A terminal can be how someone finds out what's wrong with Codex, so it opens either way. */
+async function setUpCodexIfPossible(workspace: Workspace): Promise<void> {
+  try {
+    await setUpCodex(workspace);
+  } catch (error) {
+    console.error(`could not set Codex up in ${workspace.name}:`, errorMessage(error));
+  }
+}
+
 export function createShell(workspace: Workspace): Promise<TerminalInfo> {
   return scriptQueue.run(workspace.id, () => startShell(workspace));
 }
@@ -447,7 +456,7 @@ async function startShell(workspace: Workspace): Promise<TerminalInfo> {
   const project = getProject(workspace.projectId);
   const sandbox = await runningSandbox(workspace);
   if (workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
-  await setUpCodex(workspace);
+  await setUpCodexIfPossible(workspace);
   const existing = [...terminals.values()].filter((terminal) => terminal.info.workspaceId === workspace.id && terminal.info.kind === 'shell');
   const id = newId();
   const terminal = new Terminal({
@@ -470,7 +479,7 @@ export function restartShell(workspace: Workspace, id: string): Promise<void> {
     if (terminal.info.status === 'running' && !terminal.info.disconnected) return;
     const sandbox = await runningSandbox(workspace);
     if (workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
-    await setUpCodex(workspace);
+    await setUpCodexIfPossible(workspace);
     await terminal.stop();
     await terminal.start(sandbox, ['bash', '--login'], { env: execEnv(getProject(workspace.projectId)), workdir: workspace.path });
   });
@@ -527,7 +536,7 @@ export function runSetupScript(workspace: Workspace, script: string): Promise<Te
 async function startScript(workspace: Workspace, script: string): Promise<TerminalInfo> {
   const sandbox = await runningSandbox(workspace);
   if (workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
-  await setUpCodex(workspace);
+  await setUpCodexIfPossible(workspace);
   const id = `${workspace.id}-setup`;
   let terminal = terminals.get(id);
   if (terminal) {

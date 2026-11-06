@@ -252,8 +252,6 @@ export interface Session {
   stopRequested?: { holdQueue: boolean };
   /** Ids of user items waiting for the current turn to finish. */
   queue: string[];
-  /** Lead retry calls saved with a queue release, so replay cannot repeat completed work. */
-  queueRetryIds?: string[];
   /** Queued messages wait for a decision, including after a stop, usage limit or failure. */
   held?: boolean;
   /** A team session stopped by the user. Only another user action can release it. */

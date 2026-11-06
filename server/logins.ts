@@ -7,6 +7,7 @@ import { exec, execText, execTty } from './sandbox.ts';
 import { secretsStatus, state, updateSecrets } from './store.ts';
 import { adoptCodexLogin, agentLoginCommand, checkClaudeCredential, clearAgentRejected, helperRunning, helperSandbox, refreshAgents } from './system.ts';
 import { newId } from './util.ts';
+import { applyCodexSetupEverywhere } from './workspaces.ts';
 
 // Each attempt has a directory of its own, since one being cancelled can overlap the next one
 // starting. It holds the CLI's pid and is Codex's home, so that a login can only be taken from
@@ -75,6 +76,7 @@ export const logins = new LoginManager({
   },
   async finishCodexLogin(login) {
     if (!adoptCodexLogin(login)) return false;
+    applyCodexSetupEverywhere();
     clearAgentRejected('codex');
     await refreshAgents();
     return true;

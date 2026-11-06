@@ -290,7 +290,9 @@ describe('a Lead and its agents', () => {
     await until('its new job', async () => (await lonca.session(reader.id)).work?.job === 'implement');
     await settled(lead);
     expect((await lonca.session(reader.id)).work?.filesChanged).toBeFalsy();
-    expect(users(await lonca.items(reader.id)).at(-1)?.text).toContain('your job has changed');
+    const told = mock.requests.findLast((request) => request.body.includes('You work for the Lead') && request.body.includes('echo fine > allowed.txt'));
+    expect(told?.body).toContain('current job instructions');
+    expect(told?.body).toContain('Your job is to implement.');
   });
 
   it('tells the Lead what the user said to an agent, and keeps an agent the user stopped stopped', async () => {
@@ -391,10 +393,10 @@ describe('queued jobs and Lead stops', () => {
     expect(agent.resumeId).toBeTruthy();
 
     if (method === 'retry') {
-      // A retry repeats the last request, including any old job-change instructions it carried.
+      // A retry repeats the last request, which was made under the old job.
       await send(lead.id, tool('message_agent', { id: agent.id, job: 'review', text: 'EARLIER-REVIEW-REQUEST' }));
       await settled(lead);
-      expect(users(await lonca.items(agent.id)).at(-1)?.text).toContain('Your job is to review.');
+      expect(users(await lonca.items(agent.id)).at(-1)?.text).toBe('EARLIER-REVIEW-REQUEST');
     }
     const job = method === 'message' ? 'review' : 'implement';
     await lonca.api('POST', `/sessions/${agent.id}/interrupt`);

@@ -141,6 +141,14 @@ export async function applyCodexSetup(project: Project): Promise<void> {
   })));
 }
 
+/**
+ * Which address Codex uses follows the kind of sign-in, which every project shares. Nothing waits
+ * for this, because a turn, terminal or script sets Codex up before it starts anyway.
+ */
+export function applyCodexSetupEverywhere(): void {
+  for (const project of state.projects) void applyCodexSetup(project);
+}
+
 /** Observes a workspace's sandbox without waking it for reads or automatic terminals. */
 export async function runningSandbox(workspace: Workspace): Promise<string> {
   if (workspace.status !== 'ready') {

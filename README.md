@@ -160,7 +160,7 @@ sbx ls -q | grep '^lonca-' | xargs sbx rm --force
 sbx template ls -q | grep lonca-sandbox | xargs sbx template rm --force
 ```
 
-If you used Lonca when workspaces ran in containers, startup first stops those containers and confirms they have stopped before migrating their saved workspaces. If Docker cannot be reached, startup leaves the saved state unchanged: start Docker and run Lonca again. A workspace from then gets a virtual machine the next time it starts. Its files are kept, and its agents' conversations start afresh. These commands remove what's left of the old containers after migration.
+If you used Lonca when workspaces ran in containers, this removes what's left of that. Do it before starting this version, because agents can still be running in those containers. A workspace from then gets a virtual machine the next time it starts. Its files are kept, and its agents' conversations start afresh.
 
 ```sh
 docker ps -aq --filter label=dev.lonca.instance=lonca | xargs docker rm -f

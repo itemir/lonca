@@ -98,17 +98,16 @@ it.each(['message_agent', 'retry_agent'])('does not mistake an orphaned transcri
   expect(saved(lead.id).toolReplies?.[request.id]).toEqual(reply);
 });
 
-it.each(['message_agent', 'retry_agent'])('keeps an accepted %s from an older server deduplicated after cancellation', async (tool) => {
-  const request = call(tool, { id: agent.id, text: 'Already accepted.' });
-  await runner.sendMessage(agent.id, 'Already accepted.', [], { id: request.id, from: 'lead' });
+it('does not release a later user stop when an earlier retry is replayed', async () => {
+  await runner.sendMessage(agent.id, 'Already queued.', [], { from: 'lead' });
   runner.persistSession(agent, { held: true, lastOutcome: 'limit' });
+  const request = call('retry_agent', { id: agent.id });
   const reply = await team.handleToolCall(lead, request);
-  expect(reply.failed).toBeUndefined();
-  expect(saved(agent.id)).toMatchObject({ queue: [request.id], held: true });
-  expect(saved(lead.id).toolReplies?.[request.id]).toEqual(reply);
-  runner.cancelQueued(agent.id, request.id);
+  expect(reply.failed, reply.text).toBeUndefined();
+  expect(saved(agent.id).held).toBe(false);
+  runner.persistSession(agent, { held: true, userStopped: true });
   expect(await team.handleToolCall(lead, request)).toEqual(reply);
-  expect(agent).toMatchObject({ queue: [], held: true });
+  expect(agent).toMatchObject({ held: true, userStopped: true });
 });
 
 it('keeps a retry refused by a user stop refused after the user resumes', async () => {
@@ -142,6 +141,6 @@ it.each(['message_agent', 'retry_agent'])('rolls back the %s mutation and receip
   expect(reply.failed).toBeUndefined();
   expect(saved(lead.id).toolReplies?.[request.id]).toEqual(reply);
   expect(saved(agent.id)).toMatchObject(name === 'retry_agent'
-    ? { held: false, queue, queueRetryIds: [request.id] }
+    ? { held: false, queue }
     : { held: true, queue: [request.id], work: { job: 'implement' } });
 });

@@ -4,9 +4,9 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import type { Workspace } from '../../shared/types.ts';
 
-const { state, isSandboxRunning, execText, execTty } = vi.hoisted(() => ({
+const { state, isSandboxRunning, execText, execTty, setUpCodex } = vi.hoisted(() => ({
   state: { workspaces: [] as Workspace[] },
-  isSandboxRunning: vi.fn(), execText: vi.fn(), execTty: vi.fn(),
+  isSandboxRunning: vi.fn(), execText: vi.fn(), execTty: vi.fn(), setUpCodex: vi.fn(),
 }));
 vi.mock('../../server/sandbox.ts', () => ({ isSandboxRunning, stopSandbox: vi.fn(), execText, execTty }));
 vi.mock('../../server/env.ts', () => ({ execEnv: () => [] }));
@@ -14,7 +14,7 @@ vi.mock('../../server/events.ts', () => ({ publish: vi.fn() }));
 vi.mock('../../server/store.ts', () => ({ state, flushState: vi.fn(), getProject: vi.fn() }));
 vi.mock('../../server/system.ts', () => ({ system: { sandbox: { state: 'ready' } } }));
 vi.mock('../../server/workspaces.ts', () => ({
-  publishWorkspace: vi.fn(), runningSandbox: async () => 'test', setUpCodex: vi.fn(),
+  publishWorkspace: vi.fn(), runningSandbox: async () => 'test', setUpCodex,
 }));
 
 let workspace: Workspace;
@@ -46,6 +46,17 @@ function socket(): WebSocket {
     close: vi.fn(),
   }) as unknown as WebSocket;
 }
+
+it('opens a terminal even when Codex can’t be set up', async () => {
+  const terminals = await import('../../server/terminals.ts');
+  state.workspaces.push(workspace);
+  setUpCodex.mockRejectedValue(new Error('mktemp: Permission denied'));
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const terminal = await terminals.createShell(workspace);
+  expect(terminal.status).toBe('running');
+  expect(error).toHaveBeenCalledWith(expect.stringContaining('could not set Codex up'), 'mktemp: Permission denied');
+  terminals.closeTerminalWindow(terminal.id);
+});
 
 it('keeps a dismissed window from reclaiming its terminal after a disconnect', async () => {
   const terminals = await import('../../server/terminals.ts');
