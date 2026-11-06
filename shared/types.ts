@@ -11,11 +11,28 @@ export interface ModelOption {
 
 export type Catalog = Record<AgentId, { label: string; models: ModelOption[] }>;
 
+/**
+ * One of a provider's sign-ins, which the page calls a sign-in. Its credentials are kept apart,
+ * on this computer. The first of each provider's is its default, for whatever doesn't choose.
+ */
+export interface Profile {
+  /** The provider's own id for the sign-in each had before there could be several, so that older conversations keep theirs. */
+  id: string;
+  agent: AgentId;
+  /** Blank for one nobody has named, which shows as the provider's name. */
+  name: string;
+  /** Conversations at a usage limit elsewhere can move here by themselves. Off unless the user turns it on. */
+  autoSwitch?: boolean;
+  createdAt: number;
+}
+
 /** The model and thinking level a workspace's Lead runs on. */
 export interface LeadChoice {
   agent: AgentId;
   model: string;
   effort: string;
+  /** The sign-in, of `agent`'s, which is its default if this is missing or gone. */
+  profileId?: string;
 }
 
 export interface ProjectSettings {
@@ -186,6 +203,8 @@ export interface NoticeItem extends ChatItemBase {
   code?: 'auth' | 'limit';
   /** When a usage limit ends, if the service said. */
   resetsAt?: number;
+  /** The sign-in the turn ran on, for a limit or a refusal. */
+  profileId?: string;
 }
 
 export interface ResultItem extends ChatItemBase {
@@ -233,6 +252,8 @@ export interface Session {
   lastOutcome?: TurnOutcome;
   /** When the usage limit that ended its latest turn ends, if known. */
   limitResetsAt?: number;
+  /** The sign-in whose usage limit ended its latest turn. */
+  limitProfileId?: string;
   /** Has a result nobody has read. On a Lead, this means it needs the user. */
   unread?: boolean;
   /** A Lead's turns since the user last wrote, which stops a team running forever unattended. */
@@ -244,6 +265,10 @@ export interface Session {
   agent: AgentId;
   model: string;
   effort: string;
+  /** The sign-in its next turn runs on. Missing on conversations from before there could be several, which ran on the one whose id is `agent`. */
+  profileId?: string;
+  /** The sign-in of the turn that's running, which a move to another only changes from the next one. */
+  activeProfileId?: string;
   status: 'idle' | 'running';
   /** Conversation id in the agent CLI, used to resume between turns. */
   resumeId: string | null;
@@ -288,6 +313,13 @@ export interface AgentStatus {
   rejected?: boolean;
 }
 
+export interface ProfileStatus extends AgentStatus {
+  /** When a turn on it last reached the service's usage limit. */
+  limitedAt?: number;
+  /** When that limit ends, if the service said. */
+  limitResetsAt?: number;
+}
+
 export type LoginPhase = 'starting' | 'waiting' | 'submitting' | 'saving' | 'done' | 'failed';
 
 export type LoginFailure =
@@ -307,6 +339,8 @@ export type LoginMethod = 'browser' | 'device';
 /** A sign-in under way. It never includes a credential, so it's safe to send to the browser. */
 export interface LoginState {
   agent: AgentId;
+  /** Which of the provider's sign-ins this is for. */
+  profileId: string;
   method: LoginMethod;
   phase: LoginPhase;
   /** The page to open in a browser. It sends the browser back to Lonca, unless there's a `code`. */
@@ -354,7 +388,10 @@ export interface SystemStatus {
   /** The last sign-in to Docker Sandboxes from Lonca, if there's been one since it started. */
   dockerLogin?: DockerLoginState;
   image: { tag: string; state: 'unknown' | 'building' | 'ready' | 'error'; log: string; error?: string };
+  /** Each provider's first sign-in, or the one it had before there could be several, for pages from before then. */
   agents: Record<AgentId, AgentStatus>;
+  /** Every sign-in's, by its id. */
+  profiles: Record<string, ProfileStatus>;
   /** False until sign-in status has been checked once, before which "signed out" means nothing. */
   agentsChecked: boolean;
   /** Set while this computer's disk is nearly full, which can turn virtual machines' disks read-only. */
@@ -398,7 +435,9 @@ export interface AppState {
   workspaces: Workspace[];
   sessions: Session[];
   terminals: TerminalInfo[];
-  logins: Partial<Record<AgentId, LoginState>>;
+  profiles: Profile[];
+  /** By sign-in. */
+  logins: Partial<Record<string, LoginState>>;
   system: SystemStatus;
   catalog: Catalog;
   settings: AppSettings;
@@ -487,7 +526,8 @@ export type ServerEvent =
   | { type: 'chat.remove'; sessionId: string; seq: number; itemId: string }
   | { type: 'terminal'; terminal: TerminalInfo }
   | { type: 'terminal.removed'; id: string; workspaceId: string }
-  | { type: 'login'; agent: AgentId; login: LoginState | null }
+  | { type: 'login'; agent: AgentId; profileId: string; login: LoginState | null }
+  | { type: 'profiles'; profiles: Profile[] }
   | { type: 'system'; system: SystemStatus; catalog: Catalog }
   | { type: 'settings'; settings: AppSettings; secrets: SecretsStatus };
 

@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Check } from 'lucide-react';
+import { agentOfProfileId, hasSeveral, profileName, profileStatus } from '../../../shared/profiles.ts';
 import type { AgentId, LoginFailure, LoginMethod, LoginState } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { safeUrl } from '../format.ts';
+import { useIsPhone } from '../hooks.ts';
 import { useStore } from '../store.ts';
 import { Modal, Spinner } from './ui.tsx';
+
+/** Before a second Claude sign-in, since the page signs in whoever the browser already is. */
+export const CLAUDE_ACCOUNT_HINT = 'Claude signs in with the account your browser is using on claude.ai. To add a different account, switch accounts there first, or open the sign-in page in a private window.';
 
 const SUCCESS_HOLD_MS = 1500;
 
@@ -129,7 +134,8 @@ function BrowserSteps({ login, otherWay, onOtherWay }: {
 
 const ANOTHER_SERVICE_KEY = 'That’s a key for another service. Claude keys start with sk-ant-.';
 
-function ClaudeSteps({ login, code, setCode, codeError, setCodeError, onUseAsKey }: {
+function ClaudeSteps({ profileId, login, code, setCode, codeError, setCodeError, onUseAsKey }: {
+  profileId: string;
   login: LoginState | undefined;
   code: string;
   setCode: (value: string) => void;
@@ -158,7 +164,7 @@ function ClaudeSteps({ login, code, setCode, codeError, setCodeError, onUseAsKey
     }
     setCodeError(null);
     try {
-      await api.submitLoginCode('claude', code);
+      await api.submitLoginCode(profileId, code);
     } catch (failure) {
       setCodeError((failure as Error).message);
       input.current?.select();
@@ -304,7 +310,8 @@ function CodexSteps({ login }: { login: LoginState | undefined }) {
   );
 }
 
-function KeyForm({ agent, name, initial, onSaved, onCancel, onUseAsCode, onChecking }: {
+function KeyForm({ profileId, agent, name, initial, onSaved, onCancel, onUseAsCode, onChecking }: {
+  profileId: string;
   agent: AgentId;
   name: string;
   initial: string;
@@ -343,7 +350,7 @@ function KeyForm({ agent, name, initial, onSaved, onCancel, onUseAsCode, onCheck
     setError(null);
     setNotAKey(false);
     try {
-      const { verified } = isClaude ? await api.saveClaudeToken(trimmed) : await api.saveCodexKey(trimmed);
+      const { verified } = await api.saveKey(profileId, trimmed);
       onSaved(verified);
     } catch (failure) {
       setError((failure as Error).message);
@@ -399,19 +406,24 @@ function KeyForm({ agent, name, initial, onSaved, onCancel, onUseAsCode, onCheck
   );
 }
 
-function LoginFlow({ agent }: { agent: AgentId }) {
-  const latest = useStore((store) => store.logins[agent]);
+function LoginFlow({ profileId, agent }: { profileId: string; agent: AgentId }) {
+  const latest = useStore((store) => store.logins[profileId]);
   // An attempt that ended before this window opened, perhaps in another tab, is none of its business.
   const [leftOver] = useState(() => (latest?.phase === 'failed' || latest?.phase === 'done' ? latest : null));
   const login = latest === leftOver ? undefined : latest;
-  const status = useStore((store) => store.system.agents[agent]);
+  const status = useStore((store) => profileStatus(store.system, profileId));
   const applyEvent = useStore((store) => store.apply);
-  const setLoginAgent = useStore((store) => store.setLoginAgent);
+  const setLoginProfile = useStore((store) => store.setLoginProfile);
+  const profile = useStore((store) => store.profiles.find((entry) => entry.id === profileId));
+  const catalog = useStore((store) => store.catalog);
+  const several = useStore((store) => hasSeveral(store.profiles, agent));
   const isClaude = agent === 'claude';
-  const name = isClaude ? 'Claude' : 'Codex';
+  const name = profile ? profileName(profile, catalog) : isClaude ? 'Claude' : 'Codex';
+  // A phone is rarely the computer Lonca runs on, which the sign-in page comes back to.
+  const phone = useIsPhone();
   const [route, setRoute] = useState<'account' | 'key'>(status.rejected && status.usesKey ? 'key' : 'account');
   const [savedKey, setSavedKey] = useState<{ verified: boolean } | null>(null);
-  const [pasting, setPasting] = useState(false);
+  const [pasting, setPasting] = useState(phone && isClaude);
   const [code, setCode] = useState('');
   const [codeError, setCodeError] = useState<string | null>(null);
   const [keyDraft, setKeyDraft] = useState('');
@@ -432,16 +444,16 @@ function LoginFlow({ agent }: { agent: AgentId }) {
     setCode('');
     setCodeError(null);
     setOutputOpen(false);
-    api.startLogin(agent, how).then(
-      (state) => applyEvent({ type: 'login', agent, login: state }),
+    api.startLogin(profileId, how).then(
+      (state) => applyEvent({ type: 'login', agent, profileId, login: state }),
       (failure: Error) => setStartFailure(failure.message),
     ).finally(() => setStarting(false));
-  }, [agent, applyEvent]);
+  }, [agent, profileId, applyEvent]);
 
   useEffect(() => {
-    if (route === 'account' && !started.current && !login) start('browser');
+    if (route === 'account' && !started.current && !login) start(phone && !isClaude ? 'device' : 'browser');
     if (login) started.current = true;
-  }, [route, login, start]);
+  }, [route, login, start, phone, isClaude]);
 
   // The page that comes back couldn't be offered, so the code is the way in.
   useEffect(() => {
@@ -449,9 +461,9 @@ function LoginFlow({ agent }: { agent: AgentId }) {
   }, [login?.pasteUrl, login?.url]);
 
   const close = useCallback(() => {
-    void api.cancelLogin(agent).catch(() => {});
-    setLoginAgent(null);
-  }, [agent, setLoginAgent]);
+    void api.cancelLogin(profileId).catch(() => {});
+    setLoginProfile(null);
+  }, [profileId, setLoginProfile]);
 
   const finished = login?.phase === 'done' || savedKey?.verified === true;
 
@@ -475,8 +487,8 @@ function LoginFlow({ agent }: { agent: AgentId }) {
   // A sign-in can't survive the server restarting. If that isn't what happened, another tab ended it.
   const interrupted = missing && lostServer.current;
   useEffect(() => {
-    if (missing && !lostServer.current) setLoginAgent(null);
-  }, [missing, setLoginAgent]);
+    if (missing && !lostServer.current) setLoginProfile(null);
+  }, [missing, setLoginProfile]);
   const failure = failed
     ? failureCopy(login.failure, name, login.message)
     : startFailure
@@ -491,13 +503,13 @@ function LoginFlow({ agent }: { agent: AgentId }) {
   }, [login?.output]);
 
   const toggleOutput = () => {
-    if (!showOutput && !login?.output) void api.loginOutput(agent).then(setOutput, () => {});
+    if (!showOutput && !login?.output) void api.loginOutput(profileId).then(setOutput, () => {});
     setOutputOpen(!showOutput);
   };
 
   if (finished) {
     return (
-      <Modal title={`${name} is signed in`} onClose={close} closeOnBackdrop>
+      <Modal title={`${name} is signed in`} onClose={close} closeOnBackdrop className="login-modal">
         <div className="login-done" role="status">
           <Check size={15} />
           <div>
@@ -512,7 +524,7 @@ function LoginFlow({ agent }: { agent: AgentId }) {
   // Saved, but saying "signed in" would be a guess, and it mustn't vanish before it's been read.
   if (savedKey) {
     return (
-      <Modal title="Key saved, not checked yet" onClose={close} closeOnBackdrop>
+      <Modal title="Key saved, not checked yet" onClose={close} closeOnBackdrop className="login-modal">
         <div className="login-done login-unchecked" role="status">
           <AlertTriangle size={15} />
           <div>Lonca couldn’t check this key just now, so your first message will.</div>
@@ -526,7 +538,7 @@ function LoginFlow({ agent }: { agent: AgentId }) {
 
   return (
     // While a key is being checked it can still be saved, so closing wouldn't cancel anything.
-    <Modal title={`Sign in to ${name}`} onClose={checkingKey ? () => {} : close} closeOnBackdrop={false}>
+    <Modal title={`Sign in to ${name}`} onClose={checkingKey ? () => {} : close} closeOnBackdrop={false} className="login-modal">
       <div className="segmented" role="tablist" aria-label={`How to sign in to ${name}`}>
         <button type="button" role="tab" aria-selected={route === 'account'} className={route === 'account' ? 'active' : ''} disabled={checkingKey} onClick={() => setRoute('account')}>
           {isClaude ? 'Claude subscription' : 'ChatGPT account'}
@@ -538,6 +550,7 @@ function LoginFlow({ agent }: { agent: AgentId }) {
       {route === 'key' ? (
         <KeyForm
           key={keyDraft}
+          profileId={profileId}
           agent={agent}
           name={name}
           initial={keyDraft}
@@ -567,6 +580,7 @@ function LoginFlow({ agent }: { agent: AgentId }) {
             </div>
           ) : isClaude && pasting ? (
             <ClaudeSteps
+              profileId={profileId}
               login={login}
               code={code}
               setCode={setCode}
@@ -586,6 +600,7 @@ function LoginFlow({ agent }: { agent: AgentId }) {
           ) : (
             <BrowserSteps login={login} otherWay={login?.url ? 'use a one-time code instead' : null} onOtherWay={() => start('device')} />
           )}
+          {isClaude && several && !failure && <p className="login-hint login-account-hint">{CLAUDE_ACCOUNT_HINT}</p>}
           <div className="login-footer">
             <button type="button" className="login-output-toggle" aria-expanded={showOutput} onClick={toggleOutput}>
               {showOutput ? 'Hide' : 'Show'} what {name} printed
@@ -599,8 +614,9 @@ function LoginFlow({ agent }: { agent: AgentId }) {
   );
 }
 
-/** Signs in to an agent. The real CLI runs out of sight on the server; this is what's left for a person to do. */
+/** Signs in to one of an agent's sign-ins. The real CLI runs out of sight on the server; this is what's left for a person to do. */
 export function LoginDialog() {
-  const agent = useStore((store) => store.loginAgent);
-  return agent ? <LoginFlow key={agent} agent={agent} /> : null;
+  const profileId = useStore((store) => store.loginProfile);
+  const agent = useStore((store) => (profileId ? store.profiles.find((profile) => profile.id === profileId)?.agent ?? agentOfProfileId(profileId) : undefined));
+  return profileId && agent ? <LoginFlow key={profileId} profileId={profileId} agent={agent} /> : null;
 }

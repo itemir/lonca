@@ -382,7 +382,7 @@ describe('the Codex sign-in with a one-time code', () => {
     expect(manager.states().codex).toMatchObject({ phase: 'waiting', code: 'FAKE-7CODE', url: 'http://platform.claude.com:8080/codex/device' });
     processes[0].exit(0);
     await tick();
-    expect(finish).toHaveBeenCalledExactlyOnceWith('what the CLI saved');
+    expect(finish).toHaveBeenCalledExactlyOnceWith('what the CLI saved', { agent: 'codex', profileId: 'codex' });
     expect(manager.states().codex?.phase).toBe('done');
     expect(manager.states().codex?.code).toBeUndefined();
     expect(processes[0].killed).toBe(true);
@@ -980,6 +980,33 @@ describe('starting and stopping a sign-in', () => {
     release();
     await starting;
     expect(process.killed).toBe(true);
+  });
+
+  it('keeps one sign-in per provider under way, since they come back to the same port, and each to its own sign-in', async () => {
+    const saved: { token: string; profileId: string }[] = [];
+    const { manager, processes, published } = setup({ saveClaudeToken: async (token, target) => void saved.push({ token, profileId: target.profileId }) });
+    const work = { agent: 'claude' as const, profileId: 'claude' };
+    const personal = { agent: 'claude' as const, profileId: 'claude-aaaaaaaaaaaa' };
+    await manager.start(work);
+    await manager.start({ agent: 'codex', profileId: 'codex' });
+    await manager.start(personal);
+    expect(processes).toHaveLength(3);
+    expect(processes[0].killed).toBe(true);
+    expect(processes[1].killed).toBe(false);
+    expect(Object.keys(manager.states()).sort()).toEqual(['claude-aaaaaaaaaaaa', 'codex']);
+    expect(manager.states()['claude-aaaaaaaaaaaa']).toMatchObject({ agent: 'claude', profileId: 'claude-aaaaaaaaaaaa', phase: 'starting' });
+    expect(published).toContainEqual(null);
+    expect(manager.busy('claude')).toBe(true);
+    processes[2].emit(promptFrames('claude-success'));
+    await tick();
+    const state = new URL(manager.states()['claude-aaaaaaaaaaaa']!.pasteUrl!).searchParams.get('state');
+    await manager.submitCode(personal, `abc#${state}`);
+    processes[2].emit(recording('claude-success'));
+    await tick();
+    processes[2].exit(0);
+    await tick();
+    expect(saved).toEqual([{ token: FAKE_TOKEN, profileId: 'claude-aaaaaaaaaaaa' }]);
+    expect(manager.busy('claude')).toBe(false);
   });
 
   it('tells a page that’s out of step that nothing is under way', async () => {

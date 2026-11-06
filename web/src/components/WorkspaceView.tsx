@@ -4,11 +4,13 @@ import {
   AlertCircle, Archive, ArchiveRestore, Box, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Copy, Crown, Diff, File as FileIcon, Folder, GitBranch, Globe, Info, Layers, MoreHorizontal, PanelLeft,
   PanelRight, Pause, Pencil, Play, Plus, RotateCcw, Settings as SettingsIcon, Trash2, Users, X,
 } from 'lucide-react';
+import { profileIdOf } from '../../../shared/profiles.ts';
 import type { Project, Session, Workspace, WorkspaceStep } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { basename, effortLabel } from '../format.ts';
 import { useIsPhone } from '../hooks.ts';
 import { useLayout } from '../layout.ts';
+import { sessionSignIn } from '../signins.ts';
 import { attempt, tabKey, useStore, type WorkspaceTab } from '../store.ts';
 import { ChatTranscript } from './Chat.tsx';
 import { canClose, closeVerb, CloseWorkspaceDialog } from './CloseWorkspaceDialog.tsx';
@@ -392,6 +394,7 @@ export function WorkspaceView() {
   const rightOpen = useLayout((layout) => layout.rightOpen);
   const isPhone = useIsPhone();
   const catalog = useStore((store) => store.catalog);
+  const profiles = useStore((store) => store.profiles);
   const [confirm, setConfirm] = useState<ConfirmOptions | null>(null);
   const [closingLead, setClosingLead] = useState<Session | null>(null);
   const [tabsOpen, setTabsOpen] = useState(false);
@@ -426,7 +429,7 @@ export function WorkspaceView() {
 
   const newSession = async () => {
     const current = activeSession ?? sessions.at(-1);
-    const created = await attempt(() => api.createSession(id, current ? { agent: current.agent, model: current.model, effort: current.effort } : {}));
+    const created = await attempt(() => api.createSession(id, current ? { agent: current.agent, model: current.model, effort: current.effort, profileId: profileIdOf(current) } : {}));
     if (created) openTab(id, { kind: 'session', id: created.id });
   };
 
@@ -480,7 +483,9 @@ export function WorkspaceView() {
           onReadLead={(session) => openSession(session.id)}
           phone={isPhone ? {
             title: activeFile ? basename(activeFile.path) : activeSession && activeSession.role !== 'lead' ? activeSession.title : undefined,
-            subtitle: activeSession?.role === 'agent' ? `${modelLabel(catalog, activeSession.agent, activeSession.model)}, ${effortLabel(activeSession.effort)}` : undefined,
+            subtitle: activeSession?.role === 'agent'
+              ? [modelLabel(catalog, activeSession.agent, activeSession.model), effortLabel(activeSession.effort), sessionSignIn(activeSession, profiles, catalog)].filter(Boolean).join(', ')
+              : undefined,
             onBack: lead && activeSession?.id !== lead.id ? () => openSession(lead.id) : undefined,
             onShowTabs: () => setTabsOpen(true),
           } : undefined}

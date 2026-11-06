@@ -590,6 +590,17 @@ export function ensureSandbox(spec: SandboxSpec, { start = true }: { start?: boo
   });
 }
 
+/**
+ * A sandbox is given its secrets as it boots, so one added since, for a new sign-in, goes to those
+ * already running here. One that isn't gets them all the next time it starts.
+ */
+export function addSandboxSecret(name: string, secret: ProxySecret): Promise<void> {
+  return byName.run(name, async () => {
+    if (!booted.has(name) || await sandboxState(name) !== 'running') return;
+    await sbx(secretArgs(name, secret));
+  });
+}
+
 // Names that `sbx` itself needs from its environment, so a project's variable can't go there.
 const OWN_ENV = /^(HOME|PATH|USER|LOGNAME|SHELL|TMPDIR|DOCKER_.*|SBX_.*|XDG_.*|SSH_AUTH_SOCK)$/;
 

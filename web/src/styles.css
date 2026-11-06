@@ -1312,11 +1312,14 @@ a.crumb:hover { color: var(--text); }
 
 .model-popover {
   display: flex;
+  flex-direction: column;
   left: 0;
   min-width: 340px;
   max-height: min(420px, 60vh);
   overflow-y: auto;
 }
+
+.model-columns { display: flex; }
 
 .popover-up { bottom: calc(100% + 6px); }
 .popover-down { top: calc(100% + 6px); }
@@ -1328,6 +1331,18 @@ a.crumb:hover { color: var(--text); }
 .switch-picker { margin: 10px 0; padding: 3px; border: 1px solid var(--line-strong); border-radius: 8px; width: fit-content; }
 .create-help { min-width: 0; margin-left: 2px; }
 .model-efforts { flex: none; min-width: 130px; border-left: 1px solid var(--line-strong); margin-left: 4px; padding-left: 4px; }
+
+/* Which of a provider's sign-ins, only shown where it has more than one. */
+.model-sign-in { color: var(--text-3); max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-sign-ins { margin-top: 4px; padding-top: 2px; border-top: 1px solid var(--line-strong); }
+.menu-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.menu-note { margin-left: auto; padding-left: 12px; color: var(--text-3); font-size: 12px; }
+.lock-popover p { margin: 0; }
+.lock-sign-ins { margin: 8px -7px -5px; padding-top: 4px; border-top: 1px solid var(--line-strong); }
+
+/* A limit, and where the conversation can carry on. */
+.banner-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.banner-menu .menu-trigger { color: inherit; }
 
 /* Side panel */
 
@@ -2057,6 +2072,20 @@ a.home-row:hover { background: var(--panel); }
 
 .input-error, .input-error:focus { border-color: var(--error); }
 .settings-note-error { color: var(--error); }
+.login-account-hint { margin-top: 12px; }
+
+/* Sign-ins. With one per provider they look as they always did, plus a way to add another. */
+.sign-in-group + .sign-in-group { margin-top: 12px; }
+.sign-in-card .settings-row { margin-bottom: 4px; }
+.sign-in-group-several .sign-in-card { margin-bottom: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.sign-in-group-several .sign-in-card .settings-row { margin: 0; border: 0; background: none; }
+.sign-in-tag { margin-left: 8px; padding: 1px 6px; border-radius: 5px; background: var(--active); color: var(--text-2); font-size: 11.5px; font-weight: 400; vertical-align: 1px; }
+.sign-in-limit { color: var(--warning); }
+.sign-in-limit::before { content: '·'; margin-right: 5px; color: var(--text-3); }
+.sign-in-menu .menu-trigger { width: 30px; height: 30px; justify-content: center; }
+.sign-in-switch { display: flex; align-items: flex-start; gap: 8px; padding: 0 14px 11px; color: var(--text-3); font-size: 12.5px; cursor: pointer; }
+.sign-in-switch input { flex: none; margin: 2px 0 0; accent-color: var(--accent); }
+.add-sign-in { display: inline-flex; align-items: center; gap: 5px; margin: 2px 0 2px 2px; color: var(--text-2); font-size: 13px; }
 .isolation-command {
   margin: 8px 0 0;
   padding: 8px 10px;
@@ -2145,6 +2174,13 @@ a.home-row:hover { background: var(--panel); }
   .close-dialog .modal-actions { flex-direction: column-reverse; }
   .close-dialog .button { height: 44px; }
   .lock-popover { width: min(300px, 80vw); }
+  .workspace-banner { flex-wrap: wrap; }
+  .banner-actions { width: 100%; justify-content: flex-start; }
+  .model-sign-in { max-width: 6em; }
+
+  /* Signing in on a phone means typing a code, so the sheet has to stay above the keyboard. */
+  .login-modal { bottom: auto; height: var(--viewport-height, 100dvh); padding: 12px; }
+  .login-modal .modal { max-height: 100%; }
   /* An editor can't open from a phone, and there's nowhere for a separate window to go. */
   .open-in, .terminal-window-button { display: none; }
   .create-help { display: none; }
@@ -2160,6 +2196,9 @@ a.home-row:hover { background: var(--panel); }
   .button-small { min-height: 40px; }
   .menu-item { min-height: 44px; }
   .tool-head { min-height: 36px; }
+  .banner-actions .button, .add-sign-in { min-height: 44px; }
+  .sign-in-switch { min-height: 44px; align-items: center; padding-bottom: 6px; }
+  .sign-in-menu .menu-trigger { width: 44px; height: 44px; }
 }
 
 /* Fingers need bigger targets than the dense layout gives them. */

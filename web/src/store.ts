@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { DEFAULT_CATALOG } from '../../shared/catalog.ts';
+import { defaultProfile } from '../../shared/profiles.ts';
 import type {
-  AgentId, AppSettings, AppState, Catalog, ChatItem, ClientEvent, LoginState, Me, Project, SecretsStatus, ServerEvent, Session,
+  AgentId, AppSettings, AppState, Catalog, ChatItem, ClientEvent, LoginState, Me, Profile, Project, SecretsStatus, ServerEvent, Session,
   SystemStatus, TerminalInfo, Workspace,
 } from '../../shared/types.ts';
 import { api, onUnauthorized } from './api.ts';
@@ -52,7 +53,9 @@ interface Store {
   workspaces: Workspace[];
   sessions: Session[];
   terminals: TerminalInfo[];
-  logins: Partial<Record<AgentId, LoginState>>;
+  profiles: Profile[];
+  /** By sign-in. */
+  logins: Partial<Record<string, LoginState>>;
   system: SystemStatus;
   catalog: Catalog;
   settings: AppSettings;
@@ -64,7 +67,8 @@ interface Store {
   toasts: Toast[];
   searchOpen: boolean;
   addProjectOpen: boolean;
-  loginAgent: 'claude' | 'codex' | null;
+  /** The sign-in whose window is open. */
+  loginProfile: string | null;
 
   hydrate(state: AppState): void;
   apply(event: ServerEvent): void;
@@ -76,7 +80,9 @@ interface Store {
   dismissToast(id: number): void;
   setSearchOpen(open: boolean): void;
   setAddProjectOpen(open: boolean): void;
-  setLoginAgent(agent: 'claude' | 'codex' | null): void;
+  setLoginProfile(profileId: string | null): void;
+  /** Signs in to a provider's default sign-in, for where only the provider matters. */
+  setLoginAgent(agent: AgentId): void;
 }
 
 const TABS_KEY = 'lonca.tabs';
@@ -135,12 +141,14 @@ export const useStore = create<Store>((set, get) => ({
   workspaces: [],
   sessions: [],
   terminals: [],
+  profiles: [],
   logins: {},
   system: {
     sandbox: { state: 'checking' },
     agentsChecked: false,
     image: { tag: '', state: 'unknown', log: '' },
     agents: { claude: { signedIn: false }, codex: { signedIn: false } },
+    profiles: {},
   },
   catalog: DEFAULT_CATALOG,
   settings: {
@@ -154,12 +162,12 @@ export const useStore = create<Store>((set, get) => ({
   toasts: [],
   searchOpen: false,
   addProjectOpen: false,
-  loginAgent: null,
+  loginProfile: null,
 
   hydrate(state) {
     // A sign-in carries on through a page reload, so its window comes back with it.
     const inProgress = (Object.values(state.logins) as LoginState[]).find((login) => login.phase !== 'done' && login.phase !== 'failed');
-    set((store) => ({ ...state, ready: true, loginAgent: store.loginAgent ?? inProgress?.agent ?? null }));
+    set((store) => ({ ...state, profiles: state.profiles ?? [], ready: true, loginProfile: store.loginProfile ?? inProgress?.profileId ?? inProgress?.agent ?? null }));
   },
 
   apply(event) {
@@ -191,10 +199,14 @@ export const useStore = create<Store>((set, get) => ({
       case 'login':
         set((store) => {
           const logins = { ...store.logins };
-          if (event.login) logins[event.agent] = event.login;
-          else delete logins[event.agent];
+          const key = event.profileId ?? event.agent;
+          if (event.login) logins[key] = event.login;
+          else delete logins[key];
           return { logins };
         });
+        break;
+      case 'profiles':
+        set({ profiles: event.profiles });
         break;
       case 'system':
         set({ system: event.system, catalog: event.catalog });
@@ -292,7 +304,8 @@ export const useStore = create<Store>((set, get) => ({
 
   setSearchOpen: (open) => set({ searchOpen: open }),
   setAddProjectOpen: (open) => set({ addProjectOpen: open }),
-  setLoginAgent: (agent) => set({ loginAgent: agent }),
+  setLoginProfile: (profileId) => set({ loginProfile: profileId }),
+  setLoginAgent: (agent) => set((store) => ({ loginProfile: defaultProfile(store.profiles, agent)?.id ?? agent })),
 }));
 
 /** Runs an action and shows any failure instead of leaving it in the console. */

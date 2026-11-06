@@ -31,16 +31,24 @@ export interface LoginProcess {
 /** How a sign-in went, for the browser that came back from it. Null means it isn't that browser. */
 export type ReturnOutcome = 'done' | 'failed' | null;
 
+/** Which of a provider's sign-ins this is for. A provider's id alone means its first. */
+export interface LoginTarget {
+  agent: AgentId;
+  profileId: string;
+}
+
+const targetOf = (target: AgentId | LoginTarget): LoginTarget => (typeof target === 'string' ? { agent: target, profileId: target } : target);
+
 export interface LoginDriver {
   spawn(agent: AgentId, method: LoginMethod): Promise<LoginProcess>;
   /** Answers on a port of this computer until the function it gives is called. Fails if the port is taken. */
   listen(port: number, onReturn: (target: URL) => Promise<ReturnOutcome>): Promise<() => void>;
   /** Throws if the token doesn't work. This takes a while, and the sign-in can end meanwhile. */
   checkClaudeToken(token: string): Promise<void>;
-  saveClaudeToken(token: string): Promise<void>;
+  saveClaudeToken(token: string, target: LoginTarget): Promise<void>;
   /** With what `codex login` saved once it's exited: keeps it if it's a login, and reports whether it was. */
-  finishCodexLogin(login: string): Promise<boolean>;
-  publish(agent: AgentId, login: LoginState | null): void;
+  finishCodexLogin(login: string, target: LoginTarget): Promise<boolean>;
+  publish(target: LoginTarget, login: LoginState | null): void;
 }
 
 export const LOGIN_TIMINGS = {
@@ -104,14 +112,16 @@ class LoginSession {
     this.settle = resolve;
   });
   private agent: AgentId;
+  private target: LoginTarget;
   private driver: LoginDriver;
   private timings: typeof LOGIN_TIMINGS;
 
-  constructor(agent: AgentId, method: LoginMethod, driver: LoginDriver, timings: typeof LOGIN_TIMINGS) {
-    this.agent = agent;
+  constructor(target: LoginTarget, method: LoginMethod, driver: LoginDriver, timings: typeof LOGIN_TIMINGS) {
+    this.agent = target.agent;
+    this.target = target;
     this.driver = driver;
     this.timings = timings;
-    this.state = { agent, method, phase: 'starting' };
+    this.state = { agent: target.agent, profileId: target.profileId, method, phase: 'starting' };
   }
 
   get finished(): boolean {
@@ -124,7 +134,7 @@ class LoginSession {
 
   private update(patch: Partial<LoginState>): void {
     this.state = { ...this.state, ...patch };
-    if (!this.cancelled) this.driver.publish(this.agent, this.state);
+    if (!this.cancelled) this.driver.publish(this.target, this.state);
   }
 
   private later(ms: number, action: () => void): void {
@@ -142,7 +152,7 @@ class LoginSession {
 
   async start(): Promise<void> {
     if (this.cancelled) return;
-    this.driver.publish(this.agent, this.state);
+    this.driver.publish(this.target, this.state);
     this.later(this.timings.expiresMs, () => {
       if (!this.finished) void this.fail('expired');
     });
@@ -242,7 +252,7 @@ class LoginSession {
     try {
       await this.driver.checkClaudeToken(token);
       if (this.finished || this.cancelled) return true;
-      await this.driver.saveClaudeToken(token);
+      await this.driver.saveClaudeToken(token, this.target);
       await this.succeed();
     } catch (error) {
       await this.fail('save-failed', errorMessage(error));
@@ -271,7 +281,7 @@ class LoginSession {
       try {
         const login = await process.savedLogin();
         if (this.finished || this.cancelled) return;
-        if (await this.driver.finishCodexLogin(login)) await this.succeed();
+        if (await this.driver.finishCodexLogin(login, this.target)) await this.succeed();
         else await this.fail('stopped');
       } catch (error) {
         await this.fail('save-failed', errorMessage(error));
@@ -352,8 +362,9 @@ class LoginSession {
   }
 }
 
+/** Keyed by sign-in, and a provider's id alone means its first one. */
 export class LoginManager {
-  private sessions = new Map<AgentId, LoginSession>();
+  private sessions = new Map<string, LoginSession>();
   private driver: LoginDriver;
   private timings: typeof LOGIN_TIMINGS;
 
@@ -362,40 +373,54 @@ export class LoginManager {
     this.timings = timings;
   }
 
-  states(): Partial<Record<AgentId, LoginState>> {
-    return Object.fromEntries([...this.sessions].map(([agent, session]) => [agent, session.state]));
+  states(): Partial<Record<string, LoginState>> {
+    return Object.fromEntries([...this.sessions].map(([profileId, session]) => [profileId, session.state]));
   }
 
   /**
    * Joins a sign-in already under way, so a second tab or a double click doesn't start another,
-   * unless this asks for the other way of signing in, which replaces it.
+   * unless this asks for the other way of signing in, which replaces it. Another of the same
+   * provider's sign-ins is replaced too, since they come back to the same port.
    * Reports null if it was cancelled while starting, which can take a while.
    */
-  async start(agent: AgentId, method: LoginMethod = 'browser'): Promise<LoginState | null> {
-    const current = this.sessions.get(agent);
+  async start(to: AgentId | LoginTarget, method: LoginMethod = 'browser'): Promise<LoginState | null> {
+    const target = targetOf(to);
+    const current = this.sessions.get(target.profileId);
     if (current && !current.finished && current.state.method === method) return current.state;
-    const session = new LoginSession(agent, method, this.driver, this.timings);
-    this.sessions.set(agent, session);
+    const others = [...this.sessions].filter(([id, other]) => id !== target.profileId && other.state.agent === target.agent && !other.finished);
+    const session = new LoginSession(target, method, this.driver, this.timings);
+    this.sessions.set(target.profileId, session);
     if (current && !current.finished) await current.cancel();
+    for (const [id, other] of others) {
+      if (this.sessions.get(id) === other) this.sessions.delete(id);
+      this.driver.publish({ agent: target.agent, profileId: id }, null);
+      await other.cancel();
+    }
     await session.start();
-    return this.sessions.get(agent)?.state ?? null;
+    return this.sessions.get(target.profileId)?.state ?? null;
   }
 
-  async submitCode(agent: AgentId, code: string): Promise<void> {
-    const session = this.sessions.get(agent);
+  async submitCode(to: AgentId | LoginTarget, code: string): Promise<void> {
+    const session = this.sessions.get(targetOf(to).profileId);
     if (!session) throw new HttpError(409, 'This sign-in has ended. Start again to get a new code.');
     await session.submitCode(code);
   }
 
-  output(agent: AgentId): string {
-    return this.sessions.get(agent)?.output() ?? '';
+  output(to: AgentId | LoginTarget): string {
+    return this.sessions.get(targetOf(to).profileId)?.output() ?? '';
   }
 
-  async cancel(agent: AgentId): Promise<void> {
-    const session = this.sessions.get(agent);
-    this.sessions.delete(agent);
+  /** Whether one of this provider's sign-ins is under way, which the helper's leftovers mustn't be cleared from under. */
+  busy(agent: AgentId): boolean {
+    return [...this.sessions.values()].some((session) => session.state.agent === agent && !session.finished);
+  }
+
+  async cancel(to: AgentId | LoginTarget): Promise<void> {
+    const target = targetOf(to);
+    const session = this.sessions.get(target.profileId);
+    this.sessions.delete(target.profileId);
     // Always said, so a page out of step with the server gets back in step.
-    this.driver.publish(agent, null);
+    this.driver.publish(target, null);
     await session?.cancel();
   }
 }

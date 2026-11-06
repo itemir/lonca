@@ -1,32 +1,173 @@
 import { useCallback, useRef, useState } from 'react';
-import { Check, PanelLeft } from 'lucide-react';
-import type { AgentId, AppSettings } from '../../../shared/types.ts';
+import { Check, MoreHorizontal, PanelLeft, Plus } from 'lucide-react';
+import { isReady, profileName, profileStatus, profilesOf } from '../../../shared/profiles.ts';
+import type { AgentId, AppSettings, Profile } from '../../../shared/types.ts';
 import { api } from '../api.ts';
+import { CLAUDE_ACCOUNT_HINT } from '../components/LoginDialog.tsx';
 import { ModelPicker } from '../components/ModelPicker.tsx';
 import { PlaybookEditor } from '../components/PlaybookEditor.tsx';
 import { DockerLoginDialog } from '../components/DockerLoginDialog.tsx';
-import { ConfirmDialog, IconButton, Spinner } from '../components/ui.tsx';
+import { ConfirmDialog, type ConfirmOptions, IconButton, Menu, Modal, Spinner } from '../components/ui.tsx';
 import { useLayout } from '../layout.ts';
+import { limitNote } from '../signins.ts';
 import { attempt, signInBlocker, useStore } from '../store.ts';
 
-function AgentCard({ agent, name }: { agent: AgentId; name: string }) {
-  const status = useStore((store) => store.system.agents[agent]);
-  const setLoginAgent = useStore((store) => store.setLoginAgent);
-  const blocker = useStore((store) => signInBlocker(store.system));
-  const signedIn = status.signedIn && !status.rejected;
+const TERMS = 'Each provider’s terms decide how its accounts may be used, including limits. Lonca doesn’t check them for you.';
+
+function RenameSignIn({ profile, onClose }: { profile: Profile; onClose: () => void }) {
+  const [name, setName] = useState(profile.name);
   return (
-    <div className="settings-row">
-      <div className="settings-row-text">
-        <strong>{name}</strong>
-        <span className={`settings-note ${status.rejected ? 'settings-note-error' : ''}`}>
-          {signedIn && <><Check size={13} className="check-success" /> {status.summary ?? 'Signed in'}</>}
-          {status.rejected && `${name} stopped accepting this sign-in.`}
-          {!status.signedIn && (blocker ?? 'Not signed in')}
-        </span>
+    <Modal title="Rename sign-in" onClose={onClose}>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!name.trim()) return;
+          void attempt(() => api.updateProfile(profile.id, { name: name.trim() })).then((saved) => saved && onClose());
+        }}
+      >
+        <label className="field">
+          <span className="field-label">Name</span>
+          <input className="input" autoFocus maxLength={40} value={name} onChange={(event) => setName(event.target.value)} />
+        </label>
+        <div className="modal-actions">
+          <button type="button" className="button" onClick={onClose}>Cancel</button>
+          <button type="submit" className="button button-primary" disabled={!name.trim()}>Save name</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/** A second sign-in for a provider, which means naming both so they can be told apart. */
+function AddSignIn({ agent, onClose }: { agent: AgentId; onClose: () => void }) {
+  const catalog = useStore((store) => store.catalog);
+  const profiles = useStore((store) => store.profiles);
+  const system = useStore((store) => store.system);
+  const setLoginProfile = useStore((store) => store.setLoginProfile);
+  const provider = catalog[agent].label;
+  const existing = profilesOf(profiles, agent);
+  const unnamed = existing.length === 1 && !existing[0].name ? existing[0] : undefined;
+  // Which one it is, in case there's no telling from here.
+  const summary = unnamed && profileStatus(system, unnamed.id).summary;
+  const [first, setFirst] = useState('');
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const ready = name.trim() && (!unnamed || first.trim());
+  const add = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!ready || busy) return;
+    setBusy(true);
+    const created = await attempt(() => api.addProfile(agent, name.trim(), unnamed ? first.trim() : undefined));
+    setBusy(false);
+    if (!created) return;
+    onClose();
+    setLoginProfile(created.id);
+  };
+  return (
+    <Modal title={`Add another ${provider} sign-in`} onClose={onClose}>
+      <form onSubmit={add}>
+        {unnamed && (
+          <label className="field">
+            <span className="field-label">Name for the one you have{summary ? ` (${summary.replace(/^./, (letter) => letter.toLowerCase())})` : ''}</span>
+            <input className="input" autoFocus maxLength={40} placeholder="work" value={first} onChange={(event) => setFirst(event.target.value)} />
+          </label>
+        )}
+        <label className="field">
+          <span className="field-label">{unnamed ? 'Name for the new one' : 'Name'}</span>
+          <input className="input" autoFocus={!unnamed} maxLength={40} placeholder="personal" value={name} onChange={(event) => setName(event.target.value)} />
+        </label>
+        {agent === 'claude' && <p className="field-help">{CLAUDE_ACCOUNT_HINT}</p>}
+        <p className="field-help">{TERMS}</p>
+        <div className="modal-actions">
+          <button type="button" className="button" onClick={onClose}>Cancel</button>
+          <button type="submit" className="button button-primary" disabled={!ready || busy}>{busy ? <><Spinner size={12} /> Adding…</> : 'Add and sign in'}</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function SignInCard({ profile, several, isDefault }: { profile: Profile; several: boolean; isDefault: boolean }) {
+  const status = useStore((store) => profileStatus(store.system, profile.id));
+  const catalog = useStore((store) => store.catalog);
+  const profiles = useStore((store) => store.profiles);
+  const setLoginProfile = useStore((store) => store.setLoginProfile);
+  const blocker = useStore((store) => signInBlocker(store.system));
+  const [renaming, setRenaming] = useState(false);
+  const [confirm, setConfirm] = useState<ConfirmOptions | null>(null);
+  const provider = catalog[profile.agent].label;
+  const name = several ? profileName(profile, catalog) : provider;
+  const signedIn = isReady(status);
+  const limit = limitNote(status);
+  // Where its conversations go: the provider's default, which is the next one if this is it.
+  const destination = profilesOf(profiles, profile.agent).find((entry) => entry.id !== profile.id);
+  const remove = () => setConfirm({
+    title: `Remove ${name}?`,
+    body: `Lonca deletes this sign-in from this computer. Conversations on it move to ${profileName(isDefault ? destination : profilesOf(profiles, profile.agent)[0], catalog)}, and say so.`,
+    action: 'Remove',
+    danger: true,
+    onConfirm: () => void attempt(() => api.removeProfile(profile.id)),
+  });
+  return (
+    <div className="sign-in-card">
+      <div className="settings-row">
+        <div className="settings-row-text">
+          <strong>{name}{several && isDefault && <span className="sign-in-tag">Default</span>}</strong>
+          <span className={`settings-note ${status.rejected ? 'settings-note-error' : ''}`}>
+            {signedIn && <><Check size={13} className="check-success" /> {status.summary ?? 'Signed in'}</>}
+            {status.rejected && `${provider} stopped accepting this sign-in.`}
+            {!status.signedIn && (blocker ?? 'Not signed in')}
+            {status.signedIn && limit && <span className="sign-in-limit">{limit}</span>}
+          </span>
+        </div>
+        {signedIn && <button type="button" className="button" onClick={() => void attempt(() => api.logout(profile.id))}>Sign out</button>}
+        {status.rejected && <button type="button" className="button button-primary" onClick={() => setLoginProfile(profile.id)}>Sign in again</button>}
+        {!status.signedIn && !blocker && <button type="button" className="button" onClick={() => setLoginProfile(profile.id)}>Sign in</button>}
+        {several && (
+          <Menu
+            className="sign-in-menu"
+            label={`${name} options`}
+            align="right"
+            trigger={<MoreHorizontal size={16} />}
+            entries={[
+              { label: 'Rename', onSelect: () => setRenaming(true) },
+              ...(isDefault ? [] : [{ label: 'Make default', onSelect: () => void attempt(() => api.updateProfile(profile.id, { makeDefault: true })) }]),
+              { label: 'Remove', danger: true, onSelect: remove },
+            ]}
+          />
+        )}
       </div>
-      {signedIn && <button type="button" className="button" onClick={() => void attempt(() => api.logout(agent))}>Sign out</button>}
-      {status.rejected && <button type="button" className="button button-primary" onClick={() => setLoginAgent(agent)}>Sign in again</button>}
-      {!status.signedIn && !blocker && <button type="button" className="button" onClick={() => setLoginAgent(agent)}>Sign in</button>}
+      {several && (
+        <label className="sign-in-switch">
+          <input
+            type="checkbox"
+            checked={Boolean(profile.autoSwitch)}
+            onChange={(event) => void attempt(() => api.updateProfile(profile.id, { autoSwitch: event.target.checked }))}
+          />
+          <span>
+            Move conversations here by themselves when another {provider} sign-in reaches its usage limit
+            {status.usesKey && <span className="sign-in-switch-note">. This one is an API key, so that’s billed per token.</span>}
+          </span>
+        </label>
+      )}
+      {renaming && <RenameSignIn profile={profile} onClose={() => setRenaming(false)} />}
+      {confirm && <ConfirmDialog {...confirm} onClose={() => setConfirm(null)} />}
+    </div>
+  );
+}
+
+/** A provider's sign-ins. With one, it looks as it did before there could be more. */
+function ProviderSignIns({ agent }: { agent: AgentId }) {
+  const all = useStore((store) => store.profiles);
+  const label = useStore((store) => store.catalog[agent].label);
+  const profiles = profilesOf(all, agent);
+  const [adding, setAdding] = useState(false);
+  const several = profiles.length > 1;
+  return (
+    <div className={`sign-in-group ${several ? 'sign-in-group-several' : ''}`} role="group" aria-label={`${label} sign-ins`}>
+      {profiles.map((profile, index) => <SignInCard key={profile.id} profile={profile} several={several} isDefault={index === 0} />)}
+      <button type="button" className="link-button add-sign-in" onClick={() => setAdding(true)}><Plus size={13} /> Add another {label} sign-in</button>
+      {adding && <AddSignIn agent={agent} onClose={() => setAdding(false)} />}
     </div>
   );
 }
@@ -190,7 +331,7 @@ function LeadSettings() {
       <div className="settings-row">
         <div className="settings-row-text">
           <strong>Agents at once</strong>
-          <span className="settings-note">How many agents a Lead can have working at the same time. They all use your limits.</span>
+          <span className="settings-note">How many agents a Lead can have working at the same time. Each uses the limits of the sign-in it runs on.</span>
         </div>
         <select className="input settings-select" aria-label="Agents at once" value={settings.leadMaxAgents} onChange={(event) => void attempt(() => api.updateSettings({ leadMaxAgents: Number(event.target.value) }))}>
           {[1, 2, 3, 4, 5, 6, 7, 8].map((count) => <option key={count} value={count}>{count}</option>)}
@@ -221,6 +362,7 @@ function LeadSettings() {
 
 export function Settings() {
   const settings = useStore((store) => store.settings);
+  const several = useStore((store) => profilesOf(store.profiles, 'claude').length > 1 || profilesOf(store.profiles, 'codex').length > 1);
   const { sidebarOpen, toggleSidebar } = useLayout();
   type Field = 'branchPrefix' | 'gitName' | 'gitEmail';
   const [drafts, setDrafts] = useState<Partial<Pick<AppSettings, Field>>>({});
@@ -251,9 +393,10 @@ export function Settings() {
         <h1 className="page-title">Settings</h1>
         <section className="settings-section">
           <h2>Sign-ins</h2>
-          <AgentCard agent="claude" name="Claude" />
-          <AgentCard agent="codex" name="Codex" />
+          <ProviderSignIns agent="claude" />
+          <ProviderSignIns agent="codex" />
           <p className="field-help">Sign in once and every workspace can use the agent. Your logins on this computer are left alone.</p>
+          {several && <p className="field-help">{TERMS}</p>}
         </section>
         <LeadSettings />
         <section className="settings-section">

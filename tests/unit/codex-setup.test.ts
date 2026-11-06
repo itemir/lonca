@@ -1,9 +1,12 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import type { Project, Workspace } from '../../shared/types.ts';
+import type { Profile, Project, Workspace } from '../../shared/types.ts';
 import { applyCodexSetup, setUpCodex } from '../../server/workspaces.ts';
 
 const { state, execs } = vi.hoisted(() => ({
-  state: { settings: { branchPrefix: 'test' }, projects: [] as Project[], workspaces: [] as Workspace[] },
+  state: {
+    settings: { branchPrefix: 'test' }, projects: [] as Project[], workspaces: [] as Workspace[],
+    profiles: [{ id: 'claude', agent: 'claude', name: '', createdAt: 0 }, { id: 'codex', agent: 'codex', name: '', createdAt: 0 }] as Profile[],
+  },
   execs: [] as { stdin: string; done: () => void }[],
 }));
 
@@ -13,6 +16,7 @@ vi.mock('../../server/store.ts', () => ({
   getWorkspace: (id: string) => state.workspaces.find((workspace) => workspace.id === id),
   getSecrets: () => ({}),
   boundaryValue: () => undefined,
+  claudeCredential: () => undefined,
   flushState: vi.fn(),
   saveState: vi.fn(),
   deleteTranscript: vi.fn(),

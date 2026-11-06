@@ -14,6 +14,7 @@ export const TEAM_TOOLS = [
         effort: { type: 'string', description: 'A thinking level the model offers, from team_status. Leave it out for the model\'s default.' },
         job: { type: 'string', enum: ['analyze', 'implement', 'review'], description: 'Only one agent at a time can have the job "implement", and it\'s the only one told it may change files.' },
         task: { type: 'string', description: 'Its instructions. It sees nothing else from you, so include what it needs.' },
+        sign_in: { type: 'string', description: 'A sign-in id from team_status, of the model\'s provider, for when it has several. Leave it out to use yours, or for another provider, its default.' },
       },
       required: ['label', 'model', 'job', 'task'],
     },
@@ -45,7 +46,7 @@ export const TEAM_TOOLS = [
   },
   {
     name: 'team_status',
-    description: 'List your agents and their states, the models you can start agents on, and how many can work at once.',
+    description: 'List your agents and their states, the models and sign-ins you can start agents on, which sign-ins are at a usage limit, and how many agents can work at once.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -55,8 +56,15 @@ export const TEAM_TOOLS = [
   },
   {
     name: 'retry_agent',
-    description: 'Have an agent pick up where it left off after a failure or a usage limit, in the same conversation.',
-    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'The agent\'s id.' } }, required: ['id'] },
+    description: 'Have an agent pick up where it left off after a failure or a usage limit, in the same conversation. At a usage limit, it can carry on on another sign-in of the same provider.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The agent\'s id.' },
+        sign_in: { type: 'string', description: 'A sign-in id from team_status, of the agent\'s provider, to carry on on. Leave it out to stay on the one it has.' },
+      },
+      required: ['id'],
+    },
   },
 ];
 

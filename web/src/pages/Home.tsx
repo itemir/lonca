@@ -1,6 +1,7 @@
 import { Link, useNavigate } from 'react-router-dom';
 import { Check, CircleDashed, GitBranch, PanelLeft, Plus, X } from 'lucide-react';
-import type { Workspace } from '../../../shared/types.ts';
+import { isReady, profileStatus, profilesOf } from '../../../shared/profiles.ts';
+import type { AgentId, Workspace } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { IconButton, Avatar, Spinner } from '../components/ui.tsx';
 import { compactNumber, timeAgo } from '../format.ts';
@@ -27,9 +28,12 @@ function Setup() {
   const projects = useStore((store) => store.projects);
   const setAddProjectOpen = useStore((store) => store.setAddProjectOpen);
   const setLoginAgent = useStore((store) => store.setLoginAgent);
-  const { sandbox, image, agents } = system;
-  const claudeReady = agents.claude.signedIn && !agents.claude.rejected;
-  const codexReady = agents.codex.signedIn && !agents.codex.rejected;
+  const profiles = useStore((store) => store.profiles);
+  const { sandbox, image } = system;
+  // Any of a provider's sign-ins is enough for it.
+  const ready = (agent: AgentId) => profilesOf(profiles, agent).some((profile) => isReady(profileStatus(system, profile.id)));
+  const claudeReady = ready('claude');
+  const codexReady = ready('codex');
   const anyAgent = claudeReady || codexReady;
   const blocker = signInBlocker(system);
   // The one white button goes on the next thing to do. Either agent is enough.

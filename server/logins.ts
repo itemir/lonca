@@ -5,9 +5,10 @@ import { publish } from './events.ts';
 import { DockerLoginManager } from './docker-login.ts';
 import { type LoginProcess, LoginManager, listenForReturn } from './login.ts';
 import { afterSignInChange, exec, execText, execTty, startSbxLogin } from './sandbox.ts';
-import { secretsStatus, state, updateSecrets } from './store.ts';
+import { secretsStatus, setClaudeCredential, state } from './store.ts';
 import {
-  adoptCodexLogin, agentLoginCommand, checkClaudeCredential, checkSandboxes, clearAgentRejected, helperRunning, helperSandbox, onSandboxesFoundReady, refreshAgents, setDockerLogin, system,
+  adoptCodexLogin, agentLoginCommand, checkClaudeCredential, checkSandboxes, clearAgentRejected, clearProfileLimit, getProfile, helperRunning, helperSandbox,
+  onSandboxesFoundReady, refreshAgents, setDockerLogin, system,
 } from './system.ts';
 import { newId } from './util.ts';
 import { applyCodexSetupEverywhere } from './workspaces.ts';
@@ -71,20 +72,25 @@ export const logins = new LoginManager({
     // It was read off a screen and could be cut short, and the CLI's own status wouldn't notice.
     if ((await checkClaudeCredential(token)) === 'refused') throw new Error('Claude didn’t accept the token it gave.');
   },
-  async saveClaudeToken(token) {
-    updateSecrets({ claudeToken: token });
-    clearAgentRejected('claude');
+  async saveClaudeToken(token, { profileId }) {
+    if (!getProfile(profileId)) throw new Error('This sign-in was removed.');
+    setClaudeCredential(profileId, token);
+    // It could be another account now, whose limits are its own.
+    clearAgentRejected(profileId);
+    clearProfileLimit(profileId);
     publish({ type: 'settings', settings: state.settings, secrets: secretsStatus() });
     await refreshAgents();
   },
-  async finishCodexLogin(login) {
-    if (!adoptCodexLogin(login)) return false;
+  async finishCodexLogin(login, { profileId }) {
+    if (!getProfile(profileId)) throw new Error('This sign-in was removed.');
+    if (!adoptCodexLogin(login, profileId)) return false;
     applyCodexSetupEverywhere();
-    clearAgentRejected('codex');
+    clearAgentRejected(profileId);
+    clearProfileLimit(profileId);
     await refreshAgents();
     return true;
   },
-  publish: (agent, login) => publish({ type: 'login', agent, login }),
+  publish: ({ agent, profileId }, login) => publish({ type: 'login', agent, profileId, login }),
 });
 
 export const dockerLogins = new DockerLoginManager({
@@ -112,7 +118,6 @@ onSandboxesFoundReady(() => dockerLogins.sandboxesReady());
 export async function reapLeftoverLogins(): Promise<void> {
   if (!await helperRunning()) return;
   const helper = await helperSandbox();
-  const live = logins.states();
-  const idle = (['claude', 'codex'] as const).filter((agent) => !live[agent] || live[agent].phase === 'done' || live[agent].phase === 'failed');
+  const idle = (['claude', 'codex'] as const).filter((agent) => !logins.busy(agent));
   await Promise.all(idle.map((agent) => killLeftovers(helper, agent)));
 }
