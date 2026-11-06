@@ -3,8 +3,11 @@ import { promisify } from 'node:util';
 import express, { type NextFunction, type Request, type Response, Router } from 'express';
 import { z } from 'zod';
 import type { AgentId, AppState, Project, Session, Workspace } from '../shared/types.ts';
-import { cancelQueued, createSession, deleteSession, flushQueue, interruptSession, publishSession, sendMessage } from './agents/runner.ts';
-import { execText } from './docker.ts';
+import { playbookFor, resetPlaybook, savePlaybook } from './agents/playbook.ts';
+import { cancelQueued, createLead, createSession, deleteSession, flushQueue, interruptSession, publishSession, sendMessage } from './agents/runner.ts';
+import { checkButtonCanStart, closeWorkspaceLead, holdWhenStopped, markRead, stopAgents, switchLead, tryAgain, warnOfOtherWriter } from './agents/team.ts';
+import { projectCodexKey } from './boundary.ts';
+import { execText } from './sandbox.ts';
 import {
   getChanges, getChecks, getFileDiff, listDirectory, readWorkspaceFile, safeAttachmentName, searchFiles,
 } from './inspect.ts';
@@ -23,8 +26,8 @@ import {
 import { sessionSnapshot } from './transcript.ts';
 import { HttpError, errorMessage, newId } from './util.ts';
 import {
-  archiveWorkspace, configuredSetupScript, createWorkspace, deleteWorkspace, publishWorkspace, recreateContainer, restoreWorkspace,
-  retryWorkspace, runningContainer, startWorkspace, stopWorkspace,
+  archiveWorkspace, configuredSetupScript, createWorkspace, deleteWorkspace, publishWorkspace, rebuildWorkspace, restoreWorkspace,
+  applyCodexSetup, applyCodexSetupEverywhere, retryWorkspace, runningSandbox, startWorkspace, stopWorkspace,
 } from './workspaces.ts';
 
 const execFileAsync = promisify(execFile);
@@ -78,6 +81,8 @@ const projectSettingsSchema = z.object({
   env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'Environment variable names may only use letters, digits and underscores'), z.string()),
 }).partial();
 
+const leadChoiceSchema = z.object({ agent: z.enum(['claude', 'codex']), model: z.string().min(1), effort: z.string().min(1) });
+
 const appSettingsSchema = z.object({
   branchPrefix: z.string().regex(/^[\w./-]*$/, 'Branch prefixes may only use letters, digits, dots, dashes and slashes'),
   gitName: z.string(),
@@ -85,7 +90,25 @@ const appSettingsSchema = z.object({
   defaultAgent: z.enum(['claude', 'codex']),
   defaultModel: z.string(),
   defaultEffort: z.string(),
+  leadDefault: leadChoiceSchema,
+  leadMaxAgents: z.number().int().min(1).max(8),
+  notifications: z.boolean(),
 }).partial();
+
+// The whole file goes on the CLI's command line each turn, and that has limits.
+const PLAYBOOK_LIMIT = 32 * 1024;
+const playbookSchema = z.object({
+  project: z.string().optional(),
+  content: z.string().trim().min(1, 'A playbook can’t be empty. Reset it to go back to the template.').max(PLAYBOOK_LIMIT, 'That’s too long for a playbook. Keep it under 32 KB.')
+    .refine((text) => !text.includes('\0'), 'A playbook can’t contain that character.'),
+});
+
+function playbookProject(id: unknown): Project | undefined {
+  if (typeof id !== 'string' || !id) return undefined;
+  const project = getProject(id);
+  if (!project) throw new HttpError(404, 'No such project');
+  return project;
+}
 
 export function snapshot(me: AppState['me']): AppState {
   return {
@@ -132,9 +155,11 @@ export function createApi(me: AppState['me']): Router {
   api.patch('/projects/:id', express.json(), (req, res) => {
     const project = projectParam(req);
     const body = parse(z.object({ name: z.string().min(1).optional(), settings: projectSettingsSchema.optional() }), req.body);
+    const keyBefore = projectCodexKey(project);
     if (body.name) project.name = body.name;
     if (body.settings) project.settings = { ...project.settings, ...body.settings };
     publishProject(project);
+    if (projectCodexKey(project) !== keyBefore) void applyCodexSetup(project);
     res.json(project);
   });
 
@@ -164,7 +189,7 @@ export function createApi(me: AppState['me']): Router {
       prompt: z.string().optional(),
     }), req.body ?? {});
     const created = await createWorkspace(project, { baseBranch: body.baseBranch }, (workspace) =>
-      createSession(workspace, { agent: body.agent, model: body.model, effort: body.effort }),
+      createLead(workspace, { agent: body.agent, model: body.model, effort: body.effort }),
     );
     if (body.prompt?.trim()) await sendMessage(created.session.id, body.prompt, []);
     res.status(201).json({ workspace: created.workspace, session: getSession(created.session.id) });
@@ -211,7 +236,7 @@ export function createApi(me: AppState['me']): Router {
   });
 
   api.post('/workspaces/:id/recreate', async (req, res) => {
-    await recreateContainer(workspaceParam(req));
+    await rebuildWorkspace(workspaceParam(req));
     res.status(204).end();
   });
 
@@ -246,8 +271,8 @@ export function createApi(me: AppState['me']): Router {
     const name = safeAttachmentName(String(req.query.name ?? 'attachment'));
     const body = req.body as Buffer;
     const relative = `.context/attachments/${newId()}/${name}`;
-    const containerId = await runningContainer(workspace);
-    await execText(containerId, ['bash', '-c', 'mkdir -p "$(dirname "$0")" && cat > "$0"', relative], {
+    const sandbox = await runningSandbox(workspace);
+    await execText(sandbox, ['bash', '-c', 'mkdir -p "$(dirname "$0")" && cat > "$0"', relative], {
       workdir: workspace.path,
       stdin: body,
     });
@@ -267,6 +292,19 @@ export function createApi(me: AppState['me']): Router {
       effort: z.string().optional(),
     }), req.body ?? {});
     res.status(201).json(createSession(workspace, body));
+  });
+
+  api.post('/workspaces/:id/lead', (req, res) => {
+    res.status(201).json(createLead(workspaceParam(req)));
+  });
+
+  api.post('/workspaces/:id/lead/switch', express.json(), async (req, res) => {
+    res.status(201).json(await switchLead(workspaceParam(req), parse(leadChoiceSchema, req.body)));
+  });
+
+  api.post('/workspaces/:id/agents/stop', async (req, res) => {
+    await stopAgents(workspaceParam(req).id);
+    res.status(204).end();
   });
 
   // Scripts and terminals
@@ -321,6 +359,12 @@ export function createApi(me: AppState['me']): Router {
       model: z.string().optional(),
       effort: z.string().optional(),
     }), req.body);
+    const changesModel = Boolean(body.model || body.effort || body.agent);
+    const workspace = getWorkspace(session.workspaceId);
+    if (session.closedAt) throw new HttpError(409, 'This Lead was closed. Its conversation can still be read.');
+    if (session.role === 'lead' && body.title) throw new HttpError(409, 'The Lead’s tab keeps its name.');
+    if (session.role === 'lead' && changesModel && workspace?.leadLockedAt) throw new HttpError(409, 'The Lead stays on this model for this workspace. For another model, start a new workspace.');
+    if (session.role === 'agent' && changesModel) throw new HttpError(409, 'The Lead chose this agent’s model.');
     if (body.agent && body.agent !== session.agent) {
       // Each CLI keeps its own history, so a conversation can't change agents midway.
       if (session.hasMessages) throw new HttpError(409, 'This conversation has started. Open a new tab to use a different agent.');
@@ -330,7 +374,11 @@ export function createApi(me: AppState['me']): Router {
     if (body.title) session.title = body.title;
     if (body.model) session.model = body.model;
     if (body.effort) session.effort = body.effort;
-    if (body.model || body.effort || body.agent) {
+    if (session.role === 'lead' && changesModel && workspace) {
+      // A pick for one workspace leaves the default alone.
+      workspace.lead = { agent: session.agent, model: session.model, effort: session.effort };
+      publishWorkspace(workspace);
+    } else if (changesModel) {
       state.settings.defaultAgent = session.agent;
       state.settings.defaultModel = session.model;
       state.settings.defaultEffort = session.effort;
@@ -341,13 +389,35 @@ export function createApi(me: AppState['me']): Router {
   });
 
   api.delete('/sessions/:id', async (req, res) => {
-    await deleteSession(String(req.params.id));
+    const session = sessionParam(req);
+    // Closing keeps a Lead's conversation, so a plain delete would be the wrong way to end one.
+    if (session.role === 'lead' && !session.closedAt && session.hasMessages) throw new HttpError(409, 'Close a Lead instead of deleting it.');
+    await deleteSession(session.id);
+    res.status(204).end();
+  });
+
+  api.post('/sessions/:id/close', express.json(), async (req, res) => {
+    const session = sessionParam(req);
+    if (session.role !== 'lead') throw new HttpError(409, 'Only a Lead is closed this way.');
+    await closeWorkspaceLead(session, parse(z.object({ stopAgents: z.boolean().default(false) }), req.body ?? {}).stopAgents);
+    res.status(204).end();
+  });
+
+  api.post('/sessions/:id/read', (req, res) => {
+    markRead(sessionParam(req));
+    res.status(204).end();
+  });
+
+  api.post('/sessions/:id/retry', async (req, res) => {
+    await tryAgain(sessionParam(req));
     res.status(204).end();
   });
 
   api.post('/sessions/:id/messages', express.json({ limit: '5mb' }), async (req, res) => {
     const body = parse(z.object({ text: z.string().min(1), attachments: z.array(attachmentSchema).default([]) }), req.body);
-    res.status(201).json(await sendMessage(String(req.params.id), body.text, body.attachments));
+    const item = await sendMessage(String(req.params.id), body.text, body.attachments);
+    warnOfOtherWriter(sessionParam(req));
+    res.status(201).json(item);
   });
 
   api.delete('/sessions/:id/queue/:itemId', (req, res) => {
@@ -356,11 +426,15 @@ export function createApi(me: AppState['me']): Router {
   });
 
   api.post('/sessions/:id/queue/flush', async (req, res) => {
+    checkButtonCanStart(sessionParam(req));
     await flushQueue(String(req.params.id));
     res.status(204).end();
   });
 
   api.post('/sessions/:id/interrupt', async (req, res) => {
+    const session = getSession(String(req.params.id));
+    // Neither a wake nor the Lead can restart what the user has stopped.
+    if (session) holdWhenStopped(session);
     await interruptSession(String(req.params.id));
     res.status(204).end();
   });
@@ -371,6 +445,23 @@ export function createApi(me: AppState['me']): Router {
     state.settings = { ...state.settings, ...parse(appSettingsSchema, req.body) };
     publishSettings();
     res.json(state.settings);
+  });
+
+  api.get('/playbook', (req, res) => {
+    res.json(playbookFor(playbookProject(req.query.project)));
+  });
+
+  api.put('/playbook', express.json({ limit: '256kb' }), (req, res) => {
+    const { project, content } = parse(playbookSchema, req.body);
+    const owner = playbookProject(project);
+    savePlaybook(owner, content.endsWith('\n') ? content : `${content}\n`);
+    res.json(playbookFor(owner));
+  });
+
+  api.delete('/playbook', (req, res) => {
+    const owner = playbookProject(req.query.project);
+    resetPlaybook(owner);
+    res.json(playbookFor(owner));
   });
 
   api.put('/secrets/claude', express.json(), async (req, res) => {
@@ -432,7 +523,8 @@ export function createApi(me: AppState['me']): Router {
     const check = await checkCodexKey(key);
     if (check === 'refused') throw new HttpError(400, 'OpenAI didn’t accept this key.');
     await logins.cancel('codex');
-    await saveCodexApiKey(key);
+    saveCodexApiKey(key);
+    applyCodexSetupEverywhere();
     clearAgentRejected('codex');
     await refreshAgents();
     res.json({ verified: check === 'accepted' });
@@ -440,8 +532,12 @@ export function createApi(me: AppState['me']): Router {
 
   api.post('/agents/:agent/logout', async (req, res) => {
     const agent = agentParam(req);
-    if (agent === 'codex') await signOutCodex();
-    else {
+    // Finishing one that's under way would sign back in.
+    await logins.cancel(agent);
+    if (agent === 'codex') {
+      signOutCodex();
+      applyCodexSetupEverywhere();
+    } else {
       updateSecrets({ claudeToken: '' });
       publishSettings();
     }

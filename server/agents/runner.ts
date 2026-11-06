@@ -1,20 +1,23 @@
-import type { AgentId, Attachment, ChatItem, Session, UserItem, Workspace } from '../../shared/types.ts';
+import crypto from 'node:crypto';
+import type { AgentId, AgentJob, AgentWork, Attachment, ChatItem, LeadChoice, Project, Session, ToolItem, TurnOutcome, UserItem, Workspace } from '../../shared/types.ts';
+import { MAX_AUTONOMOUS_TURNS, staysHeld } from '../../shared/lead.ts';
 import { RUNS_DIR } from '../config.ts';
-import { containerState, isContainerRunning } from '../containers.ts';
-import { exec, execStream, execText, type OutputStream } from '../docker.ts';
 import { execEnv } from '../env.ts';
+import { exec, execStream, execText, isSandboxRunning, sandboxState, type OutputStream } from '../sandbox.ts';
 import { publish } from '../events.ts';
 import { refreshDiffStat } from '../inspect.ts';
 import { deleteTranscript, flushState, flushTranscript, getProject, getSession, getWorkspace, saveState, state } from '../store.ts';
-import { markAgentRejected, shareCodexLogin, system } from '../system.ts';
+import { markAgentRejected, system } from '../system.ts';
 import { dropTranscript, transcriptFor } from '../transcript.ts';
 import { HttpError, KeyedQueue, errorMessage, newId, sleep } from '../util.ts';
-import { onWorkspaceReady, onWorkspaceTeardown, publishWorkspace, runningContainer, runtimeHandle, startWorkspace } from '../workspaces.ts';
+import { onWorkspaceReady, onWorkspaceTeardown, publishWorkspace, runningSandbox, setUpCodex, startWorkspace } from '../workspaces.ts';
 import { claudeAdapter } from './claude.ts';
 import { codexAdapter } from './codex.ts';
-import { agentProcessCommand, parseOutputReceipt } from './process.ts';
-import { systemPrompt, userPrompt } from './prompt.ts';
+import { playbookFor } from './playbook.ts';
+import { agentProcessCommand, leadToolsScript, parseOutputReceipt, parseToolCall, type ToolCall } from './process.ts';
+import { currentJobNote, scratchDir, sessionPrompt, userPrompt } from './prompt.ts';
 import { sanitizeItem } from './sanitize.ts';
+import { TEAM_TOOLS } from './team-tools.ts';
 import type { AgentAdapter, AgentParser, ChatOp } from './types.ts';
 
 const adapters: Record<AgentId, AgentAdapter> = { claude: claudeAdapter, codex: codexAdapter };
@@ -23,12 +26,31 @@ const STOP_GRACE_MS = 4000;
 const TITLE_LENGTH = 48;
 const MAX_LINE_BYTES = 32 * 1024 * 1024;
 const MAX_RUN_BYTES = 2 * 1024 ** 3;
+const MAX_TOOL_CALLS_PER_TURN = 200;
+const ACTIVITY_EVERY_MS = 2000;
+const ACTIVITY_LENGTH = 90;
+
+/** What a Lead and its team add to a turn. It's in team.ts, which builds on this file. */
+export interface TeamHooks {
+  toolCall(lead: Session, call: ToolCall): Promise<{ text: string; failed?: boolean }>;
+  /** A turn ended or a session went away, which may be what a Lead was waiting for. */
+  settled(workspaceId: string, session?: Session): void;
+  /** What a Lead taking over a workspace needs to be told. */
+  handover(workspace: Workspace): string | undefined;
+  paused(lead: Session, why: string): void;
+}
+
+let team: TeamHooks = { toolCall: async () => ({ text: '', failed: true }), settled: () => {}, handover: () => undefined, paused: () => {} };
+
+export function setTeamHooks(hooks: TeamHooks): void {
+  team = hooks;
+}
 
 interface ActiveRun {
   runId: string;
   sessionId: string;
   workspaceId: string;
-  containerId: string;
+  sandbox: string;
   dir: string;
   parser: AgentParser;
   startedAt: number;
@@ -49,6 +71,18 @@ interface ActiveRun {
   resumedFrom?: string | null;
   /** Keep saved output available until a replay can replace it completely. */
   replay?: { previous: ChatItem[]; seen: Set<string> };
+  /** Tool calls being handled. A reconnect can hand on a call whose reply isn't written yet. */
+  toolCalls: Set<string>;
+  /** They're handled one at a time, since each one costs the host a process or two. */
+  toolQueue: Promise<void>;
+  outcome?: TurnOutcome;
+  limited: boolean;
+  limitResetsAt?: number;
+  reportedFailure: boolean;
+  /** Someone asked for this to stop, as opposed to it being cut off. */
+  stopped: boolean;
+  /** The exact playbook sent in this turn, acknowledged only when the turn completes. */
+  playbookVersion?: string;
 }
 
 const runs = new Map<string, ActiveRun>();
@@ -61,21 +95,47 @@ export function publishSession(session: Session): void {
   saveState();
 }
 
-/** Save chat records before any state that depends on them, without an intervening await. */
-function persistSession(session: Session, patch: Partial<Session>): void {
+export interface ToolReceipt {
+  lead: Session;
+  id: string;
+  reply: { text: string; failed?: boolean };
+}
+
+/** Save chat records, the mutation and its optional tool receipt without an intervening await. */
+export function persistSession(session: Session, patch: Partial<Session>, receipt?: ToolReceipt): void {
   flushTranscript(session.id);
   const previous = Object.fromEntries(Object.keys(patch).map((key) => [key, session[key as keyof Session]]));
+  const replies = receipt?.lead.toolReplies;
   Object.assign(session, patch);
+  if (receipt) receipt.lead.toolReplies = { ...replies, [receipt.id]: receipt.reply };
   try {
     flushState({ required: true });
   } catch (error) {
     Object.assign(session, previous);
+    if (receipt) receipt.lead.toolReplies = replies;
     throw error;
   }
   publishSession(session);
+  if (receipt && receipt.lead !== session) publishSession(receipt.lead);
 }
 
-export function createSession(workspace: Workspace, options: { agent?: AgentId; model?: string; effort?: string }): Session {
+export function leadOf(workspaceId: string): Session | undefined {
+  return state.sessions.find((session) => session.workspaceId === workspaceId && session.role === 'lead' && !session.closedAt);
+}
+
+export function agentsOf(workspaceId: string): Session[] {
+  return state.sessions.filter((session) => session.workspaceId === workspaceId && session.role === 'agent');
+}
+
+export function createSession(workspace: Workspace, options: {
+  agent?: AgentId;
+  model?: string;
+  effort?: string;
+  id?: string;
+  title?: string;
+  role?: Session['role'];
+  work?: AgentWork;
+}): Session {
   const { defaultAgent, defaultModel, defaultEffort } = state.settings;
   const agent = options.agent ?? defaultAgent;
   const catalog = state.catalog[agent].models;
@@ -84,9 +144,11 @@ export function createSession(workspace: Workspace, options: { agent?: AgentId; 
   const wanted = options.effort ?? (agent === defaultAgent ? defaultEffort : model?.defaultEffort);
   const now = Date.now();
   const session: Session = {
-    id: newId(),
+    id: options.id ?? newId(),
     workspaceId: workspace.id,
-    title: 'Untitled',
+    title: options.title ?? 'Untitled',
+    ...(options.role ? { role: options.role } : {}),
+    ...(options.work ? { work: options.work } : {}),
     agent,
     model: model?.id ?? matching ?? '',
     effort: model?.efforts.includes(wanted ?? '') ? wanted! : model?.defaultEffort ?? 'medium',
@@ -103,6 +165,38 @@ export function createSession(workspace: Workspace, options: { agent?: AgentId; 
   return session;
 }
 
+/** A workspace has one Lead at a time, and a new one stays on a model that's been locked. */
+export function createLead(workspace: Workspace, choice: Partial<LeadChoice> = {}): Session {
+  if (leadOf(workspace.id)) throw new HttpError(409, 'This workspace already has a Lead. Close it to start another.');
+  const fallback = workspace.lead ?? state.settings.leadDefault;
+  const wanted = workspace.leadLockedAt ? workspace.lead! : {
+    agent: choice.agent ?? fallback.agent, model: choice.model ?? fallback.model, effort: choice.effort ?? fallback.effort,
+  };
+  const session = createSession(workspace, { ...wanted, role: 'lead', title: 'Lead' });
+  // A locked model that has since gone from the catalog stays what it was, so that this can say so.
+  if (workspace.leadLockedAt) {
+    Object.assign(session, workspace.lead);
+    publishSession(session);
+  }
+  workspace.lead = { agent: session.agent, model: session.model, effort: session.effort };
+  publishWorkspace(workspace);
+  return session;
+}
+
+function noteActivity(session: Session, tool: ToolItem): void {
+  const work = session.work;
+  if (!work) return;
+  const firstLine = tool.detail?.split('\n')[0];
+  work.activity = (firstLine ? `${tool.title} ${firstLine}` : tool.title).slice(0, ACTIVITY_LENGTH);
+  // Often enough to follow, without saving and sending the session for every tool call.
+  const last = lastActivityPublish.get(session.id) ?? 0;
+  if (Date.now() - last < ACTIVITY_EVERY_MS) return;
+  lastActivityPublish.set(session.id, Date.now());
+  publishSession(session);
+}
+
+const lastActivityPublish = new Map<string, number>();
+
 function apply(sessionId: string, run: ActiveRun | null, ops: ChatOp[]): void {
   // Output can keep arriving while a deleted conversation's process is stopping.
   if (!getSession(sessionId)) return;
@@ -114,11 +208,20 @@ function apply(sessionId: string, run: ActiveRun | null, ops: ChatOp[]): void {
         run?.replay?.seen.add(item.id);
         if (item.type === 'result' && run) {
           run.sawResult = true;
+          run.reportedFailure ||= Boolean(item.failed);
           item.durationMs ??= Date.now() - run.startedAt;
         }
         if (item.type === 'notice' && item.code === 'auth') {
           const session = getSession(sessionId);
           if (session) markAgentRejected(session.agent);
+        }
+        if (item.type === 'notice' && item.code === 'limit' && run) {
+          run.limited = true;
+          run.limitResetsAt = item.resetsAt;
+        }
+        if (item.type === 'tool') {
+          const session = getSession(sessionId);
+          if (session) noteActivity(session, item);
         }
         transcript.upsert(item);
         break;
@@ -141,7 +244,7 @@ function apply(sessionId: string, run: ActiveRun | null, ops: ChatOp[]): void {
   }
 }
 
-function notice(sessionId: string, runId: string | undefined, level: 'info' | 'warning' | 'error', text: string): void {
+export function notice(sessionId: string, runId: string | undefined, level: 'info' | 'warning' | 'error', text: string): void {
   if (!getSession(sessionId)) return;
   transcriptFor(sessionId).upsert({ id: newId(), ts: Date.now(), runId, type: 'notice', level, text });
 }
@@ -195,13 +298,13 @@ function handleOutput(run: ActiveRun, chunk: Buffer, pending: PendingLine): void
 
 type ProcessState = 'alive' | 'dead' | 'unknown';
 
-/** Errors reaching Docker don't mean the agent died; treating them that way would abandon a live process. */
+/** Errors reaching a sandbox don't mean the agent died; treating them that way would abandon a live process. */
 async function processState(run: ActiveRun): Promise<ProcessState> {
   try {
     // sbx exec can boot a stopped VM. Checking its state first keeps recovery
     // from waking a workspace just to discover that its old process is gone.
-    if (await containerState(run.containerId) !== 'running') return 'dead';
-    const state = (await execText(run.containerId, agentProcessCommand('status', run.dir), { timeoutMs: 10000 })).trim();
+    if (await sandboxState(run.sandbox) !== 'running') return 'dead';
+    const state = (await execText(run.sandbox, agentProcessCommand('status', run.dir), { timeoutMs: 10000 })).trim();
     if (state !== 'alive' && state !== 'dead') throw new Error('Could not identify the agent process');
     return state;
   } catch {
@@ -237,7 +340,7 @@ async function follow(run: ActiveRun): Promise<void> {
   let exit = { code: null as number | null, stderr: '' };
   let complete = false;
   for (;;) {
-    const runtime = await containerState(run.containerId).catch(() => null);
+    const runtime = await sandboxState(run.sandbox).catch(() => null);
     if (runtime === 'missing') {
       notice(run.sessionId, run.runId, 'warning', 'The workspace runtime was removed before its remaining output could be read. Previously saved conversation items have been kept.');
       run.interrupted = true;
@@ -270,10 +373,21 @@ async function follow(run: ActiveRun): Promise<void> {
     const pending: PendingLine = { data: Buffer.alloc(0), skipping };
     let receiptText = '';
     try {
-      const output = await execStream(run.containerId, agentProcessCommand('follow', run.dir, String(run.offset)));
+      const output = await execStream(run.sandbox, agentProcessCommand('follow', run.dir, String(run.offset), ...(isLead(run) ? ['calls'] : [])));
       run.output = output;
       const onOutput = (chunk: Buffer) => handleOutput(run, chunk, pending);
-      const onReceipt = (chunk: Buffer) => { receiptText = (receiptText + chunk.toString('utf8')).slice(-32768); };
+      let toolLines = '';
+      const onReceipt = (chunk: Buffer) => {
+        const text = chunk.toString('utf8');
+        receiptText = (receiptText + text).slice(-32768);
+        if (!isLead(run)) return;
+        const lines = (toolLines + text).split('\n');
+        toolLines = lines.pop() ?? '';
+        for (const line of lines) {
+          const call = parseToolCall(line);
+          if (call) answerToolCall(run, call);
+        }
+      };
       output.stdout.on('data', onOutput);
       output.stderr.on('data', onReceipt);
       try {
@@ -324,6 +438,74 @@ async function follow(run: ActiveRun): Promise<void> {
 // every later message would fail the same way.
 const LOST_CONVERSATION = /No conversation found with session ID|no rollout found for thread id/i;
 
+function isLead(run: ActiveRun): boolean {
+  return getSession(run.sessionId)?.role === 'lead';
+}
+
+/** Lonca's tools answer in a file the Lead's CLI is watching for. */
+async function writeToolReply(run: ActiveRun, callId: string, reply: { text: string; failed?: boolean }): Promise<void> {
+  for (let attempt = 1; runs.get(run.sessionId) === run; attempt++) {
+    try {
+      // Writing it mustn't boot a VM that stopped while this was being handled.
+      if (!await isSandboxRunning(run.sandbox)) throw new Error('The workspace’s runtime stopped.');
+      await execText(run.sandbox, ['bash', '-c', 'cat > "$0.tmp" && mv "$0.tmp" "$0"', `${run.dir}/replies/${callId}.json`], { stdin: JSON.stringify(reply), timeoutMs: 15000 });
+      return;
+    } catch (error) {
+      if (attempt === 3) throw error;
+      await sleep(1000);
+    }
+  }
+}
+
+function answerToolCall(run: ActiveRun, call: ToolCall): void {
+  // Any process in the workspace can write to this file, so what it can ask of the server has limits.
+  if (run.toolCalls.has(call.id) || run.toolCalls.size >= MAX_TOOL_CALLS_PER_TURN) return;
+  run.toolCalls.add(call.id);
+  run.toolQueue = run.toolQueue.then(async () => {
+    const lead = getSession(run.sessionId);
+    // What a Lead asked for before it was stopped shouldn't start anything new after it.
+    const reply = lead && !run.stopped
+      ? await team.toolCall(lead, call).catch((error) => ({ text: errorMessage(error), failed: true }))
+      : { text: 'The Lead was stopped, so this wasn\'t done.', failed: true };
+    await writeToolReply(run, call.id, reply);
+  }).catch((error) => {
+    // It's handled again if the follower reconnects, and the CLI gives up on it eventually.
+    run.toolCalls.delete(call.id);
+    console.error('could not answer a tool call:', errorMessage(error));
+  });
+}
+
+// A throwaway index, so this leaves the real one alone. Starting from a copy of it means only
+// changed files are read again. Git ignores what a test run or an install leaves behind.
+const FILES_SCRIPT = String.raw`
+set -eu
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+cp "$(git rev-parse --git-path index)" "$tmp"
+export GIT_INDEX_FILE="$tmp"
+git add -A -- . >/dev/null 2>&1
+git write-tree
+`;
+
+/** Identifies the state of a workspace's files, committed or not. */
+async function filesFingerprint(sandbox: string, workspace: Workspace): Promise<string | undefined> {
+  return (await execText(sandbox, ['bash', '-c', FILES_SCRIPT], { workdir: workspace.path, timeoutMs: 60000 }).catch(() => ''))?.trim() || undefined;
+}
+
+/** An agent told not to change files can't be prevented from it, but it can't go unnoticed. */
+async function checkFilesUntouched(run: ActiveRun, session: Session): Promise<void> {
+  const before = session.work?.filesBefore;
+  const workspace = getWorkspace(run.workspaceId);
+  if (!session.work || !before || !workspace) return;
+  session.work.filesBefore = undefined;
+  session.work.filesChanged = false;
+  if (!await isSandboxRunning(run.sandbox).catch(() => false)) return;
+  const after = await filesFingerprint(run.sandbox, workspace);
+  if (!after || after === before) return;
+  session.work.filesChanged = true;
+  notice(session.id, run.runId, 'warning', 'The workspace’s files changed while this agent was working. It was told not to change any, so it or another agent did.');
+}
+
 async function finishRun(run: ActiveRun, { code, stderr }: { code: number | null; stderr: string }, complete = false): Promise<void> {
   const { sessionId, runId } = run;
   const session = getSession(sessionId);
@@ -349,7 +531,7 @@ async function finishRun(run: ActiveRun, { code, stderr }: { code: number | null
   if (!run.sawResult) {
     if (failed && !run.interrupted) {
       notice(sessionId, runId, 'error', stderr || (code === null
-        ? 'The agent’s process ended unexpectedly. Its container may have stopped.'
+        ? 'The agent’s process ended unexpectedly. Its virtual machine may have stopped.'
         : `The agent exited with code ${code}.`));
     }
     apply(sessionId, run, [{
@@ -362,13 +544,15 @@ async function finishRun(run: ActiveRun, { code, stderr }: { code: number | null
       if (!run.replay.seen.has(item.id)) transcriptFor(sessionId).remove(item.id);
     }
   }
+  run.outcome = run.limited ? 'limit' : run.stopped ? 'stopped' : failed || run.interrupted || run.reportedFailure ? 'failed' : 'completed';
+  await checkFilesUntouched(run, session);
   await retireRun(run);
 }
 
 /** Cleanup must not boot a stopped VM just because its conversation was deleted. */
 function cleanupRunOutput(run: ActiveRun): void {
-  if (run.containerId) void isContainerRunning(run.containerId)
-    .then((running) => running ? exec(run.containerId, ['rm', '-rf', run.dir]) : undefined)
+  if (run.sandbox) void isSandboxRunning(run.sandbox)
+    .then((running) => running ? exec(run.sandbox, ['rm', '-rf', run.dir]) : undefined)
     .catch(() => {});
 }
 
@@ -381,8 +565,10 @@ async function retireRun(run: ActiveRun, extra: () => Partial<Session> = () => (
     try {
       const patch = extra();
       persistSession(session, {
-        ...patch, status: 'idle', activeRunId: null, activeMessageId: undefined, stopRequested: undefined,
-        held: run.holdQueue && (patch.queue ?? session.queue).length > 0 ? true : session.held,
+        ...patch, ...outcomeOf(run, session), status: 'idle', activeRunId: null, activeMessageId: undefined, stopRequested: undefined,
+        ...(session.role === 'lead' ? { toolReplies: undefined } : {}),
+        // Whatever is queued would only meet the same limit.
+        held: run.outcome === 'limit' || (run.holdQueue && (patch.queue ?? session.queue).length > 0) ? true : session.held,
       });
       break;
     } catch (error) {
@@ -403,6 +589,51 @@ async function retireRun(run: ActiveRun, extra: () => Partial<Session> = () => (
     refreshDiffStat(workspace).catch(() => {});
     startNextQueued(session);
   }
+  if (session) team.settled(session.workspaceId, session);
+}
+
+/** How a finished turn changes its session. A turn that's being retried hasn't finished. */
+function outcomeOf(run: ActiveRun, session: Session): Partial<Session> {
+  if (!run.outcome) return {};
+  return {
+    lastOutcome: run.outcome,
+    ...(run.outcome === 'completed' && run.playbookVersion ? { playbookVersion: run.playbookVersion } : {}),
+    limitResetsAt: run.outcome === 'limit' ? run.limitResetsAt : undefined,
+    ...(session.work ? {
+      // Whoever stopped it knows, so nobody needs telling.
+      unread: run.outcome !== 'stopped',
+      work: { ...session.work, activity: undefined, unreported: run.outcome !== 'stopped' },
+    } : {}),
+  };
+}
+
+/**
+ * Claude keeps the instructions from a conversation's first turn when it resumes one, whatever it's
+ * given later, so a Lead has to be told when they've changed.
+ */
+function playbookUpdate(session: Session, run: ActiveRun, content: string | undefined): string | undefined {
+  if (content === undefined) return undefined;
+  run.playbookVersion = crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
+  const changed = session.playbookVersion !== run.playbookVersion;
+  // The CLI may retain this edit even if the turn stops or the server crashes. Invalidate the
+  // old acknowledgment before delivery, so reverting the edit will still be sent next time.
+  if (changed && session.playbookVersion) persistSession(session, { playbookVersion: undefined });
+  return session.resumeId && changed
+    ? `Update from Lonca: this is your current playbook. From now on, follow this instead of the one you started with:\n\n${content}` : undefined;
+}
+
+/** What a turn's processes are given, which isn't the same for a Lead and the agents it starts. */
+function turnEnv(session: Session, project: Project): string[] {
+  const env = execEnv(project);
+  // Claude would otherwise leave the Lead's tools to be looked up, and it might not bother.
+  if (session.role === 'lead') return [...env, 'ENABLE_TOOL_SEARCH=false'];
+  if (session.role !== 'agent') return env;
+  return [
+    ...env,
+    `LONCA_SCRATCH=${scratchDir(session.id)}`,
+    // It's shared across a repository, which would let agents read each other's notes.
+    'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1',
+  ];
 }
 
 async function startRun(session: Session, workspace: Workspace, item: UserItem): Promise<void> {
@@ -411,10 +642,10 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
   const runId = newId();
   const adapter = adapters[session.agent];
   const run: ActiveRun = {
-    runId, sessionId: session.id, workspaceId: workspace.id, containerId: '', dir: `${RUNS_DIR}/${runId}`,
+    runId, sessionId: session.id, workspaceId: workspace.id, sandbox: '', dir: `${RUNS_DIR}/${runId}`,
     parser: adapter.parser(runId),
     startedAt: Date.now(), offset: 0, interrupted: false, holdQueue: false, launched: false, sawResult: false, outputLimitHit: false, output: null,
-    item, resumedFrom: session.resumeId,
+    item, resumedFrom: session.resumeId, toolCalls: new Set(), toolQueue: Promise.resolve(), limited: false, reportedFailure: false, stopped: false,
   };
   // Registered before anything slow happens, so Stop works from the moment the turn begins.
   runs.set(session.id, run);
@@ -425,28 +656,38 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
     // Keep the accepted item queued until its promotion and run ID are both saved.
     persistSession(session, {
       status: 'running', activeRunId: runId, activeMessageId: item.id, stopRequested: undefined,
+      ...(session.role === 'lead' ? { toolReplies: undefined } : {}),
       queue: session.queue.filter((id) => id !== item.id),
+      lastOutcome: undefined, limitResetsAt: undefined,
+      ...(session.role === 'lead' && item.from === 'lonca' ? { autonomousTurns: (session.autonomousTurns ?? 0) + 1 } : {}),
+      ...(session.work ? { work: { ...session.work, turnStartedAt: Date.now(), activity: undefined, filesChanged: false } } : {}),
     });
     persisted = true;
-    const containerId = await runningContainer(workspace);
-    run.containerId = containerId;
+    const sandbox = await runningSandbox(workspace);
+    run.sandbox = sandbox;
     const attachments = item.attachments ?? [];
-    // Someone may have run `codex login` by hand in this workspace's terminal.
-    if (session.agent === 'codex') await shareCodexLogin(containerId);
-    await execText(containerId, ['mkdir', '-p', run.dir]);
-    await execText(containerId, ['bash', '-c', 'cat > "$0"', `${run.dir}/prompt`], {
-      stdin: userPrompt(item.text, attachments),
+    if (session.agent === 'codex') await setUpCodex(workspace, project);
+    // Both prompts use one snapshot, even if the user edits the playbook while startup awaits I/O.
+    const playbook = session.role === 'lead' ? playbookFor(project).content : undefined;
+    await execText(sandbox, ['mkdir', '-p', run.dir, ...(session.work ? [scratchDir(session.id)] : [])]);
+    await execText(sandbox, ['bash', '-c', 'cat > "$0"', `${run.dir}/prompt`], {
+      stdin: userPrompt([playbookUpdate(session, run, playbook), item.context, item.text, currentJobNote(session)].filter(Boolean).join('\n\n'), attachments),
     });
+    if (session.role === 'lead') {
+      await execText(sandbox, ['bash', '-c', 'mkdir -p "$0/replies" && cat > "$0/lonca-tools.py"', run.dir], { stdin: leadToolsScript(TEAM_TOOLS) });
+    }
+    if (session.work && session.work.job !== 'implement') session.work.filesBefore = await filesFingerprint(sandbox, workspace);
     if (run.interrupted) {
       await finishRun(run, { code: null, stderr: '' });
       return;
     }
     const command = adapter.command({
-      session, workspace, project, attachments, systemPrompt: systemPrompt(workspace, project),
+      session, workspace, project, attachments, systemPrompt: sessionPrompt(session, workspace, project, playbook),
+      ...(session.role === 'lead' ? { tools: { command: 'python3', args: ['-I', `${run.dir}/lonca-tools.py`, run.dir] } } : {}),
     });
     launchAttempted = true;
-    await execText(containerId, ['lonca-run', run.dir, ...command], {
-      env: execEnv(project),
+    await execText(sandbox, ['lonca-run', run.dir, ...command], {
+      env: turnEnv(session, project),
       workdir: workspace.path,
       timeoutMs: 20000,
     });
@@ -454,13 +695,13 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
   } catch (error) {
     // A failed acknowledgment says nothing about whether the CLI ran, or even
     // finished. Drain its output through the same receipt/persistence boundary.
-    if (run.containerId && launchAttempted) {
+    if (run.sandbox && launchAttempted) {
       notice(session.id, runId, 'error', `Could not confirm agent startup; recovering its output: ${errorMessage(error)}`);
       run.holdQueue = true;
       await superviseRun(run, await processState(run) === 'dead' ? undefined : { holdQueue: true });
       return;
     }
-    if (run.containerId) await signalProcess(run, 'KILL');
+    if (run.sandbox) await signalProcess(run, 'KILL');
     notice(session.id, runId, 'error', `Could not start the agent: ${errorMessage(error)}`);
     if (!persisted) {
       // No process was launched and the accepted message is still durably queued.
@@ -474,12 +715,13 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
     }
     // A failed start shouldn't consume every follow-up while storage or the runtime is broken.
     run.holdQueue = true;
+    run.outcome = 'failed';
     await retireRun(run);
   }
 }
 
-function startNextQueued(session: Session): void {
-  if (!getSession(session.id) || deletingSessions.has(session.id) || runs.has(session.id) || session.activeRunId) return;
+export function startNextQueued(session: Session): void {
+  if (!getSession(session.id) || session.closedAt || deletingSessions.has(session.id) || runs.has(session.id) || session.activeRunId) return;
   const workspace = getWorkspace(session.workspaceId);
   if (!workspace || workspace.status !== 'ready' || session.status === 'running' || session.held) return;
   const nextId = session.queue[0];
@@ -496,6 +738,12 @@ function startNextQueued(session: Session): void {
   if (item?.type !== 'user') {
     session.queue.shift();
     startNextQueued(session);
+    return;
+  }
+  if (item.from === 'lonca' && session.role === 'lead' && (session.autonomousTurns ?? 0) >= MAX_AUTONOMOUS_TURNS) {
+    session.held = true;
+    publishSession(session);
+    team.paused(session, `The Lead paused after ${MAX_AUTONOMOUS_TURNS} turns without a word from you. Use Send now to let it continue.`);
     return;
   }
   // A queued message joins the conversation when it's sent, after the turn it waited for.
@@ -528,9 +776,33 @@ function titleFrom(text: string): string {
 
 const NOT_ACCEPTING = new Set<Workspace['status']>(['archived', 'archiving', 'error', 'deleting', 'stopping']);
 
-export async function sendMessage(sessionId: string, text: string, attachments: Attachment[]): Promise<UserItem> {
+export interface MessageOptions {
+  /** Lets a repeated request recognize that this has already been sent. */
+  id?: string;
+  from?: UserItem['from'];
+  summary?: string;
+  /** Respect user stops and automatic pauses when sending on behalf of the Lead. */
+  keepHeld?: boolean;
+  /** A Lead's job change is accepted with its message, rather than ahead of it. */
+  job?: AgentJob;
+  receipt?: ToolReceipt;
+}
+
+/** Releasing a queue also applies to a Stop whose process is still being retired or recovered. */
+function releaseQueueHold(session: Session, patch: Partial<Session>, receipt?: ToolReceipt): void {
+  persistSession(session, {
+    ...patch, held: false, userStopped: undefined,
+    ...(session.stopRequested ? { stopRequested: { holdQueue: false } } : {}),
+  }, receipt);
+  const run = runs.get(session.id);
+  // Change the live run only after saving the release, so a failed write doesn't release work.
+  if (run?.stopped) run.holdQueue = false;
+}
+
+export async function sendMessage(sessionId: string, text: string, attachments: Attachment[], options: MessageOptions = {}): Promise<UserItem> {
   const session = getSession(sessionId);
   if (!session) throw new HttpError(404, 'No such session');
+  if (session.closedAt) throw new HttpError(409, 'This Lead was closed. Its conversation can still be read.');
   if (deletingSessions.has(sessionId)) throw new HttpError(409, 'This conversation is closing.');
   const workspace = getWorkspace(session.workspaceId);
   if (!workspace) throw new HttpError(404, 'No such workspace');
@@ -539,22 +811,46 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
   const canStart = workspace.status === 'ready' && session.status !== 'running' && session.queue.length === 0;
   // Startup can discover an external stop or fail. Keep Send now available
   // until startNextQueued has actually promoted this saved message.
-  const item: UserItem = { id: newId(), ts: Date.now(), type: 'user', text, attachments, queued: true };
+  const item: UserItem = {
+    id: options.id ?? newId(), ts: Date.now(), type: 'user', text, attachments, queued: true,
+    ...(options.from ? { from: options.from } : {}),
+    ...(options.summary ? { summary: options.summary } : {}),
+  };
+  const locksLead = session.role === 'lead' && !workspace.leadLockedAt;
+  const fromUser = !options.from;
   let transcript: ReturnType<typeof transcriptFor> | undefined;
   try {
     transcript = transcriptFor(session.id);
+    if (session.role === 'lead' && !session.hasMessages) {
+      const handover = team.handover(workspace);
+      if (handover) {
+        item.context = handover;
+        notice(session.id, undefined, 'info', `What this Lead was told:\n\n${handover}`);
+      }
+    }
     transcript.upsert(item);
+    if (locksLead) {
+      workspace.lead = { agent: session.agent, model: session.model, effort: session.effort };
+      workspace.leadLockedAt = Date.now();
+    }
     // Accept the text and its queue reservation together before acknowledging it or starting a CLI.
-    persistSession(session, {
+    const patch: Partial<Session> = {
       hasMessages: true,
       title: !session.hasMessages && session.title === 'Untitled' ? titleFrom(text) : session.title,
-      queue: [...session.queue, item.id], held: false,
-    });
+      queue: [...session.queue, item.id],
+      ...(session.role === 'lead' && fromUser ? { autonomousTurns: 0, unread: false } : {}),
+      ...(session.work && fromUser ? { work: { ...session.work, userNote: text.slice(0, 1000) } } : {}),
+      ...(session.work && options.job ? { work: { ...session.work, job: options.job } } : {}),
+    };
+    if (options.keepHeld && staysHeld(session)) persistSession(session, { ...patch, held: true }, options.receipt);
+    else releaseQueueHold(session, patch, options.receipt);
   } catch (error) {
+    if (locksLead) delete workspace.leadLockedAt;
     transcript?.remove(item.id);
     try { flushTranscript(session.id); } catch { /* Retry the rollback when storage recovers. */ }
     throw new HttpError(500, `Your message could not be saved: ${errorMessage(error)}`);
   }
+  if (locksLead) publishWorkspace(workspace);
   if (!workspace.title) {
     workspace.title = titleFrom(text);
     publishWorkspace(workspace);
@@ -575,15 +871,15 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
   return canStart && !session.queue.includes(item.id) ? { ...item, queued: false } : item;
 }
 
-/** Sends messages left waiting after the user pressed Stop. */
-export async function flushQueue(sessionId: string): Promise<void> {
+/** Releases waiting messages, saving a Lead retry's receipt in the same state write. */
+export async function flushQueue(sessionId: string, receipt?: ToolReceipt): Promise<void> {
   const session = getSession(sessionId);
   if (!session) throw new HttpError(404, 'No such session');
   if (deletingSessions.has(sessionId)) throw new HttpError(409, 'This conversation is closing.');
   const workspace = getWorkspace(session.workspaceId);
   if (!workspace) throw new HttpError(404, 'No such workspace');
   if (NOT_ACCEPTING.has(workspace.status)) throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
-  persistSession(session, { held: false });
+  releaseQueueHold(session, session.role === 'lead' ? { autonomousTurns: 0 } : {}, receipt);
   if ((workspace.status === 'stopped' || workspace.status === 'ready') && session.queue.length > 0) await startWorkspace(workspace);
   startNextQueued(session);
 }
@@ -597,7 +893,8 @@ export function cancelQueued(sessionId: string, itemId: string): void {
   const queue = session.queue.filter((id) => id !== itemId);
   transcript.remove(itemId);
   try {
-    persistSession(session, { queue, held: queue.length === 0 ? false : session.held });
+    // A Lead or agent the user stopped stays stopped, with or without something waiting for it.
+    persistSession(session, { queue, held: queue.length === 0 && !session.role ? false : session.held });
   } catch (error) {
     if (item) transcript.upsert(item);
     try { flushTranscript(sessionId); } catch { /* Preserve the original queued message on retry. */ }
@@ -606,8 +903,8 @@ export function cancelQueued(sessionId: string, itemId: string): void {
 }
 
 async function signalProcess(run: ActiveRun, name: 'TERM' | 'KILL'): Promise<void> {
-  if (!run.containerId || !await isContainerRunning(run.containerId).catch(() => false)) return;
-  await exec(run.containerId, agentProcessCommand('signal', run.dir, name), { timeoutMs: 10000 }).catch(() => {});
+  if (!run.sandbox || !await isSandboxRunning(run.sandbox).catch(() => false)) return;
+  await exec(run.sandbox, agentProcessCommand('signal', run.dir, name), { timeoutMs: 10000 }).catch(() => {});
 }
 
 function stopProcess(run: ActiveRun): void {
@@ -622,11 +919,11 @@ function stopProcess(run: ActiveRun): void {
   }, STOP_GRACE_MS);
 }
 
-export async function interruptSession(sessionId: string, { holdQueue = true }: { holdQueue?: boolean } = {}): Promise<void> {
+export async function interruptSession(sessionId: string, { holdQueue = true, receipt }: { holdQueue?: boolean; receipt?: ToolReceipt } = {}): Promise<void> {
   const run = runs.get(sessionId);
+  const session = getSession(sessionId);
   if (!run) {
-    const session = getSession(sessionId);
-    // Recovery hasn't registered this run yet. It may still be changing files, even if Docker is unreachable.
+    // Recovery hasn't registered this run yet. It may still be changing files, even if its sandbox is unreachable.
     if (session?.activeRunId) {
       throw new HttpError(409, 'Lonca is reconnecting to this agent. Try Stop again after it reconnects.');
     }
@@ -636,15 +933,20 @@ export async function interruptSession(sessionId: string, { holdQueue = true }: 
       delete session.activeMessageId;
       publishSession(session);
     }
+    // An idle stop is still an accepted call; replay must not stop some later turn.
+    if (session && receipt) persistSession(session, {}, receipt);
     return;
   }
+  // A Lead stop and its receipt are saved together before signalling. A crash after this write
+  // recovers stopRequested for this run, while a replay only returns the saved reply.
+  if (session && receipt) persistSession(session, { stopRequested: { holdQueue: run.holdQueue || holdQueue } }, receipt);
   run.interrupted = true;
+  run.stopped = true;
   run.holdQueue ||= holdQueue;
-  // Signal first. Saving is what fails when an agent fills the disk, and Stop mustn't depend on it.
-  // The signal goes out after this synchronous save anyway, so a crash can't come between them.
+  // A user's Stop must still signal when the disk is full. Lead calls save first for replay.
+  // Signalling and the synchronous save share this event-loop turn.
   if (run.launched) stopProcess(run);
-  const session = getSession(sessionId);
-  if (session) {
+  if (session && !receipt) {
     session.stopRequested = { holdQueue: run.holdQueue };
     publishSession(session);
     try {
@@ -661,17 +963,42 @@ export async function deleteSession(sessionId: string): Promise<void> {
   try {
     await interruptSession(sessionId);
     // Keep the run ID and saved Stop until shutdown is confirmed, so recovery can
-    // finish stopping the process if the server crashes or Docker disconnects.
+    // finish stopping the process if the server crashes or Docker Sandboxes disconnects.
     const active = () => runs.has(sessionId) || Boolean(getSession(sessionId)?.activeRunId);
     for (let i = 0; i < 100 && active(); i++) await sleep(100);
     if (active()) throw new HttpError(409, 'The agent is still stopping. Try closing this conversation again once its process can be reached.');
+    const workspaceId = getSession(sessionId)?.workspaceId;
     state.sessions = state.sessions.filter((session) => session.id !== sessionId);
     dropTranscript(sessionId);
     await deleteTranscript(sessionId);
     publish({ type: 'session.removed', id: sessionId });
     saveState();
+    if (workspaceId) team.settled(workspaceId);
   } finally {
     deletingSessions.delete(sessionId);
+  }
+}
+
+/** Closes a Lead the way a tab is closed, except that its conversation stays readable. */
+export async function closeLead(session: Session): Promise<void> {
+  if (!session.hasMessages) return deleteSession(session.id);
+  if (deletingSessions.has(session.id)) throw new HttpError(409, 'This Lead is already closing.');
+  deletingSessions.add(session.id);
+  try {
+    await interruptSession(session.id);
+    const active = () => runs.has(session.id) || Boolean(session.activeRunId);
+    for (let i = 0; i < 100 && active(); i++) await sleep(100);
+    if (active()) throw new HttpError(409, 'The Lead is still stopping. Try closing it again once its process can be reached.');
+    const transcript = transcriptFor(session.id);
+    for (const id of session.queue) {
+      const item = transcript.find(id);
+      // What the user asked for stays on the record for the next Lead. Lonca's own updates would only be out of date.
+      if (item?.type === 'user' && !item.from) transcript.upsert({ ...item, queued: false });
+      else transcript.remove(id);
+    }
+    persistSession(session, { closedAt: Date.now(), queue: [], held: false, userStopped: undefined, unread: false });
+  } finally {
+    deletingSessions.delete(session.id);
   }
 }
 
@@ -685,16 +1012,21 @@ export function resumeActiveRuns(): Promise<void> {
     for (const session of state.sessions) {
       if (session.status !== 'running') startNextQueued(session);
     }
+    // A Lead may have been due a turn when the server stopped.
+    for (const workspace of state.workspaces) team.settled(workspace.id);
   });
 }
 
 /** A run that couldn't be picked up, such as one whose conversation couldn't be read, is asked about again. */
 export function retryActiveRuns(): Promise<void> {
-  return resumption.run('runs', () => resumeUnfollowedRuns({ quiet: true }));
+  return resumption.run('runs', async () => {
+    await resumeUnfollowedRuns({ quiet: true });
+    for (const workspace of state.workspaces) team.settled(workspace.id);
+  });
 }
 
 async function resumeUnfollowedRuns({ quiet = false }: { quiet?: boolean } = {}): Promise<void> {
-  // This also runs when Docker comes back, when some runs may never have stopped being followed.
+  // This also runs when Docker Sandboxes comes back, when some runs may never have stopped being followed.
   const pending = state.sessions.filter((session) => session.activeRunId && !runs.has(session.id));
   await Promise.all(pending.map((session) => resumeRun(session).catch((error) => {
     if (!quiet) console.error('could not check on running workspaces:', errorMessage(error));
@@ -706,19 +1038,19 @@ async function resumeRun(session: Session): Promise<void> {
   const runId = session.activeRunId;
   const workspace = getWorkspace(session.workspaceId);
   // With Docker Sandboxes signed out, a VM's agent may well still be working. This runs again once it can be asked.
-  if (workspace?.runtime === 'sandbox' && system.sandbox.state !== 'ready') return;
-  // Register stopped and unreachable runtimes too. The follower distinguishes
-  // those from a removed runtime and retains tracking until its output is read.
+  if (workspace && system.sandbox.state !== 'ready') return;
+  // Register stopped and unreachable sandboxes too. The follower distinguishes
+  // those from a removed sandbox and retains tracking until its output is read.
   if (workspace) {
     const transcript = transcriptFor(session.id);
     const item = session.activeMessageId ? transcript.find(session.activeMessageId) : undefined;
     const previous = transcript.items.filter((entry) => entry.runId === runId).map((entry) => ({ ...entry }));
     const run: ActiveRun = {
-      runId, sessionId: session.id, workspaceId: workspace.id, containerId: runtimeHandle(workspace), dir: `${RUNS_DIR}/${runId}`,
+      runId, sessionId: session.id, workspaceId: workspace.id, sandbox: workspace.sandboxName, dir: `${RUNS_DIR}/${runId}`,
       parser: adapters[session.agent].parser(runId),
       startedAt: session.updatedAt, offset: 0, interrupted: Boolean(session.stopRequested), holdQueue: session.stopRequested?.holdQueue ?? false, launched: true, sawResult: false, outputLimitHit: false, output: null,
       item: item?.type === 'user' ? item : undefined, resumedFrom: session.resumeId,
-      replay: { previous, seen: new Set() },
+      replay: { previous, seen: new Set() }, toolCalls: new Set(), toolQueue: Promise.resolve(), limited: false, reportedFailure: false, stopped: Boolean(session.stopRequested),
     };
     runs.set(session.id, run);
     // A crash during teardown can leave an agent alive in a workspace now marked error.

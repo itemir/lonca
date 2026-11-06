@@ -1,23 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { BLOCKED_DESTINATIONS, allowRule, createArgs, execArgs, parseSandboxList, sandboxHandle, sandboxName, templateListIncludes, type SandboxSpec } from '../../server/sandbox.ts';
+import { BLOCKED_DESTINATIONS, allowRule, createArgs, execArgs, parseSandboxList, secretArgs, templateListIncludes, type SandboxSpec } from '../../server/sandbox.ts';
 
 const spec: SandboxSpec = {
   name: 'lonca-app-amman',
   image: async () => 'lonca-sandbox:abc',
   env: [],
   mounts: ['/home/me/.lonca/projects/app/workspaces/amman', '/home/me/.lonca/projects/app/repo.git'],
-  credentials: '/home/me/.lonca/credentials',
   agentState: '/home/me/.lonca/agent-state/w1',
+  secrets: [],
+  setup: () => ({ command: ['true'] }),
   network: 'internet',
 };
 
 describe('talking to the sbx CLI', () => {
-  it('tells a sandbox’s handle from a container’s name', () => {
-    expect(sandboxName(sandboxHandle('lonca-app-amman'))).toBe('lonca-app-amman');
-    expect(sandboxName('lonca-app-amman')).toBeNull();
-    expect(sandboxName('3f2a9c')).toBeNull();
-  });
-
   it('reads the sandbox list, which may be empty', () => {
     expect(parseSandboxList('[{"name":"a","status":"running"},{"name":"b","status":"stopped"},{"name":"c","status":"running (not responding)"}]'))
       .toEqual([{ name: 'a', running: true }, { name: 'b', running: false }, { name: 'c', running: true }]);
@@ -52,7 +47,16 @@ describe('talking to the sbx CLI', () => {
     expect(args[args.indexOf('--template') + 1]).toBe('lonca-sandbox:abc');
     expect(args[args.indexOf('--pull') + 1]).toBe('never');
     expect(args[args.indexOf('--skills') + 1]).toBe('off');
-    expect(args.slice(args.indexOf('shell'))).toEqual(['shell', ...spec.mounts, spec.credentials, spec.agentState]);
+    expect(args.slice(args.indexOf('shell'))).toEqual(['shell', ...spec.mounts, spec.agentState]);
+  });
+
+  it('gives the proxy a command to read a secret, for one sandbox, rather than the secret', () => {
+    expect(secretArgs('box', { service: 'github', file: '/home/me/.lonca/boundary/github' })).toEqual([
+      'secret', 'set', 'github', '--sandbox', 'box', '--command', "/bin/cat '/home/me/.lonca/boundary/github'", '--refresh', 'on-demand', '--no-verify', '--force',
+    ]);
+    expect(secretArgs('box', { hosts: ['a.example', 'b.example'], placeholder: 'stand-in', file: "/home/o'neil/.lonca/boundary/codex" })).toEqual([
+      'secret', 'set-custom', '--host', 'a.example', '--host', 'b.example', '--placeholder', 'stand-in', '--sandbox', 'box', '--command', "/bin/cat '/home/o'\\''neil/.lonca/boundary/codex'", '--refresh', 'on-demand', '--no-verify',
+    ]);
   });
 
   it('publishes ten ports on loopback, and sets limits only when asked', () => {

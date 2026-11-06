@@ -23,7 +23,6 @@ describe.runIf(REAL_SANDBOX)('sandbox SSH protection with a multibyte home direc
       const project = await lonca.waitForProject((await lonca.api('POST', '/projects', { path: fixture })).id);
       await lonca.api('PATCH', `/projects/${project.id}`, { settings: { memoryGb: 1, cpus: 1 } });
       const workspace = await lonca.waitForWorkspace((await lonca.api('POST', `/projects/${project.id}/workspaces`, {})).workspace.id);
-      expect(workspace.runtime).toBe('sandbox');
       // Background checks also restore the protective agent. Stop them so the external
       // command is the last to reach the VM before restart recovery.
       await lonca.stop();
@@ -34,11 +33,11 @@ describe.runIf(REAL_SANDBOX)('sandbox SSH protection with a multibyte home direc
       await until('the stand-in SSH agent', () => fs.existsSync(socket), 5000);
       execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', path.join(root, 'key')]);
       execFileSync('ssh-add', [path.join(root, 'key')], { env: { ...process.env, SSH_AUTH_SOCK: socket }, stdio: 'ignore' });
-      execFileSync('sbx', ['exec', '--user', 'agent', workspace.containerName, '--', 'true'], { env: { ...process.env, SSH_AUTH_SOCK: socket }, stdio: 'ignore' });
+      execFileSync('sbx', ['exec', '--user', 'agent', workspace.sandboxName, '--', 'true'], { env: { ...process.env, SSH_AUTH_SOCK: socket }, stdio: 'ignore' });
       await lonca.start();
       await lonca.waitForWorkspace(workspace.id);
       expect(await lonca.api('GET', `/workspaces/${workspace.id}/files?path=.`)).toBeInstanceOf(Array);
-      expect(sandboxSshKeys(workspace.containerName)).toBe('0 0');
+      expect(sandboxSshKeys(workspace.sandboxName)).toBe('0 0');
     } finally {
       try {
         await lonca.destroy();

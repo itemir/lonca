@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { PanelLeft, Plus, Trash2 } from 'lucide-react';
 import type { ProjectSettings as Settings } from '../../../shared/types.ts';
 import { api } from '../api.ts';
+import { PlaybookEditor } from '../components/PlaybookEditor.tsx';
 import { ConfirmDialog, IconButton } from '../components/ui.tsx';
 import { useLayout } from '../layout.ts';
 import { attempt, useStore } from '../store.ts';
@@ -82,6 +83,11 @@ export function ProjectSettings() {
         </section>
 
         <section className="settings-section">
+          <h2>Lead playbook</h2>
+          <PlaybookEditor project={project.id} />
+        </section>
+
+        <section className="settings-section">
           <h2>Isolation</h2>
           <div className="field">
             <span className="field-label">Network access</span>
@@ -105,9 +111,9 @@ export function ProjectSettings() {
             </label>
           </div>
           <label className="field">
-            <span className="field-label">Custom image</span>
-            <input className="input input-mono" value={form.image} placeholder="Default Lonca image" onChange={(event) => update({ image: event.target.value })} />
-            <span className="field-help">To add toolchains, build an image FROM the Lonca workspace image, whose tag is in Settings, and enter its tag here.</span>
+            <span className="field-label">Custom template</span>
+            <input className="input input-mono" value={form.image} placeholder="Default Lonca template" onChange={(event) => update({ image: event.target.value })} />
+            <span className="field-help">To add toolchains, install them in a workspace, stop its virtual machine and save it with <code>sbx template save</code>. Then enter the template’s tag here.</span>
           </label>
           <div className="field">
             <span className="field-label">Environment variables</span>
@@ -119,6 +125,7 @@ export function ProjectSettings() {
               </div>
             ))}
             <button type="button" className="link-button" onClick={() => setEnvRows([...envRows, ['', '']])}><Plus size={13} /> Add a variable</button>
+            <span className="field-help">Everything in the workspace can read these. Sign-ins in Settings stay outside its virtual machine, so use those for credentials where you can.</span>
           </div>
         </section>
 

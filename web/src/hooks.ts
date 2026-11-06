@@ -1,5 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 
+/** A narrow screen, which has room for one thing at a time. */
+export function useIsPhone(): boolean {
+  const [phone, setPhone] = useState(() => matchMedia('(max-width: 720px)').matches);
+  useEffect(() => {
+    const query = matchMedia('(max-width: 720px)');
+    const update = () => setPhone(query.matches);
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+  return phone;
+}
+
+/** A screen without a mouse, and so usually with an on-screen keyboard. */
+export const isTouch = () => matchMedia('(pointer: coarse)').matches;
+
 /** Calls `load` now and on an interval while the page is visible, keeping the latest result. */
 export function usePolled<T>(load: (() => Promise<T>) | null, intervalMs: number, deps: unknown[]): {
   data: T | null;

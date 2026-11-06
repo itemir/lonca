@@ -1,4 +1,5 @@
 import type { TodoEntry, ToolItem } from '../../shared/types.ts';
+import { describeTeamTool } from './team-tools.ts';
 import { type AgentAdapter, type AgentParser, type ChatOp, clipOutput } from './types.ts';
 
 /** Codex wraps every command as `/bin/bash -lc '<command>'`; show just the command. */
@@ -14,6 +15,10 @@ function humanize(type: string): string {
 
 function isAuthFailure(message: string): boolean {
   return /\b401\b|unauthorized|not logged in|invalid_api_key/i.test(message);
+}
+
+function isLimit(message: string): boolean {
+  return /usage limit|rate limit|too many requests|\b429\b|quota/i.test(message);
 }
 
 export function createCodexParser(runId: string): AgentParser {
@@ -45,6 +50,14 @@ export function createCodexParser(runId: string): AgentParser {
         };
       }
       case 'mcp_tool_call':
+        if (item.server === 'lonca') {
+          return {
+            ...base,
+            ...describeTeamTool(String(item.tool), item.arguments ?? {}),
+            status,
+            ...clipOutput(item.error?.message ?? (item.result?.content ?? []).map((block: { text?: string }) => block.text ?? '').join('\n')),
+          };
+        }
         return {
           ...base,
           kind: 'other',
@@ -137,7 +150,7 @@ export function createCodexParser(runId: string): AgentParser {
               op: 'upsert',
               item: {
                 id: `${runId}:failure`, ts: Date.now(), runId, type: 'notice', level: 'error', text: message,
-                code: isAuthFailure(message) ? 'auth' : undefined,
+                code: isAuthFailure(message) ? 'auth' : isLimit(message) ? 'limit' : undefined,
               },
             },
             { op: 'upsert', item: { id: `${runId}:result`, ts: Date.now(), runId, type: 'result', failed: true } },
@@ -157,17 +170,19 @@ export function createCodexParser(runId: string): AgentParser {
 }
 
 export const codexAdapter: AgentAdapter = {
-  command({ session, systemPrompt, attachments }) {
+  command({ session, systemPrompt, attachments, tools }) {
     const images = attachments.filter((file) => file.mime.startsWith('image/')).flatMap((file) => ['-i', file.path]);
     const options = [
       ...images,
       '--json',
       '--skip-git-repo-check',
-      // The container is the sandbox; Codex's own sandbox can't nest inside it.
+      // The virtual machine is the sandbox; Codex's own needn't nest inside it.
       '--dangerously-bypass-approvals-and-sandbox',
       '-m', session.model,
       '-c', `model_reasoning_effort=${JSON.stringify(session.effort)}`,
       '-c', `developer_instructions=${JSON.stringify(systemPrompt)}`,
+      // A Lead's agents have to be ones the user can see, so its CLI's own kind are off.
+      ...(tools ? ['-c', `mcp_servers.lonca.command=${JSON.stringify(tools.command)}`, '-c', `mcp_servers.lonca.args=${JSON.stringify(tools.args)}`, '-c', 'features.multi_agent=false'] : []),
     ];
     return session.resumeId
       ? ['codex', 'exec', 'resume', session.resumeId, ...options, '-']

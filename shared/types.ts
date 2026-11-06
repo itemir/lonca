@@ -11,14 +11,21 @@ export interface ModelOption {
 
 export type Catalog = Record<AgentId, { label: string; models: ModelOption[] }>;
 
+/** The model and thinking level a workspace's Lead runs on. */
+export interface LeadChoice {
+  agent: AgentId;
+  model: string;
+  effort: string;
+}
+
 export interface ProjectSettings {
   defaultBranch: string;
   setupScript: string;
   /** Globs of untracked files copied from a local repository into new workspaces. */
   filesToCopy: string[];
-  /** Custom image built `FROM` the Lonca workspace image. Blank uses the default. */
+  /** A template saved from a workspace, to start this project's from. Blank uses the default. */
   image: string;
-  /** `internet` blocks the host, LAN and other containers. `host` also allows host services (including other workspaces' published ports) and the LAN. */
+  /** `internet` blocks the host, LAN and other workspaces. `host` also allows host services (including other workspaces' published ports) and the LAN. */
   network: 'internet' | 'host';
   memoryGb: number;
   cpus: number;
@@ -42,7 +49,7 @@ export interface Project {
   settings: ProjectSettings;
 }
 
-export type StepId = 'image' | 'container' | 'worktree' | 'files' | 'setup';
+export type StepId = 'image' | 'sandbox' | 'worktree' | 'files' | 'setup';
 
 export interface WorkspaceStep {
   id: StepId;
@@ -74,7 +81,7 @@ export interface DiffStat {
 export interface Workspace {
   id: string;
   projectId: string;
-  /** City name; also the directory and the container's hostname. */
+  /** City name; also the directory. */
   name: string;
   /** Short description derived from the first prompt, shown in the sidebar. */
   title: string | null;
@@ -82,9 +89,11 @@ export interface Workspace {
   baseBranch: string;
   path: string;
   /** Named for the common case: a sandbox has one of these too. */
-  containerName: string;
-  /** Fixed when the workspace is created. Workspaces from before VMs have none, and are containers. */
-  runtime?: WorkspaceRuntime;
+  sandboxName: string;
+  /** What its Lead runs on, which a new Lead inherits. */
+  lead?: LeadChoice;
+  /** Set by the Lead's first message. After that `lead` only changes when it can't run. */
+  leadLockedAt?: number;
   /** First of the ten ports published on the host's localhost. */
   port: number;
   status: WorkspaceStatus;
@@ -119,6 +128,12 @@ export interface UserItem extends ChatItemBase {
   text: string;
   attachments?: Attachment[];
   queued?: boolean;
+  /** Who wrote it, when it wasn't the user. */
+  from?: 'lead' | 'lonca';
+  /** Shown instead of `text`, which Lonca writes for the Lead to read. */
+  summary?: string;
+  /** Sent ahead of `text` without being shown. */
+  context?: string;
 }
 
 export interface TextItem extends ChatItemBase {
@@ -133,7 +148,7 @@ export interface ThinkingItem extends ChatItemBase {
   streaming?: boolean;
 }
 
-export type ToolKind = 'command' | 'read' | 'edit' | 'search' | 'web' | 'agent' | 'todos' | 'other';
+export type ToolKind = 'command' | 'read' | 'edit' | 'search' | 'web' | 'agent' | 'team' | 'todos' | 'other';
 
 export interface TodoEntry {
   text: string;
@@ -157,14 +172,18 @@ export interface ToolItem extends ChatItemBase {
   outputTruncated?: boolean;
   edits?: EditEntry[];
   todos?: TodoEntry[];
+  /** The agent a Lead's tool call was about. */
+  agentId?: string;
 }
 
 export interface NoticeItem extends ChatItemBase {
   type: 'notice';
   level: 'info' | 'warning' | 'error';
   text: string;
-  /** `auth` lets the UI offer a way to sign in. */
-  code?: 'auth';
+  /** `auth` lets the UI offer a way to sign in. `limit` means the service's usage limit was reached. */
+  code?: 'auth' | 'limit';
+  /** When a usage limit ends, if the service said. */
+  resetsAt?: number;
 }
 
 export interface ResultItem extends ChatItemBase {
@@ -179,10 +198,47 @@ export interface ResultItem extends ChatItemBase {
 
 export type ChatItem = UserItem | TextItem | ThinkingItem | ToolItem | NoticeItem | ResultItem;
 
+export type AgentJob = 'analyze' | 'implement' | 'review';
+
+export type TurnOutcome = 'completed' | 'failed' | 'limit' | 'stopped';
+
+/** What a Lead's agent is doing for it. */
+export interface AgentWork {
+  job: AgentJob;
+  /** The latest thing it did, shown in the Lead's tab. */
+  activity?: string;
+  turnStartedAt?: number;
+  /** The Lead hasn't been told how its latest turn ended. */
+  unreported?: boolean;
+  /** What the user wrote to it directly, until the Lead has been told. */
+  userNote?: string;
+  /** The tracked files when a turn began, for an agent told not to change them. */
+  filesBefore?: string;
+  /** They changed during its latest turn. */
+  filesChanged?: boolean;
+}
+
 export interface Session {
   id: string;
   workspaceId: string;
   title: string;
+  /** Absent for a conversation of the user's own. */
+  role?: 'lead' | 'agent';
+  /** Set on an agent a Lead started. */
+  work?: AgentWork;
+  /** A Lead that was closed: its conversation stays readable, and it no longer runs. */
+  closedAt?: number;
+  lastOutcome?: TurnOutcome;
+  /** When the usage limit that ended its latest turn ends, if known. */
+  limitResetsAt?: number;
+  /** Has a result nobody has read. On a Lead, this means it needs the user. */
+  unread?: boolean;
+  /** A Lead's turns since the user last wrote, which stops a team running forever unattended. */
+  autonomousTurns?: number;
+  /** Identifies the playbook a Lead was last told about. */
+  playbookVersion?: string;
+  /** Mutating tool calls and their replies, retained until this Lead's turn is saved as finished. */
+  toolReplies?: Record<string, { text: string; failed?: boolean }>;
   agent: AgentId;
   model: string;
   effort: string;
@@ -196,8 +252,10 @@ export interface Session {
   stopRequested?: { holdQueue: boolean };
   /** Ids of user items waiting for the current turn to finish. */
   queue: string[];
-  /** The user pressed Stop with messages queued, so they wait for a decision. */
+  /** Queued messages wait for a decision, including after a stop, usage limit or failure. */
   held?: boolean;
+  /** A team session stopped by the user. Only another user action can release it. */
+  userStopped?: boolean;
   hasMessages: boolean;
   createdAt: number;
   updatedAt: number;
@@ -261,11 +319,9 @@ export interface LoginState {
   output?: string;
 }
 
-export type WorkspaceRuntime = 'sandbox' | 'container';
-
-/** Whether new workspaces get a virtual machine of their own through Docker Sandboxes, and if not, why not. */
+/** Whether workspaces can run, which takes Docker Sandboxes, and if not, why not. */
 export interface SandboxStatus {
-  state: 'checking' | 'ready' | 'not-installed' | 'signed-out' | 'unsupported' | 'unavailable' | 'off';
+  state: 'checking' | 'ready' | 'not-installed' | 'signed-out' | 'unsupported' | 'unavailable';
   version?: string;
   detail?: string;
   /** Commands to set it up, where there's one way to do that. */
@@ -275,7 +331,6 @@ export interface SandboxStatus {
 }
 
 export interface SystemStatus {
-  docker: { ok: boolean; error?: string; version?: string };
   sandbox: SandboxStatus;
   image: { tag: string; state: 'unknown' | 'building' | 'ready' | 'error'; log: string; error?: string };
   agents: Record<AgentId, AgentStatus>;
@@ -290,6 +345,18 @@ export interface AppSettings {
   defaultAgent: AgentId;
   defaultModel: string;
   defaultEffort: string;
+  leadDefault: LeadChoice;
+  /** How many agents a Lead can have working at once. */
+  leadMaxAgents: number;
+  /** Tell the computer's notification center when a Lead needs the user. */
+  notifications: boolean;
+}
+
+/** Instructions for Leads, from a project's file, the global file or the shipped template. */
+export interface Playbook {
+  content: string;
+  source: 'template' | 'global' | 'project';
+  template: string;
 }
 
 export interface SecretsStatus {
@@ -400,6 +467,9 @@ export type ServerEvent =
   | { type: 'login'; agent: AgentId; login: LoginState | null }
   | { type: 'system'; system: SystemStatus; catalog: Catalog }
   | { type: 'settings'; settings: AppSettings; secrets: SecretsStatus };
+
+/** Sent over the events WebSocket: nothing needs to interrupt someone who's looking at the page. */
+export type ClientEvent = { type: 'focus'; focused: boolean };
 
 /** Sent over a terminal's WebSocket as text frames; output arrives as binary frames. */
 export type TerminalClientMessage = { type: 'resize'; cols: number; rows: number };

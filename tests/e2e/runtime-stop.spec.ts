@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { expect, test } from '@playwright/test';
 import type { AppState } from '../../shared/types.ts';
-import { Lonca, docker, makeFixtureRepo, runtimeRunning, until } from '../support/harness.ts';
+import { Lonca, makeFixtureRepo, sandboxRunning, until, sbx } from '../support/harness.ts';
 
 for (const automaticTerminal of [false, true]) {
   test(`keeps an externally stopped workspace stopped with ${automaticTerminal ? 'automatic terminal creation' : 'an open browser polling'}`, async ({ page }) => {
@@ -24,8 +24,8 @@ for (const automaticTerminal of [false, true]) {
         await page.goto(url);
         await expect(page.locator('.terminal-view:visible .xterm-rows')).toContainText(workspace.name);
       }
-      docker('stop', '-t', '1', workspace.containerName);
-      expect(runtimeRunning(workspace.containerName)).toBe(false);
+      sbx('stop', workspace.sandboxName);
+      expect(sandboxRunning(workspace.sandboxName)).toBe(false);
       if (automaticTerminal) {
         const opening = page.waitForResponse((response) => response.url().endsWith('/terminals') && response.request().method() === 'POST');
         await page.goto(url);
@@ -34,11 +34,11 @@ for (const automaticTerminal of [false, true]) {
       await expect(page.locator('.workspace-banner')).toContainText('is stopped', { timeout: 15000 });
       // Cover another full polling interval, including stale requests and resizes.
       await page.waitForTimeout(5500);
-      expect(runtimeRunning(workspace.containerName)).toBe(false);
+      expect(sandboxRunning(workspace.sandboxName)).toBe(false);
       if (automaticTerminal) await page.unroute(routePattern);
       await page.locator('.workspace-banner').getByRole('button', { name: 'Start', exact: true }).click();
       await expect(page.locator('.workspace-banner')).toHaveCount(0);
-      expect(runtimeRunning(workspace.containerName)).toBe(true);
+      expect(sandboxRunning(workspace.sandboxName)).toBe(true);
       await expect(page.getByRole('button', { name: 'src', exact: true })).toBeVisible();
     } finally {
       await lonca.destroy();

@@ -2,12 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Session, SessionSnapshot, Workspace } from '../../shared/types.ts';
-import { IN_SANDBOX, RUNTIME, Lonca, asRoot, dockerExec, makeFixtureRepo, until } from '../support/harness.ts';
+import { RUNTIME, Lonca, asRoot, sandboxExec, makeFixtureRepo, until, sleep } from '../support/harness.ts';
 
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 describe('conversation persistence boundaries', () => {
-  const lonca = new Lonca({ port: IN_SANDBOX ? 48327 : 48317, instance: `transcript-persistence-${RUNTIME}`, firstWorkspacePort: IN_SANDBOX ? 53200 : 52200 });
+  const lonca = new Lonca({ port: 48327, instance: `transcript-persistence-${RUNTIME}`, firstWorkspacePort: 53200});
   const fixture = makeFixtureRepo();
   let workspace: Workspace;
   const marker = (name: string) => path.join(workspace.path, '.context', `persistence-${name}`);
@@ -18,7 +18,7 @@ describe('conversation persistence boundaries', () => {
     await lonca.start();
     const project = await lonca.waitForProject((await lonca.api('POST', '/projects', { path: fixture })).id);
     workspace = await lonca.waitForWorkspace((await lonca.api('POST', `/projects/${project.id}/workspaces`, {})).workspace.id);
-    const cli = dockerExec(workspace.containerName, 'command -v claude').output;
+    const cli = sandboxExec(workspace.sandboxName, 'command -v claude').output;
     const script = `#!/usr/bin/python3
 import json, os, sys, time
 prompt = sys.stdin.read().strip()
@@ -41,7 +41,7 @@ if prompt.startswith('wait') or prompt.startswith('bulk-wait'):
         time.sleep(0.05)
 print(json.dumps({'type': 'result', 'is_error': False}), flush=True)
 `;
-    asRoot(workspace.containerName, `printf %s ${quote(script)} > ${quote(cli)}\nchmod +x ${quote(cli)}`);
+    asRoot(workspace.sandboxName, `printf %s ${quote(script)} > ${quote(cli)}\nchmod +x ${quote(cli)}`);
   });
 
   beforeEach(() => {
@@ -95,7 +95,7 @@ print(json.dumps({'type': 'result', 'is_error': False}), flush=True)
       const runId = (await lonca.session(session.id)).activeRunId;
       await lonca.stop();
       fs.writeFileSync(marker('release'), 'finish');
-      await until('completion while offline', () => dockerExec(workspace.containerName, `test -f /var/tmp/lonca/agent-runs/${runId}/exit`).code === 0);
+      await until('completion while offline', () => sandboxExec(workspace.sandboxName, `test -f /var/tmp/lonca/agent-runs/${runId}/exit`).code === 0);
       await lonca.start();
     }
     const before = await finished(session.id);
@@ -121,7 +121,7 @@ print(json.dumps({'type': 'result', 'is_error': False}), flush=True)
         await until('completion persistence to fail', () => lonca.log.slice(logStart).includes('could not finish saving a turn:'));
         expect(await lonca.session(session.id)).toMatchObject({ status: 'running', activeRunId: runId, queue: [queued.id] });
         expect(started()).toEqual(['wait']);
-        expect(dockerExec(workspace.containerName, `test -s /var/tmp/lonca/agent-runs/${runId}/out.jsonl`).code).toBe(0);
+        expect(sandboxExec(workspace.sandboxName, `test -s /var/tmp/lonca/agent-runs/${runId}/out.jsonl`).code).toBe(0);
         if (recovery === 'restart') await lonca.kill();
         restore();
         if (recovery === 'restart') await lonca.start();
@@ -170,7 +170,7 @@ print(json.dumps({'type': 'result', 'is_error': False}), flush=True)
     const runId = (await lonca.session(session.id)).activeRunId;
     await lonca.stop();
     fs.writeFileSync(marker('release'), 'finish');
-    await until('completion while offline', () => dockerExec(workspace.containerName, `test -f /var/tmp/lonca/agent-runs/${runId}/exit`).code === 0);
+    await until('completion while offline', () => sandboxExec(workspace.sandboxName, `test -f /var/tmp/lonca/agent-runs/${runId}/exit`).code === 0);
     const restore = failWrites(transcriptFile(session.id));
     try {
       await lonca.start();
@@ -192,13 +192,13 @@ print(json.dumps({'type': 'result', 'is_error': False}), flush=True)
     const session = await send('wait');
     await until('the original agent', () => fs.existsSync(marker('ready')));
     const runId = (await lonca.session(session.id)).activeRunId;
-    const pid = dockerExec(workspace.containerName, `cat /var/tmp/lonca/agent-runs/${runId}/pid`).output;
+    const pid = sandboxExec(workspace.sandboxName, `cat /var/tmp/lonca/agent-runs/${runId}/pid`).output;
     await lonca.stop();
     const restore = failWrites(transcriptFile(session.id));
     try {
       await lonca.start();
       await expect(lonca.api('POST', `/sessions/${session.id}/interrupt`)).rejects.toThrow(/409.*reconnecting/);
-      expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).toBe(0);
+      expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).toBe(0);
     } finally {
       restore();
     }
@@ -207,7 +207,7 @@ print(json.dumps({'type': 'result', 'is_error': False}), flush=True)
       return true;
     }, 15000);
     const complete = await finished(session.id);
-    expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).not.toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).not.toBe(0);
     expect(complete.items.find((item) => item.type === 'result')).toMatchObject({ interrupted: true });
   });
 

@@ -1,9 +1,9 @@
-// The trash icons that close a workspace, in the browser against a real server and real containers.
+// The trash icons that close a workspace, in the browser against a real server and real sandboxes.
 import fs from 'node:fs';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { Project, Workspace } from '../../shared/types.ts';
-import { Lonca, makeFixtureRepo, runtimeRunning, until } from '../support/harness.ts';
+import { Lonca, makeFixtureRepo, sandboxRunning, until } from '../support/harness.ts';
 
 const lonca = new Lonca({ port: 48371, instance: 'workspace-close-ui', firstWorkspacePort: 56300 });
 let fixture: string;
@@ -21,20 +21,20 @@ const opened = (workspace: Workspace) => `${workspaceUrl(workspace)}?token=${lon
 
 async function expectGone(workspace: Workspace): Promise<void> {
   await until(`${workspace.name} to go`, async () => (await lonca.workspace(workspace.id)) === undefined, 60000);
-  expect(runtimeRunning(workspace.containerName)).toBeNull();
+  expect(sandboxRunning(workspace.sandboxName)).toBeNull();
   expect(fs.existsSync(workspace.path)).toBe(false);
 }
 
-/** Leaves a workspace in the failed state of an operation that couldn't reach Docker. */
-async function failWithoutDocker(operation: () => Promise<unknown>): Promise<void> {
+/** Leaves a workspace in the failed state of an operation that couldn't reach Docker Sandboxes. */
+async function failWithoutSandboxes(operation: () => Promise<unknown>): Promise<void> {
   await lonca.kill();
-  lonca.env.DOCKER_HOST = 'tcp://127.0.0.1:9';
+  lonca.setOffline(true);
   await lonca.start();
   try {
     await expect(operation()).rejects.toThrow();
   } finally {
     await lonca.kill();
-    delete lonca.env.DOCKER_HOST;
+    lonca.setOffline(false);
     await lonca.start();
   }
 }
@@ -79,7 +79,7 @@ test('archives another workspace from its sidebar row, then deletes it, without 
   await dialog.getByRole('button', { name: 'Archive', exact: true }).click();
   await expect(page.getByRole('button', { name: '1 archived' })).toBeVisible({ timeout: 60000 });
   await expect(page).toHaveURL(workspaceUrl(here));
-  expect(runtimeRunning(other.containerName)).toBeNull();
+  expect(sandboxRunning(other.sandboxName)).toBeNull();
   expect(fs.existsSync(other.path)).toBe(false);
 
   // Deleting for good happens from the archived list.
@@ -101,7 +101,7 @@ test('archives the workspace on screen from the header, then deletes it', async 
 
   // The trash icon is the one way to close it, and stopping isn't offered at all.
   await header.getByRole('button', { name: 'Workspace options' }).click();
-  await expect(page.getByRole('menuitem')).toHaveText(['Rename', 'Rebuild container', 'Project settings']);
+  await expect(page.getByRole('menuitem')).toHaveText(['Rename', 'Rebuild virtual machine', 'Project settings']);
   await page.keyboard.press('Escape');
 
   await header.getByRole('button', { name: 'Archive this workspace' }).click();
@@ -112,7 +112,7 @@ test('archives the workspace on screen from the header, then deletes it', async 
   // Archiving stays put: the banner has its progress and the way back.
   await expect(page.locator('.workspace-banner')).toContainText('archived', { timeout: 60000 });
   await expect(page).toHaveURL(workspaceUrl(workspace));
-  expect(runtimeRunning(workspace.containerName)).toBeNull();
+  expect(sandboxRunning(workspace.sandboxName)).toBeNull();
 
   await header.getByRole('button', { name: 'Delete this workspace' }).click();
   await dialog.getByRole('button', { name: 'Delete permanently' }).click();
@@ -129,7 +129,7 @@ test('doesn’t wake a stopped workspace to count its changes', async ({ page })
   const dialog = page.getByRole('dialog');
   await expect(dialog).toContainText('Any uncommitted changes are lost.');
   await dialog.getByRole('button', { name: 'Cancel' }).click();
-  expect(runtimeRunning(workspace.containerName)).toBe(false);
+  expect(sandboxRunning(workspace.sandboxName)).toBe(false);
 });
 
 test('says when an agent is working', async ({ page }) => {
@@ -163,7 +163,7 @@ test('offers nothing while a workspace is changing state', async ({ page }) => {
 
 test('keeps Archive as a way out of a failed operation, and restores from it', async ({ page }) => {
   const workspace = await create();
-  await failWithoutDocker(() => lonca.api('POST', `/workspaces/${workspace.id}/recreate`));
+  await failWithoutSandboxes(() => lonca.api('POST', `/workspaces/${workspace.id}/recreate`));
   expect(await lonca.workspace(workspace.id)).toMatchObject({ status: 'error', pendingOperation: 'rebuild' });
   await page.goto(opened(workspace));
 
@@ -173,7 +173,7 @@ test('keeps Archive as a way out of a failed operation, and restores from it', a
   await dialog.getByRole('button', { name: 'Archive', exact: true }).click();
   const banner = page.locator('.workspace-banner');
   await expect(banner).toContainText('archived', { timeout: 60000 });
-  expect(runtimeRunning(workspace.containerName)).toBeNull();
+  expect(sandboxRunning(workspace.sandboxName)).toBeNull();
 
   await banner.getByRole('button', { name: 'Restore' }).click();
   await lonca.waitForWorkspace(workspace.id);
@@ -183,7 +183,7 @@ test('keeps Archive as a way out of a failed operation, and restores from it', a
 for (const operation of ['archive', 'delete'] as const) {
   test(`offers Delete as the way out of a failed ${operation}`, async ({ page }) => {
     const workspace = await create();
-    await failWithoutDocker(() => operation === 'delete'
+    await failWithoutSandboxes(() => operation === 'delete'
       ? lonca.api('DELETE', `/workspaces/${workspace.id}`)
       : lonca.api('POST', `/workspaces/${workspace.id}/archive`));
     expect(await lonca.workspace(workspace.id)).toMatchObject({ status: 'error', pendingOperation: operation });

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
-import { Lonca, git, makeFixtureRepo, until } from '../support/harness.ts';
+import { Lonca, git, makeFixtureRepo, until, sleep } from '../support/harness.ts';
 
 test('repository setup scripts can be stopped and rerun from the terminal panel', async ({ page }) => {
   const lonca = new Lonca({ port: 48297, instance: 'setup-ui-test', firstWorkspacePort: 50500 });

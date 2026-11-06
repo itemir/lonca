@@ -27,7 +27,7 @@ case "$1" in
 esac
 `, { mode: 0o700 });
   sandbox = await import('../../server/sandbox.ts');
-  spec = { name: 'test', image: async () => 'image', env: ['LONCA_PORT=12345'], mounts: [], credentials: path.join(root, 'credentials'), agentState: path.join(root, 'agent-state'), network: 'host' };
+  spec = { name: 'test', image: async () => 'image', env: ['LONCA_PORT=12345'], mounts: [], agentState: path.join(root, 'agent-state'), secrets: [{ service: 'github', file: path.join(root, 'github') }], setup: () => ({ command: ['true'] }), network: 'host' };
 });
 afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
@@ -42,6 +42,11 @@ it.each(['stopped', 'missing'] as const)('observes a fresh %s state instead of w
   expect(fs.readFileSync(path.join(root, 'calls'), 'utf8')).toBe('ls\n');
   await sandbox.ensureSandbox(spec);
   expect(fs.readFileSync(path.join(root, 'state'), 'utf8')).toBe(running);
+});
+
+it('has the proxy’s secrets in place before anything runs in a sandbox', async () => {
+  await sandbox.ensureSandbox(spec);
+  expect(fs.readFileSync(path.join(root, 'calls'), 'utf8').split('\n').filter(Boolean).slice(-4)).toEqual(['ls', 'secret', 'exec', 'exec']);
 });
 
 it('propagates an unavailable sandbox service without running any commands in it', async () => {

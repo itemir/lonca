@@ -27,7 +27,7 @@ function Setup() {
   const projects = useStore((store) => store.projects);
   const setAddProjectOpen = useStore((store) => store.setAddProjectOpen);
   const setLoginAgent = useStore((store) => store.setLoginAgent);
-  const { docker, sandbox, image, agents } = system;
+  const { sandbox, image, agents } = system;
   const claudeReady = agents.claude.signedIn && !agents.claude.rejected;
   const codexReady = agents.codex.signedIn && !agents.codex.rejected;
   const anyAgent = claudeReady || codexReady;
@@ -37,26 +37,27 @@ function Setup() {
   const signIn = (agent: 'claude' | 'codex', primary: boolean) => (blocker
     ? <span className="setup-waiting">{blocker}</span>
     : <button type="button" className={`button button-small ${primary ? 'button-primary' : ''}`} onClick={() => setLoginAgent(agent)}>Sign in</button>);
-  if (docker.ok && image.state === 'ready' && anyAgent && projects.length > 0) return null;
+  if (sandbox.state === 'ready' && image.state === 'ready' && anyAgent && projects.length > 0) return null;
   return (
     <section className="home-section">
       <h2>Get set up</h2>
       <ul className="setup-list">
-        <SetupRow state={docker.ok ? 'done' : 'error'}>
-          {docker.ok ? `Docker ${docker.version ?? ''} is running` : `Lonca can’t reach Docker${docker.error ? `: ${docker.error}` : ''}. Start it and Lonca will pick it up.`}
-        </SetupRow>
-        {sandbox.state === 'ready' && <SetupRow state="done">Each workspace gets its own virtual machine</SetupRow>}
+        {sandbox.state === 'ready' && <SetupRow state="done">Each workspace gets its own virtual machine, using Docker Sandboxes {sandbox.version}</SetupRow>}
+        {sandbox.state === 'checking' && <SetupRow state="busy">Checking for Docker Sandboxes</SetupRow>}
         {(sandbox.state === 'not-installed' || sandbox.state === 'signed-out') && (
-          <SetupRow state="todo" action={<Link className="button button-small" to="/settings">Set up</Link>}>
-            {sandbox.state === 'signed-out' ? 'Sign in to Docker Sandboxes for a virtual machine per workspace (optional)' : 'Install Docker Sandboxes for a virtual machine per workspace (optional)'}
+          <SetupRow state="todo" action={<Link className="button button-small button-primary" to="/settings">Set up</Link>}>
+            {sandbox.state === 'signed-out' ? 'Sign in to Docker Sandboxes, which runs your workspaces' : 'Install Docker Sandboxes, which runs your workspaces'}
           </SetupRow>
         )}
-        <SetupRow state={image.state === 'ready' ? 'done' : image.state === 'error' ? 'error' : 'busy'}>
-          {image.state === 'ready' && 'The workspace image is ready'}
-          {image.state === 'building' && 'Building the workspace image. This takes a few minutes the first time.'}
-          {image.state === 'unknown' && 'Checking for the workspace image'}
-          {image.state === 'error' && `The workspace image failed to build: ${image.error}`}
-        </SetupRow>
+        {(sandbox.state === 'unsupported' || sandbox.state === 'unavailable') && <SetupRow state="error">Workspaces can’t run: {sandbox.detail}</SetupRow>}
+        {sandbox.state === 'ready' && (
+          <SetupRow state={image.state === 'ready' ? 'done' : image.state === 'error' ? 'error' : 'busy'}>
+            {image.state === 'ready' && 'The workspace template is ready'}
+            {image.state === 'building' && 'Building the workspace template. This takes a few minutes the first time.'}
+            {image.state === 'unknown' && 'Checking for the workspace template'}
+            {image.state === 'error' && `The workspace template failed to build: ${image.error}`}
+          </SetupRow>
+        )}
         <SetupRow
           state={claudeReady ? 'done' : 'todo'}
           action={!claudeReady && signIn('claude', nextIsSignIn)}
@@ -100,7 +101,6 @@ function WorkspaceLine({ workspace }: { workspace: Workspace }) {
 }
 
 export function Home() {
-  const inVm = useStore((store) => store.system.sandbox.state === 'ready');
   const workspaces = useStore((store) => store.workspaces);
   const projects = useStore((store) => store.projects);
   const setAddProjectOpen = useStore((store) => store.setAddProjectOpen);
@@ -121,7 +121,7 @@ export function Home() {
       {!sidebarOpen && <div className="page-toolbar"><IconButton label="Show the sidebar" onClick={toggleSidebar}><PanelLeft size={16} /></IconButton></div>}
       <div className="page-column">
         <h1 className="home-title">Lonca</h1>
-        <p className="home-lede">Run coding agents side by side. Each workspace gets its own branch and its own {inVm ? 'virtual machine' : 'container'}.</p>
+        <p className="home-lede">Run coding agents side by side. Each workspace gets its own branch and its own virtual machine.</p>
         <Setup />
         {recent.length > 0 && (
           <section className="home-section">

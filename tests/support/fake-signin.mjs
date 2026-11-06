@@ -1,5 +1,5 @@
 // Fake sign-in services for the real `claude` and `codex` CLIs: Anthropic's and OpenAI's OAuth
-// endpoints over TLS and OpenAI's device flow over HTTP. Runs inside the helper container, so the
+// endpoints over TLS and OpenAI's device flow over HTTP. Runs inside the helper, so the
 // CLIs go through Lonca's real sign-in path and only the far end is pretend.
 import fs from 'node:fs';
 import http from 'node:http';

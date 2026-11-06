@@ -3,9 +3,9 @@ import net from 'node:net';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest';
 import type { AppState, Project, Session, TerminalInfo, Workspace } from '../../shared/types.ts';
-import { FAKE_SANDBOX, FAKE_SBX_DIR, IN_SANDBOX, RUNTIME, Lonca, asRoot, docker, dockerExec, makeFixtureRepo, runtimeRunning, sbx, sleep, until } from '../support/harness.ts';
+import { FAKE_SANDBOX, FAKE_SBX_DIR, RUNTIME, Lonca, asRoot, sandboxExec, makeFixtureRepo, sandboxRunning, sbx, sleep, until, REAL_SANDBOX } from '../support/harness.ts';
 
-const lonca = new Lonca({ port: IN_SANDBOX ? 48339 : 48338, instance: `runtime-stop-${RUNTIME}`, firstWorkspacePort: IN_SANDBOX ? 54900 : 54800 });
+const lonca = new Lonca({ port: 48339, instance: `runtime-stop-${RUNTIME}`, firstWorkspacePort: 54900});
 let fixture: string;
 let project: Project;
 let workspace: Workspace;
@@ -31,14 +31,13 @@ afterEach(async () => {
 afterAll(() => lonca.destroy());
 
 function stopRuntime(): void {
-  if (IN_SANDBOX) sbx('stop', workspace.containerName);
-  else docker('stop', '-t', '1', workspace.containerName);
+  sbx('stop', workspace.sandboxName);
 }
 
 async function startAgent(): Promise<string> {
-  const cli = dockerExec(workspace.containerName, 'command -v claude').output;
+  const cli = sandboxExec(workspace.sandboxName, 'command -v claude').output;
   const quotedCli = `'${cli.replaceAll("'", "'\\''")}'`;
-  asRoot(workspace.containerName, `cat > ${quotedCli} <<'CLI'
+  asRoot(workspace.sandboxName, `cat > ${quotedCli} <<'CLI'
 #!/bin/bash
 cat >/dev/null
 echo '{"type":"assistant","message":{"id":"saved","content":[{"type":"text","text":"saved answer"}]}}'
@@ -83,14 +82,14 @@ it.each(['workspace', 'project', 'retry'] as const)('can delete a stopped worksp
     if (action === 'project') await lonca.api('DELETE', `/projects/${project.id}`);
     else if (action === 'retry') {
       await until('the saved deletion to settle its stopped run', async () => !(await lonca.session(session.id)).activeRunId);
-      expect(runtimeRunning(workspace.containerName)).toBe(false);
+      expect(sandboxRunning(workspace.sandboxName)).toBe(false);
       await lonca.api('POST', `/workspaces/${workspace.id}/retry`);
       await until('retried workspace deletion', async () => !await lonca.workspace(workspace.id));
     } else await lonca.api('DELETE', `/workspaces/${workspace.id}`);
     expect(await lonca.workspace(workspace.id)).toBeUndefined();
     expect((await lonca.api<AppState>('GET', '/state')).sessions.some((entry) => entry.workspaceId === workspace.id)).toBe(false);
     expect(fs.existsSync(path.join(lonca.home, 'sessions', `${session.id}.jsonl`))).toBe(false);
-    expect(runtimeRunning(workspace.containerName)).toBeNull();
+    expect(sandboxRunning(workspace.sandboxName)).toBeNull();
     expect(fs.existsSync(workspace.path)).toBe(false);
   } finally {
     await releasePort(blocker);
@@ -108,7 +107,7 @@ it.each(['archive', 'rebuild'] as const)('retains pending output when an occupie
     await expect(lonca.api('POST', `/workspaces/${workspace.id}/${operation === 'rebuild' ? 'recreate' : operation}`)).rejects.toThrow();
     expect(await lonca.workspace(workspace.id)).toMatchObject({ status: 'error', pendingOperation: operation });
     expect(await lonca.session(session.id)).toMatchObject({ activeRunId: runId });
-    expect(runtimeRunning(workspace.containerName)).toBe(false);
+    expect(sandboxRunning(workspace.sandboxName)).toBe(false);
   } finally {
     await releasePort(blocker);
   }
@@ -118,37 +117,37 @@ it.each(['archive', 'rebuild'] as const)('retains pending output when an occupie
   expect((await lonca.items(session.id)).some((item) => item.type === 'text' && item.text === 'saved answer')).toBe(true);
 });
 
-it.skipIf(IN_SANDBOX)('does not discard a workspace run while its runtime cannot be reached', async () => {
+it.skipIf(REAL_SANDBOX)('does not discard a workspace run while its runtime cannot be reached', async () => {
   const runId = await startAgent();
-  const pid = dockerExec(workspace.containerName, `cat /var/tmp/lonca/agent-runs/${runId}/pid`).output;
+  const pid = sandboxExec(workspace.sandboxName, `cat /var/tmp/lonca/agent-runs/${runId}/pid`).output;
   await lonca.kill();
-  lonca.env.DOCKER_HOST = 'tcp://127.0.0.1:9';
+  lonca.setOffline(true);
   await lonca.start();
   try {
-    await expect(lonca.api('DELETE', `/workspaces/${workspace.id}`)).rejects.toThrow(/still stopping/);
-    expect(await lonca.session(session.id)).toMatchObject({ activeRunId: runId, stopRequested: { holdQueue: true } });
-    expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).toBe(0);
+    await expect(lonca.api('DELETE', `/workspaces/${workspace.id}`)).rejects.toThrow(/reconnecting/);
+    expect(await lonca.session(session.id)).toMatchObject({ activeRunId: runId });
+    expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).toBe(0);
   } finally {
     await lonca.kill();
-    delete lonca.env.DOCKER_HOST;
+    lonca.setOffline(false);
     await lonca.start();
   }
   await lonca.api('POST', `/workspaces/${workspace.id}/retry`);
   await until('deletion after reconnecting', async () => !await lonca.workspace(workspace.id));
-  expect(runtimeRunning(workspace.containerName)).toBeNull();
+  expect(sandboxRunning(workspace.sandboxName)).toBeNull();
 });
 
 it('can delete a workspace whose finished run output cannot be read', async () => {
   const runId = await startAgent();
   await lonca.kill();
   const dir = `/var/tmp/lonca/agent-runs/${runId}`;
-  expect(dockerExec(workspace.containerName, `kill -KILL -- -"$(cat ${dir}/pid)"\nchmod 000 ${dir}/out.jsonl`).code).toBe(0);
+  expect(sandboxExec(workspace.sandboxName, `kill -KILL -- -"$(cat ${dir}/pid)"\nchmod 000 ${dir}/out.jsonl`).code).toBe(0);
   await lonca.start();
   await until('output recovery to retry', async () => (await lonca.items(session.id)).some((item) => item.type === 'notice' && item.text.includes('keeping its recovery data')));
   expect(await lonca.session(session.id)).toMatchObject({ activeRunId: runId });
   await lonca.api('DELETE', `/workspaces/${workspace.id}`);
   expect(await lonca.workspace(workspace.id)).toBeUndefined();
-  expect(runtimeRunning(workspace.containerName)).toBeNull();
+  expect(sandboxRunning(workspace.sandboxName)).toBeNull();
 });
 
 it.each(['shell', 'setup'] as const)('does not restart a stopped runtime when a connected %s stream closes', async (kind) => {
@@ -167,9 +166,9 @@ it.each(['shell', 'setup'] as const)('does not restart a stopped runtime when a 
     connected.socket.send(JSON.stringify({ type: 'resize', cols: 110, rows: 40 }));
     for (let i = 0; i < 6; i++) {
       await sleep(1000);
-      expect(runtimeRunning(workspace.containerName)).toBe(false);
+      expect(sandboxRunning(workspace.sandboxName)).toBe(false);
     }
-    if (FAKE_SANDBOX) expect(fs.readFileSync(path.join(FAKE_SBX_DIR, 'calls.log'), 'utf8')).not.toContain(`exec-start ${workspace.containerName} `);
+    if (FAKE_SANDBOX) expect(fs.readFileSync(path.join(FAKE_SBX_DIR, 'calls.log'), 'utf8')).not.toContain(`exec-start ${workspace.sandboxName} `);
     if (kind === 'setup') expect((await lonca.workspace(workspace.id)).steps.find((step) => step.id === 'setup')?.status).toBe('error');
   } finally {
     connected.socket.close();
@@ -183,14 +182,14 @@ it('settles recovered terminal controls without restarting a stopped runtime', a
     // Survive a lost PTY so this exercises controls recovered after a crash.
     connected.send("trap '' HUP TERM; while :; do echo tick >> .context/recovered-shell; sleep 0.2; done\n");
     await until('shell heartbeat', () => fs.existsSync(path.join(workspace.path, '.context/recovered-shell')));
-    const pid = dockerExec(workspace.containerName, `cat /var/tmp/lonca/tty/${shell.id}.pid`).output;
+    const pid = sandboxExec(workspace.sandboxName, `cat /var/tmp/lonca/tty/${shell.id}.pid`).output;
     await lonca.kill();
     await lonca.start();
     await until('recovered terminal controls', async () => (await lonca.api<AppState>('GET', '/state')).terminals.some((entry) => entry.id === shell.id && entry.disconnected));
-    expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).toBe(0);
     stopRuntime();
     await until('recovered terminal to exit', async () => (await lonca.api<AppState>('GET', '/state')).terminals.find((entry) => entry.id === shell.id)?.status === 'exited', 15000);
-    expect(runtimeRunning(workspace.containerName)).toBe(false);
+    expect(sandboxRunning(workspace.sandboxName)).toBe(false);
   } finally {
     connected.socket.close();
   }
@@ -203,5 +202,5 @@ it('retains an abnormal script exit code after deferred process recovery', async
     .find((entry) => entry.id === terminal.id)?.status === 'exited', 20000);
   expect((await lonca.api<AppState>('GET', '/state')).terminals.find((entry) => entry.id === terminal.id)?.exitCode).toBe(137);
   expect((await lonca.workspace(workspace.id)).steps.find((step) => step.id === 'setup')).toMatchObject({ status: 'error', detail: 'The setup script exited with code 137.' });
-  expect(runtimeRunning(workspace.containerName)).toBe(true);
+  expect(sandboxRunning(workspace.sandboxName)).toBe(true);
 });

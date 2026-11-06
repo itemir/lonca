@@ -1,19 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
-  AlertCircle, Archive, ArchiveRestore, Box, Check, ChevronDown, ChevronRight, Code2, Copy, Diff, File as FileIcon, Folder, GitBranch, Globe, Info, MoreHorizontal, PanelLeft,
-  PanelRight, Pause, Pencil, Play, Plus, RotateCcw, Settings as SettingsIcon, Trash2, X,
+  AlertCircle, Archive, ArchiveRestore, Box, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Copy, Crown, Diff, File as FileIcon, Folder, GitBranch, Globe, Info, Layers, MoreHorizontal, PanelLeft,
+  PanelRight, Pause, Pencil, Play, Plus, RotateCcw, Settings as SettingsIcon, Trash2, Users, X,
 } from 'lucide-react';
 import type { Project, Session, Workspace, WorkspaceStep } from '../../../shared/types.ts';
 import { api } from '../api.ts';
-import { basename, runtimeName } from '../format.ts';
+import { basename, effortLabel } from '../format.ts';
+import { useIsPhone } from '../hooks.ts';
 import { useLayout } from '../layout.ts';
 import { attempt, tabKey, useStore, type WorkspaceTab } from '../store.ts';
 import { ChatTranscript } from './Chat.tsx';
 import { canClose, closeVerb, CloseWorkspaceDialog } from './CloseWorkspaceDialog.tsx';
 import { Composer } from './Composer.tsx';
 import { DiffTab, FileTab } from './FileViews.tsx';
+import { modelLabel } from './ModelPicker.tsx';
 import { RightPanel } from './RightPanel.tsx';
+import { CloseLeadDialog, NoLead, SessionBanner, StatusGlyph, TabsSheet, TeamActivity, TeamStrip, sessionState } from './Team.tsx';
 import { Avatar, ConfirmDialog, type ConfirmOptions, IconButton, Menu, Modal, Spinner } from './ui.tsx';
 
 const portUrl = (workspace: Workspace) => `http://localhost:${workspace.port}`;
@@ -33,16 +36,15 @@ function StepRow({ step, children, icon }: { step: WorkspaceStep | undefined; ch
   );
 }
 
-function WorkspaceIntro({ workspace, project }: { workspace: Workspace; project: Project }) {
+function WorkspaceIntro({ workspace, project, session, hasLead }: { workspace: Workspace; project: Project; session: Session; hasLead: boolean }) {
   const step = (id: WorkspaceStep['id']) => workspace.steps.find((entry) => entry.id === id);
   const worktree = step('worktree');
   const image = step('image');
-  const container = step('container');
+  const sandbox = step('sandbox');
   const setup = step('setup');
   const files = step('files');
   const base = `origin/${workspace.baseBranch}`;
   const finished = (entry: WorkspaceStep | undefined) => entry?.status === 'done' || entry?.status === 'warning';
-  const runtime = runtimeName(workspace);
   const hasSetup = Boolean(project.settings.setupScript.trim()) || (setup && setup.status !== 'pending');
   // Rows keep their place while the workspace boots, so nothing jumps as steps finish.
   return (
@@ -52,7 +54,7 @@ function WorkspaceIntro({ workspace, project }: { workspace: Workspace; project:
       </div>
       <ul className="intro-steps">
         {image?.status === 'running' && (
-          <StepRow step={image} icon={<Box size={16} />}>Preparing the workspace image. The first time takes a few minutes.</StepRow>
+          <StepRow step={image} icon={<Box size={16} />}>Preparing the workspace template. The first time takes a few minutes.</StepRow>
         )}
         <StepRow step={worktree} icon={<GitBranch size={16} />}>
           {finished(worktree) ? 'Branched' : 'Branching'} <code>{workspace.branch}</code> from <code>{base}</code>
@@ -68,10 +70,10 @@ function WorkspaceIntro({ workspace, project }: { workspace: Workspace; project:
           />
           {workspace.filesCopied > 0 && <> and copied {workspace.filesCopied} {workspace.filesCopied === 1 ? 'file' : 'files'}</>}
         </StepRow>
-        <StepRow step={container} icon={<Box size={16} />}>
-          {finished(container)
-            ? <>Running in its own {runtime}, <code>{workspace.containerName}</code></>
-            : `Starting an isolated ${runtime}`}
+        <StepRow step={sandbox} icon={<Box size={16} />}>
+          {finished(sandbox)
+            ? <>Running in its own virtual machine, <code>{workspace.sandboxName}</code></>
+            : 'Starting an isolated virtual machine'}
         </StepRow>
         {setup?.status === 'running' && <StepRow step={setup} icon={<Info size={16} />}>Running the setup script. Its output is in the Setup tab.</StepRow>}
         {setup?.status === 'done' && <StepRow step={setup} icon={<Check size={16} />}>Ran the setup script. Its output is in the Setup tab.</StepRow>}
@@ -84,6 +86,16 @@ function WorkspaceIntro({ workspace, project }: { workspace: Workspace; project:
         {workspace.status === 'ready' && (
           <StepRow step={undefined} icon={<Globe size={16} />}>
             A server listening on <code>0.0.0.0</code> opens at <a href={portUrl(workspace)} target="_blank" rel="noreferrer">localhost:{workspace.port} ↗</a>. That port is in <code>$LONCA_PORT</code>, and the next nine are published too.
+          </StepRow>
+        )}
+        {session.role === 'lead' && !session.hasMessages && (
+          <StepRow step={undefined} icon={<Crown size={16} />}>
+            Your Lead is ready. Tell it the outcome you want. It does the work itself or starts other agents, and it’s accountable for the result.
+          </StepRow>
+        )}
+        {!session.role && hasLead && (
+          <StepRow step={undefined} icon={<Users size={16} />}>
+            This conversation is your own, not part of the Lead’s team. It shares the same files, and the Lead isn’t told what it does.
           </StepRow>
         )}
       </ul>
@@ -113,7 +125,7 @@ function StatusBanner({ workspace }: { workspace: Workspace }) {
       ) : (
         <div className="workspace-banner">
           <Pause size={15} />
-          <span>This workspace’s {runtimeName(workspace)} is stopped. Sending a message starts it again.</span>
+          <span>This workspace’s virtual machine is stopped. Sending a message starts it again.</span>
           <button type="button" className="button button-small" onClick={act('start')}><Play size={13} /> Start</button>
         </div>
       );
@@ -164,7 +176,14 @@ function RenameDialog({ workspace, onClose }: { workspace: Workspace; onClose: (
   );
 }
 
-function WorkspaceHeader({ workspace, project }: { workspace: Workspace; project: Project }) {
+function WorkspaceHeader({ workspace, project, earlierLeads, onReadLead, phone }: {
+  workspace: Workspace;
+  project: Project;
+  earlierLeads: Session[];
+  onReadLead: (session: Session) => void;
+  /** A phone shows where you are and how to move between tabs here, in place of tabs. */
+  phone?: { title?: string; subtitle?: string; onBack?: () => void; onShowTabs: () => void };
+}) {
   const navigate = useNavigate();
   const { sidebarOpen, toggleSidebar, rightOpen, toggleRight } = useLayout();
   const [confirm, setConfirm] = useState<ConfirmOptions | null>(null);
@@ -174,31 +193,54 @@ function WorkspaceHeader({ workspace, project }: { workspace: Workspace; project
 
   const openInEditor = (name: string, scheme: string) => setConfirm({
     title: `Open in ${name}?`,
-    body: `${name} runs on your computer, outside the ${runtimeName(workspace)}, and can act on settings, tasks and git config an agent left in this workspace. Open it if you trust what the agent has written.`,
+    body: `${name} runs on your computer, outside the virtual machine, and can act on settings, tasks and git config an agent left in this workspace. Open it if you trust what the agent has written.`,
     action: `Open in ${name}`,
     onConfirm: () => window.open(`${scheme}://file${workspace.path}`),
   });
 
   return (
     <header className="workspace-header">
-      {!sidebarOpen && <IconButton label="Show the sidebar" onClick={toggleSidebar}><PanelLeft size={16} /></IconButton>}
+      {!sidebarOpen && !phone?.onBack && <IconButton label="Show the sidebar" onClick={toggleSidebar}><PanelLeft size={16} /></IconButton>}
+      {phone?.onBack && (
+        <button type="button" className="phone-back" onClick={phone.onBack}><ChevronLeft size={18} /> Lead</button>
+      )}
       <div className="crumbs">
-        <Avatar owner={project.githubOwner} name={project.name} size={20} />
-        <Link to={`/projects/${project.id}`} className="crumb">{project.name}</Link>
-        <ChevronRight size={14} className="crumb-separator" />
-        <span className="crumb" title={workspace.branch}>{workspace.branch.split('/').at(-1)}</span>
+        {phone?.title ? (
+          <div className="phone-title">
+            <strong>{phone.title}</strong>
+            {phone.subtitle && <span>{phone.subtitle}</span>}
+          </div>
+        ) : (
+          <>
+            {/* A phone's header is mostly buttons, so what's left goes to which workspace this is. */}
+            {!phone && (
+              <>
+                <Avatar owner={project.githubOwner} name={project.name} size={20} />
+                <Link to={`/projects/${project.id}`} className="crumb">{project.name}</Link>
+                <ChevronRight size={14} className="crumb-separator" />
+              </>
+            )}
+            <span className="crumb" title={workspace.branch}>{workspace.branch.split('/').at(-1)}</span>
+          </>
+        )}
         <Menu
           className="crumb-menu"
           label="Workspace options"
           trigger={<MoreHorizontal size={16} />}
           entries={[
             { label: 'Rename', icon: <Pencil size={14} />, onSelect: () => setRenaming(true) },
-            { label: `Rebuild ${runtimeName(workspace)}`, icon: <RotateCcw size={14} />, disabled: !running && workspace.status !== 'stopped', onSelect: () => void attempt(() => api.workspaceAction(workspace.id, 'recreate')) },
+            { label: 'Rebuild virtual machine', icon: <RotateCcw size={14} />, disabled: !running && workspace.status !== 'stopped', onSelect: () => void attempt(() => api.workspaceAction(workspace.id, 'recreate')) },
+            ...earlierLeads.map((lead) => ({
+              label: `Read the Lead closed ${new Date(lead.closedAt!).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`,
+              icon: <Crown size={14} />,
+              onSelect: () => onReadLead(lead),
+            })),
             { label: 'Project settings', icon: <SettingsIcon size={14} />, onSelect: () => navigate(`/projects/${project.id}`) },
           ]}
         />
       </div>
       <span className="spacer" />
+      {phone && <IconButton label="Show all tabs" onClick={phone.onShowTabs}><Layers size={17} /></IconButton>}
       <span className="workspace-name">{workspace.name}</span>
       <IconButton className="icon-button-danger" label={`${closeVerb(workspace)} this workspace`} disabled={!canClose(workspace)} onClick={() => setClosing(true)}>
         <Trash2 size={16} />
@@ -220,6 +262,25 @@ function WorkspaceHeader({ workspace, project }: { workspace: Workspace; project
       {renaming && <RenameDialog workspace={workspace} onClose={() => setRenaming(false)} />}
       {closing && <CloseWorkspaceDialog workspace={workspace} onClose={() => setClosing(false)} />}
     </header>
+  );
+}
+
+/** The Lead and its agents keep their names, and show their state in a place that doesn't move. */
+function TeamTabLabel({ session, active, onSelect, onClose }: { session: Session; active: boolean; onSelect: () => void; onClose: () => void }) {
+  const catalog = useStore((store) => store.catalog);
+  const state = sessionState(session);
+  const lead = session.role === 'lead';
+  return (
+    <div className={`tab session-tab team-tab ${lead ? 'lead-tab' : ''} ${active ? 'active' : ''}`} role="tab" aria-selected={active}>
+      <button type="button" className="tab-label" onClick={onSelect}>
+        <span className="tab-slot">{state ? <StatusGlyph state={state} /> : lead && <Crown size={13} aria-hidden="true" />}</span>
+        <span className="tab-title">{session.title}</span>
+        {!lead && <span className="tab-model">{modelLabel(catalog, session.agent, session.model)}</span>}
+      </button>
+      <button type="button" className="tab-action tab-close" aria-label={`Close ${session.title}`} title="Close this tab" onClick={onClose}>
+        <X size={13} />
+      </button>
+    </div>
   );
 }
 
@@ -302,6 +363,23 @@ function FileTabLabel({ tab, active, onSelect, onClose }: { tab: Exclude<Workspa
   );
 }
 
+/** Whatever's on screen has been read, as long as someone's looking at it. */
+function MarkRead({ session }: { session: Session }) {
+  const { id, unread } = session;
+  useEffect(() => {
+    if (!unread) return;
+    const read = () => {
+      if (document.hasFocus()) void attempt(() => api.markRead(id));
+    };
+    read();
+    window.addEventListener('focus', read);
+    return () => window.removeEventListener('focus', read);
+  }, [id, unread]);
+  return null;
+}
+
+const SESSION_ORDER = (session: Session) => (session.role === 'lead' ? 0 : session.role === 'agent' ? 1 : 2);
+
 export function WorkspaceView() {
   const { id = '' } = useParams();
   const allWorkspaces = useStore((store) => store.workspaces);
@@ -312,12 +390,22 @@ export function WorkspaceView() {
   const closeTab = useStore((store) => store.closeTab);
   const setActiveTab = useStore((store) => store.setActiveTab);
   const rightOpen = useLayout((layout) => layout.rightOpen);
+  const isPhone = useIsPhone();
+  const catalog = useStore((store) => store.catalog);
   const [confirm, setConfirm] = useState<ConfirmOptions | null>(null);
+  const [closingLead, setClosingLead] = useState<Session | null>(null);
+  const [tabsOpen, setTabsOpen] = useState(false);
 
   const workspace = allWorkspaces.find((entry) => entry.id === id);
   const project = allProjects.find((entry) => entry.id === workspace?.projectId);
   const sessions = useMemo(
-    () => allSessions.filter((session) => session.workspaceId === id).sort((a, b) => a.createdAt - b.createdAt),
+    () => allSessions
+      .filter((session) => session.workspaceId === id && !session.closedAt)
+      .sort((a, b) => SESSION_ORDER(a) - SESSION_ORDER(b) || a.createdAt - b.createdAt),
+    [allSessions, id],
+  );
+  const earlierLeads = useMemo(
+    () => allSessions.filter((session) => session.workspaceId === id && session.closedAt).sort((a, b) => b.closedAt! - a.closedAt!),
     [allSessions, id],
   );
 
@@ -328,9 +416,13 @@ export function WorkspaceView() {
   const fileTabs = (tabs?.files ?? []).filter((tab): tab is Exclude<WorkspaceTab, { kind: 'session' }> => tab.kind !== 'session');
   const activeKey = tabs?.active ?? null;
   const activeFile = fileTabs.find((tab) => tabKey(tab) === activeKey);
+  const readingLead = earlierLeads.find((session) => `session:${session.id}` === activeKey);
   const activeSession = activeFile
     ? undefined
-    : sessions.find((session) => `session:${session.id}` === activeKey) ?? sessions[0];
+    : readingLead ?? sessions.find((session) => `session:${session.id}` === activeKey) ?? sessions[0];
+  const lead = sessions.find((session) => session.role === 'lead');
+  const mine = sessions.filter((session) => !session.role);
+  const openSession = (sessionId: string) => openTab(id, { kind: 'session', id: sessionId });
 
   const newSession = async () => {
     const current = activeSession ?? sessions.at(-1);
@@ -338,7 +430,16 @@ export function WorkspaceView() {
     if (created) openTab(id, { kind: 'session', id: created.id });
   };
 
+  const startLead = async () => {
+    const created = await attempt(() => api.createLead(id));
+    if (created) openSession(created.id);
+  };
+
   const closeSession = (session: Session) => {
+    if (session.role === 'lead' && session.hasMessages) {
+      setClosingLead(session);
+      return;
+    }
     const remove = async () => {
       await attempt(() => api.deleteSession(session.id));
       closeTab(id, `session:${session.id}`);
@@ -357,7 +458,8 @@ export function WorkspaceView() {
   };
 
   const createPr = async () => {
-    const target = activeSession ?? sessions[0];
+    // A Lead's agents can't push, and it's the Lead that answers for what gets delivered.
+    const target = lead ?? (activeSession && !activeSession.closedAt ? activeSession : sessions[0]);
     if (!target) return;
     openTab(id, { kind: 'session', id: target.id });
     await attempt(() => api.sendMessage(
@@ -370,18 +472,49 @@ export function WorkspaceView() {
   return (
     <div className="workspace">
       <div className="workspace-main">
-        <WorkspaceHeader key={workspace.id} workspace={workspace} project={project} />
-        <div className="tab-bar" role="tablist">
-          {sessions.map((session) => (
-            <SessionTabLabel
+        <WorkspaceHeader
+          key={workspace.id}
+          workspace={workspace}
+          project={project}
+          earlierLeads={earlierLeads}
+          onReadLead={(session) => openSession(session.id)}
+          phone={isPhone ? {
+            title: activeFile ? basename(activeFile.path) : activeSession && activeSession.role !== 'lead' ? activeSession.title : undefined,
+            subtitle: activeSession?.role === 'agent' ? `${modelLabel(catalog, activeSession.agent, activeSession.model)}, ${effortLabel(activeSession.effort)}` : undefined,
+            onBack: lead && activeSession?.id !== lead.id ? () => openSession(lead.id) : undefined,
+            onShowTabs: () => setTabsOpen(true),
+          } : undefined}
+        />
+        {!isPhone && <div className="tab-bar" role="tablist">
+          {!lead && <button type="button" className="new-lead-tab" onClick={() => void startLead()}><Plus size={13} /> New Lead</button>}
+          {sessions.filter((session) => session.role).map((session) => (
+            <TeamTabLabel
               key={session.id}
               session={session}
               active={session.id === activeSession?.id}
-              canClose={sessions.length > 1}
               onSelect={() => setActiveTab(id, `session:${session.id}`)}
               onClose={() => closeSession(session)}
             />
           ))}
+          {mine.length > 0 && sessions.length > mine.length && <span className="tab-divider" />}
+          {mine.map((session) => (
+            <SessionTabLabel
+              key={session.id}
+              session={session}
+              active={session.id === activeSession?.id}
+              canClose
+              onSelect={() => setActiveTab(id, `session:${session.id}`)}
+              onClose={() => closeSession(session)}
+            />
+          ))}
+          {readingLead && (
+            <div className="tab session-tab team-tab active" role="tab" aria-selected>
+              <span className="tab-label"><span className="tab-slot"><Crown size={13} aria-hidden="true" /></span><span className="tab-title">Earlier Lead</span></span>
+              <button type="button" className="tab-action tab-close" aria-label="Close Earlier Lead" title="Close this tab" onClick={() => closeTab(id, `session:${readingLead.id}`)}>
+                <X size={13} />
+              </button>
+            </div>
+          )}
           {fileTabs.map((tab) => (
             <FileTabLabel
               key={tabKey(tab)}
@@ -392,18 +525,59 @@ export function WorkspaceView() {
             />
           ))}
           <IconButton label="New conversation" onClick={newSession}><Plus size={15} /></IconButton>
-        </div>
+        </div>}
         <StatusBanner workspace={workspace} />
+        {activeSession && <SessionBanner session={activeSession} />}
+        {activeSession && <MarkRead session={activeSession} />}
         <div className="workspace-content">
           {activeFile?.kind === 'file' && <FileTab key={tabKey(activeFile)} workspace={workspace} path={activeFile.path} line={activeFile.line} />}
           {activeFile?.kind === 'diff' && <DiffTab key={tabKey(activeFile)} workspace={workspace} path={activeFile.path} untracked={activeFile.untracked} oldPath={activeFile.oldPath} />}
+          {!activeSession && !activeFile && <NoLead workspace={workspace} earlier={earlierLeads[0]} onOpen={openSession} />}
           {activeSession && (
             <>
-              <ChatTranscript session={activeSession} workspace={workspace} intro={<WorkspaceIntro workspace={workspace} project={project} />} />
-              <Composer key={activeSession.id} session={activeSession} workspace={workspace} />
+              <ChatTranscript
+                session={activeSession}
+                workspace={workspace}
+                intro={activeSession.role === 'agent' || activeSession.closedAt ? null : <WorkspaceIntro workspace={workspace} project={project} session={activeSession} hasLead={Boolean(lead)} />}
+                footer={activeSession.id === lead?.id && !isPhone && <TeamActivity lead={lead} onOpen={openSession} />}
+              />
+              {activeSession.closedAt
+                ? <div className="closed-note">This Lead was closed, so its conversation can’t continue. {lead ? 'The current Lead has the Lead tab.' : <button type="button" className="link-button" onClick={() => void startLead()}>Start a new Lead</button>}</div>
+                : (
+                  <>
+                    {isPhone && activeSession.id === lead?.id && <TeamStrip lead={lead} onShow={() => setTabsOpen(true)} />}
+                    <Composer key={activeSession.id} session={activeSession} workspace={workspace} />
+                  </>
+                )}
             </>
           )}
         </div>
+        {tabsOpen && (
+          <TabsSheet
+            workspace={workspace}
+            sessions={sessions}
+            files={fileTabs}
+            activeKey={activeFile ? tabKey(activeFile) : activeSession ? `session:${activeSession.id}` : null}
+            onSelect={(key) => {
+              setActiveTab(id, key);
+              setTabsOpen(false);
+            }}
+            onCloseSession={(session) => {
+              setTabsOpen(false);
+              closeSession(session);
+            }}
+            onCloseFile={(key) => closeTab(id, key)}
+            onNew={() => {
+              setTabsOpen(false);
+              void newSession();
+            }}
+            onNewLead={() => {
+              setTabsOpen(false);
+              void startLead();
+            }}
+            onClose={() => setTabsOpen(false)}
+          />
+        )}
       </div>
       {rightOpen && (
         <RightPanel
@@ -416,6 +590,7 @@ export function WorkspaceView() {
         />
       )}
       {confirm && <ConfirmDialog {...confirm} onClose={() => setConfirm(null)} />}
+      {closingLead && <CloseLeadDialog lead={closingLead} onClose={() => setClosingLead(null)} onClosed={() => closeTab(id, `session:${closingLead.id}`)} />}
     </div>
   );
 }

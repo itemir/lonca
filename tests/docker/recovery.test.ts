@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import type { AppState, Project, ServerEvent, Session, UserItem, Workspace } from '../../shared/types.ts';
-import { IN_SANDBOX, Lonca, docker, dockerExec, makeFixtureRepo, removeRuntime, sleep, until } from '../support/harness.ts';
+import { Lonca, docker, sandboxExec, makeFixtureRepo, removeSandbox, sleep, until, asRoot, FAKE_SBX_DIR, REAL_SANDBOX, git } from '../support/harness.ts';
 import { type MockLlm, startMockLlm } from '../support/mock-llm.ts';
 
 const lonca = new Lonca({ port: 48301, instance: 'recovery-test', firstWorkspacePort: 51000 });
@@ -21,7 +21,7 @@ beforeAll(async () => {
   await lonca.start();
   project = await lonca.waitForProject((await lonca.api('POST', '/projects', { path: fixture })).id);
   await lonca.api('PATCH', `/projects/${project.id}`, {
-    settings: { network: 'host', filesToCopy: ['.env'], env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}` } },
+    settings: { network: 'host', filesToCopy: ['.env'], env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`, ANTHROPIC_API_KEY: 'sk-ant-api03-recovery-not-a-real-key' } },
   });
   await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-recovery-not-a-real-key' });
   const made = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
@@ -40,7 +40,7 @@ it('queues messages during a rebuild and runs them in the replacement runtime', 
   await until('the first model request', () => mock.requests.some((request) => request.path.endsWith('/messages')));
   const runId = (await lonca.session(first.id)).activeRunId;
   // Make teardown wait for its kill timeout so the next send definitely overlaps it.
-  expect(dockerExec(workspace.containerName, `kill -STOP -- -"$(head -c 16 /var/tmp/lonca/agent-runs/${runId}/pid)"`).code).toBe(0);
+  expect(sandboxExec(workspace.sandboxName, `kill -STOP -- -"$(head -c 16 /var/tmp/lonca/agent-runs/${runId}/pid)"`).code).toBe(0);
   const second = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, {});
   const rebuilding = lonca.api('POST', `/workspaces/${workspace.id}/recreate`);
   try {
@@ -64,14 +64,16 @@ it('queues messages during a rebuild and runs them in the replacement runtime', 
     const result = continued.findLast((item) => item.type === 'result');
     expect(result, JSON.stringify(continued)).toMatchObject({ failed: false });
     expect(result?.interrupted).not.toBe(true);
-    expect(continued.some((item) => item.type === 'text' && item.text.includes('Continue this conversation after rebuild'))).toBe(true);
+    const request = mock.requests.findLast((entry) => entry.path.endsWith('/messages') && entry.body.includes('You are the Lead'))!;
+    const messages = JSON.parse(request.body).messages as { role: string; content: unknown }[];
+    expect(JSON.stringify(messages.filter((entry) => entry.role === 'user').at(-1))).toContain('Continue this conversation after rebuild');
     expect((await lonca.workspace(workspace.id)).status).toBe('ready');
   } finally {
     await rebuilding;
   }
 });
 
-it.skipIf(IN_SANDBOX)('retries a failed replacement without losing the checkout', async () => {
+it.skipIf(REAL_SANDBOX)('retries a failed replacement without losing the checkout', async () => {
   fs.writeFileSync(path.join(workspace.path, 'keep.txt'), 'keep this work');
   const editedEnv = 'SECRET=workspace-specific-value\n';
   fs.writeFileSync(path.join(workspace.path, '.env'), editedEnv);
@@ -99,10 +101,11 @@ it.skipIf(IN_SANDBOX)('retries a failed replacement without losing the checkout'
   expect(fs.readFileSync(path.join(workspace.path, 'keep.txt'), 'utf8')).toBe('keep this work');
 });
 
-it.skipIf(IN_SANDBOX)('accepts concurrent sends that wake the same stopped workspace', async () => {
+it.skipIf(REAL_SANDBOX)('accepts concurrent sends that wake the same stopped workspace', async () => {
   const second = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, {});
   // Keep startup open long enough for all three requests to observe a stopped workspace.
-  docker('exec', workspace.containerName, 'sed', '-i', '/^uid=/i sleep 2', '/usr/local/bin/lonca-entrypoint');
+  const slowStart = path.join(FAKE_SBX_DIR, 'slow-start');
+  fs.writeFileSync(slowStart, '');
   try {
     await lonca.api('POST', `/workspaces/${workspace.id}/stop`);
     const messages = await Promise.all([
@@ -117,7 +120,7 @@ it.skipIf(IN_SANDBOX)('accepts concurrent sends that wake the same stopped works
       expect(items.some((item) => item.type === 'text' && item.text.includes(message.text))).toBe(true);
     }
   } finally {
-    docker('exec', workspace.containerName, 'sed', '-i', '/^sleep 2$/d', '/usr/local/bin/lonca-entrypoint');
+    fs.rmSync(slowStart);
   }
 });
 
@@ -140,7 +143,7 @@ it('wakes a stopped workspace when sending its held queue', async () => {
 it('accepts a queued message even when waking the workspace fails, then sends it once on retry', async () => {
   const session = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, {});
   await lonca.api('POST', `/workspaces/${workspace.id}/stop`);
-  removeRuntime(workspace.containerName);
+  removeSandbox(workspace.sandboxName);
   await lonca.api('PATCH', `/projects/${project.id}`, { settings: { image: 'lonca-missing-wake-test:never-built' } });
   let message!: UserItem;
   try {
@@ -163,7 +166,7 @@ it('accepts a queued message even when waking the workspace fails, then sends it
   expect(items.filter((item) => item.type === 'result')).toHaveLength(1);
 });
 
-it.skipIf(IN_SANDBOX).each(['streaming', 'starting'] as const)('does not recreate a deleted conversation while its agent is %s', async (phase) => {
+it.skipIf(REAL_SANDBOX).each(['streaming', 'starting'] as const)('does not recreate a deleted conversation while its agent is %s', async (phase) => {
   const session = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, {});
   const events: ServerEvent[] = [];
   const socket = new WebSocket(`ws://localhost:${lonca.port}/ws?token=${lonca.token}`, { headers: { origin: lonca.url } });
@@ -184,7 +187,7 @@ while [ ! -f "$1/release" ]; do sleep 0.1; done
 echo 'Simulated launch failure' >&2
 exit 1
 `;
-  docker('exec', workspace.containerName, 'bash', '-c', `mv /usr/local/bin/${command} /usr/local/bin/${command}-delete-original
+  asRoot(workspace.sandboxName, `mv /usr/local/bin/${command} /usr/local/bin/${command}-delete-original
 cat > /usr/local/bin/${command} <<'AGENT'
 ${script}AGENT
 chmod +x /usr/local/bin/${command}`);
@@ -196,17 +199,17 @@ chmod +x /usr/local/bin/${command}`);
     if (phase === 'streaming') {
       await until('streaming text', async () => (await lonca.items(session.id)).some((item) => item.type === 'text' && item.streaming && item.text.includes('Private answer')));
     } else {
-      await until('the pending launch', () => dockerExec(workspace.containerName, `test -f ${runDir}/launching`).code === 0);
+      await until('the pending launch', () => sandboxExec(workspace.sandboxName, `test -f ${runDir}/launching`).code === 0);
     }
     const deleting = lonca.api('DELETE', `/sessions/${session.id}`);
     if (phase === 'starting') {
       await until('the pending launch to be interrupted', async () => (await lonca.session(session.id)).stopRequested);
-      expect(dockerExec(workspace.containerName, `touch ${runDir}/release`).code).toBe(0);
+      expect(sandboxExec(workspace.sandboxName, `touch ${runDir}/release`).code).toBe(0);
     }
     await deleting;
     const transcriptFile = path.join(lonca.home, 'sessions', `${session.id}.jsonl`);
     expect(fs.existsSync(transcriptFile)).toBe(false);
-    await until('run files to be removed after stopping', () => dockerExec(workspace.containerName, `test ! -d ${runDir}`).code === 0, 15000);
+    await until('run files to be removed after stopping', () => sandboxExec(workspace.sandboxName, `test ! -d ${runDir}`).code === 0, 15000);
     await until('the conversation removal event', () => events.some((event) => event.type === 'session.removed' && event.id === session.id));
     await sleep(200);
     expect(fs.existsSync(transcriptFile)).toBe(false);
@@ -216,15 +219,15 @@ chmod +x /usr/local/bin/${command}`);
       || ('sessionId' in event && event.sessionId === session.id))).toBe(false);
   } finally {
     socket.close();
-    docker('exec', workspace.containerName, 'mv', `/usr/local/bin/${command}-delete-original`, `/usr/local/bin/${command}`);
+    asRoot(workspace.sandboxName, `mv /usr/local/bin/${command}-delete-original /usr/local/bin/${command}`);
   }
 });
 
-it.skipIf(IN_SANDBOX)('keeps a surviving agent tracked when Stop arrives before reconnection', async () => {
+it.skipIf(REAL_SANDBOX)('keeps a surviving agent tracked when Stop arrives before reconnection', async () => {
   const session = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, {});
   const heartbeat = path.join(workspace.path, '.context/reconnect-heartbeat');
   let pid: string | undefined;
-  docker('exec', workspace.containerName, 'bash', '-c', `mv /usr/local/bin/claude /usr/local/bin/claude-reconnect-original
+  asRoot(workspace.sandboxName, `mv /usr/local/bin/claude /usr/local/bin/claude-reconnect-original
 cat > /usr/local/bin/claude <<'AGENT'
 #!/bin/bash
 trap '' TERM
@@ -236,41 +239,41 @@ chmod +x /usr/local/bin/claude`);
     await lonca.api('POST', `/sessions/${session.id}/messages`, { text: 'Keep working across reconnection', attachments: [] });
     await until('the agent to write', () => fs.existsSync(heartbeat));
     const runId = (await lonca.session(session.id)).activeRunId;
-    pid = dockerExec(workspace.containerName, `cat /var/tmp/lonca/agent-runs/${runId}/pid`).output;
+    pid = sandboxExec(workspace.sandboxName, `cat /var/tmp/lonca/agent-runs/${runId}/pid`).output;
     await lonca.kill();
     // Keep the daemon and agent alive while preventing this server from reaching them.
-    lonca.env.DOCKER_HOST = 'tcp://127.0.0.1:9';
+    lonca.setOffline(true);
     await lonca.start();
     await expect(lonca.api('POST', `/sessions/${session.id}/interrupt`)).rejects.toThrow(/409.*reconnecting/);
     await expect(lonca.api('DELETE', `/sessions/${session.id}`)).rejects.toThrow(/409.*reconnecting/);
     expect(await lonca.session(session.id)).toMatchObject({ status: 'running', activeRunId: runId });
-    expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).toBe(0);
 
     await lonca.kill();
-    delete lonca.env.DOCKER_HOST;
+    lonca.setOffline(false);
     await lonca.start();
     await until('the recovered agent to accept Stop', async () => {
       await lonca.api('POST', `/sessions/${session.id}/interrupt`);
       return true;
     }, 15000);
     const items = await lonca.waitForIdle(session.id, 15000);
-    expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).not.toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).not.toBe(0);
     const size = fs.statSync(heartbeat).size;
     await sleep(500);
     expect(fs.statSync(heartbeat).size).toBe(size);
     expect(items.findLast((item) => item.type === 'result')).toMatchObject({ interrupted: true });
   } finally {
-    if (pid) dockerExec(workspace.containerName, `kill -KILL -- -${pid}`);
-    docker('exec', workspace.containerName, 'mv', '/usr/local/bin/claude-reconnect-original', '/usr/local/bin/claude');
+    if (pid) sandboxExec(workspace.sandboxName, `kill -KILL -- -${pid}`);
+    asRoot(workspace.sandboxName, 'mv /usr/local/bin/claude-reconnect-original /usr/local/bin/claude');
     await lonca.kill();
-    delete lonca.env.DOCKER_HOST;
+    lonca.setOffline(false);
     await lonca.start();
     await lonca.waitForIdle(session.id, 15000);
     await lonca.api('DELETE', `/sessions/${session.id}`);
   }
 });
 
-it.skipIf(IN_SANDBOX)('recovers the other workspaces when one can’t be reached after a restart', async () => {
+it.skipIf(REAL_SANDBOX)('recovers the other workspaces when one can’t be reached after a restart', async () => {
   const other = await lonca.waitForWorkspace((await lonca.api('POST', `/projects/${project.id}/workspaces`, {})).workspace.id);
   const fake = (name: string) => `mv /usr/local/bin/claude /usr/local/bin/claude-paused-original
 cat > /usr/local/bin/claude <<'AGENT'
@@ -283,14 +286,14 @@ chmod +x /usr/local/bin/claude`;
   let paused = false;
   try {
     for (const [target, name] of [[workspace, 'reachable'], [other, 'paused']] as const) {
-      docker('exec', target.containerName, 'bash', '-c', fake(name));
+      asRoot(target.sandboxName, fake(name));
       const session = await lonca.api<Session>('POST', `/workspaces/${target.id}/sessions`, {});
       sessions.push(session);
       await lonca.api('POST', `/sessions/${session.id}/messages`, { text: 'Keep working', attachments: [] });
       await until('the agent to write', () => fs.existsSync(path.join(target.path, '.context', name)));
     }
     await lonca.kill();
-    docker('pause', other.containerName);
+    docker('pause', other.sandboxName);
     paused = true;
     await lonca.start();
     await until('sign-in to be checked', async () => (await lonca.api<AppState>('GET', '/state')).system.agentsChecked, 30000);
@@ -299,7 +302,7 @@ chmod +x /usr/local/bin/claude`;
       return true;
     }, 15000);
     await lonca.waitForIdle(sessions[0].id, 15000);
-    docker('unpause', other.containerName);
+    docker('unpause', other.sandboxName);
     paused = false;
     await until('Stop to reach the other agent once it can', async () => {
       await lonca.api('POST', `/sessions/${sessions[1].id}/interrupt`);
@@ -307,18 +310,18 @@ chmod +x /usr/local/bin/claude`;
     }, 30000);
     await lonca.waitForIdle(sessions[1].id, 15000);
   } finally {
-    if (paused) docker('unpause', other.containerName);
-    for (const target of [workspace, other]) docker('exec', target.containerName, 'bash', '-c', 'mv /usr/local/bin/claude-paused-original /usr/local/bin/claude 2>/dev/null; true');
+    if (paused) docker('unpause', other.sandboxName);
+    for (const target of [workspace, other]) asRoot(target.sandboxName, 'mv /usr/local/bin/claude-paused-original /usr/local/bin/claude 2>/dev/null; true');
     for (const session of sessions) await lonca.api('DELETE', `/sessions/${session.id}`).catch(() => {});
     await lonca.api('DELETE', `/workspaces/${other.id}`);
   }
 });
 
-it.skipIf(IN_SANDBOX)('stops a surviving agent and replaces the runtime after a crash during rebuild teardown', async () => {
-  const originalId = JSON.parse(docker('inspect', workspace.containerName))[0].Id;
+it.skipIf(REAL_SANDBOX)('stops a surviving agent and replaces the runtime after a crash during rebuild teardown', async () => {
+  const originalId = JSON.parse(docker('inspect', workspace.sandboxName))[0].Id;
   await lonca.api('PATCH', `/projects/${project.id}`, { settings: { memoryGb: 2, cpus: 1 } });
   // This agent ignores TERM, so recovery must retain tracking through the forced kill.
-  docker('exec', workspace.containerName, 'bash', '-c', `mv /usr/local/bin/claude /usr/local/bin/claude-recovery-original
+  asRoot(workspace.sandboxName, `mv /usr/local/bin/claude /usr/local/bin/claude-recovery-original
 cat > /usr/local/bin/claude <<'AGENT'
 #!/bin/bash
 trap '' TERM
@@ -331,7 +334,7 @@ chmod +x /usr/local/bin/claude`);
     const heartbeat = path.join(workspace.path, '.context/rebuild-heartbeat');
     await until('the agent to write', () => fs.existsSync(heartbeat));
     const runId = (await lonca.session(first.id)).activeRunId;
-    const pid = dockerExec(workspace.containerName, `cat /var/tmp/lonca/agent-runs/${runId}/pid`).output;
+    const pid = sandboxExec(workspace.sandboxName, `cat /var/tmp/lonca/agent-runs/${runId}/pid`).output;
     const queued = await lonca.api<UserItem>('POST', `/sessions/${first.id}/messages`, {
       text: 'Continue after crash recovery', attachments: [],
     });
@@ -339,27 +342,27 @@ chmod +x /usr/local/bin/claude`);
     await until('rebuild teardown', async () => (await lonca.workspace(workspace.id)).status === 'rebuilding');
     await lonca.kill();
     await rebuilding;
-    expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).toBe(0);
     await lonca.start();
     await until('recovery to stop the agent', async () => (await lonca.session(first.id)).status === 'idle', 15000);
     expect((await lonca.workspace(workspace.id)).status).toBe('error');
     expect((await lonca.session(first.id)).activeRunId).toBeNull();
     expect((await lonca.session(first.id)).queue).toEqual([queued.id]);
     expect((await lonca.session(first.id)).held).not.toBe(true);
-    expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).not.toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).not.toBe(0);
     const size = fs.statSync(heartbeat).size;
     await sleep(500);
     expect(fs.statSync(heartbeat).size).toBe(size);
     expect((await lonca.items(first.id)).findLast((item) => item.type === 'result')).toMatchObject({ interrupted: true });
   } finally {
-    docker('exec', workspace.containerName, 'mv', '/usr/local/bin/claude-recovery-original', '/usr/local/bin/claude');
+    asRoot(workspace.sandboxName, 'mv /usr/local/bin/claude-recovery-original /usr/local/bin/claude');
     if ((await lonca.workspace(workspace.id)).status === 'error') {
       await lonca.api('POST', `/workspaces/${workspace.id}/retry`);
       await lonca.waitForWorkspace(workspace.id);
     }
   }
   const items = await lonca.waitForIdle(first.id);
-  const replaced = JSON.parse(docker('inspect', workspace.containerName))[0];
+  const replaced = JSON.parse(docker('inspect', workspace.sandboxName))[0];
   expect(replaced.Id).not.toBe(originalId);
   expect(replaced.HostConfig.Memory).toBe(2 * 1024 ** 3);
   expect(replaced.HostConfig.NanoCpus).toBe(1_000_000_000);

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { DEFAULT_CATALOG } from '../../shared/catalog.ts';
 import type {
-  AgentId, AppSettings, AppState, Catalog, ChatItem, LoginState, Me, Project, SecretsStatus, ServerEvent, Session,
+  AgentId, AppSettings, AppState, Catalog, ChatItem, ClientEvent, LoginState, Me, Project, SecretsStatus, ServerEvent, Session,
   SystemStatus, TerminalInfo, Workspace,
 } from '../../shared/types.ts';
 import { api, onUnauthorized } from './api.ts';
@@ -18,12 +18,12 @@ export type WorkspaceTab =
   | { kind: 'diff'; path: string; untracked: boolean; oldPath?: string };
 
 /**
- * Why signing in can't start yet, if it can't. It runs the agent's CLI from the workspace image,
+ * Why signing in can't start yet, if it can't. It runs the agent's CLI from the workspace template,
  * and until the first check nobody knows whether it's needed.
  */
 export function signInBlocker(system: SystemStatus): string | null {
-  if (!system.docker.ok) return 'Waiting for Docker';
-  if (system.image.state !== 'ready') return 'Waiting for the workspace image';
+  if (system.sandbox.state !== 'ready') return 'Waiting for Docker Sandboxes';
+  if (system.image.state !== 'ready') return 'Waiting for the workspace template';
   if (!system.agentsChecked) return 'Checking sign-in…';
   return null;
 }
@@ -137,14 +137,16 @@ export const useStore = create<Store>((set, get) => ({
   terminals: [],
   logins: {},
   system: {
-    docker: { ok: true },
     sandbox: { state: 'checking' },
     agentsChecked: false,
     image: { tag: '', state: 'unknown', log: '' },
     agents: { claude: { signedIn: false }, codex: { signedIn: false } },
   },
   catalog: DEFAULT_CATALOG,
-  settings: { branchPrefix: '', gitName: '', gitEmail: '', defaultAgent: 'claude', defaultModel: 'claude-opus-5-5', defaultEffort: 'high' },
+  settings: {
+    branchPrefix: '', gitName: '', gitEmail: '', defaultAgent: 'claude', defaultModel: 'claude-opus-5-5', defaultEffort: 'high',
+    leadDefault: { agent: 'claude', model: 'claude-opus-5-5', effort: 'high' }, leadMaxAgents: 4, notifications: true,
+  },
   secrets: { claudeToken: null, githubToken: null },
   transcripts: {},
   transcriptErrors: {},
@@ -303,8 +305,28 @@ export async function attempt<T>(action: () => Promise<T>): Promise<T | undefine
   }
 }
 
+// A phone can sleep with its connection open, and wake up showing an old state as if it were current.
+const STALE_AFTER_HIDDEN_MS = 30000;
+
 export function startConnection(): void {
   const { apply, hydrate } = useStore.getState();
+  let current: WebSocket | null = null;
+  let hiddenAt = 0;
+  // The server doesn't raise notifications while someone's looking at the page.
+  const sendFocus = () => {
+    const event: ClientEvent = { type: 'focus', focused: document.hasFocus() };
+    if (current?.readyState === WebSocket.OPEN) current.send(JSON.stringify(event));
+  };
+  window.addEventListener('focus', sendFocus);
+  window.addEventListener('blur', sendFocus);
+  document.addEventListener('visibilitychange', () => {
+    sendFocus();
+    if (document.visibilityState === 'hidden') {
+      hiddenAt = Date.now();
+    } else if (matchMedia('(pointer: coarse)').matches && Date.now() - hiddenAt > STALE_AFTER_HIDDEN_MS) {
+      current?.close();
+    }
+  });
   onUnauthorized(() => {
     if (!tokenRejected()) useStore.setState({ locked: true });
   });
@@ -314,11 +336,13 @@ export function startConnection(): void {
   }
   const connect = () => {
     const socket = new WebSocket(socketUrl('/ws'));
+    current = socket;
     let closed = false;
     let pending: ServerEvent[] | null = [];
     socket.onopen = async () => {
       connectionGeneration++;
       useStore.setState({ connected: true });
+      sendFocus();
       try {
         const snapshot = await api.state();
         // A response from a lost connection must never overwrite its replacement.

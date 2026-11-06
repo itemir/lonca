@@ -3,14 +3,13 @@ import type { Duplex } from 'node:stream';
 import { WebSocket } from 'ws';
 import type { TerminalClientMessage, TerminalInfo, Workspace } from '../shared/types.ts';
 import { TTY_DIR } from './config.ts';
-import { isContainerRunning, stopContainer } from './containers.ts';
-import { execText, execTty, type TtyProcess } from './docker.ts';
+import { execText, execTty, isSandboxRunning, stopSandbox, type TtyProcess } from './sandbox.ts';
 import { execEnv } from './env.ts';
 import { publish } from './events.ts';
 import { flushState, getProject, state } from './store.ts';
 import { system } from './system.ts';
 import { HttpError, KeyedQueue, errorMessage, newId } from './util.ts';
-import { publishWorkspace, runningContainer, runtimeHandle } from './workspaces.ts';
+import { publishWorkspace, runningSandbox, setUpCodex } from './workspaces.ts';
 
 const SCROLLBACK_BYTES = 512 * 1024;
 const MAX_CLIENT_BACKLOG = 4 * 1024 * 1024;
@@ -50,7 +49,7 @@ class Terminal {
   private windowLeaving: ReturnType<typeof setTimeout> | undefined;
   private process: TtyProcess | null = null;
   private stream: Duplex | null = null;
-  private containerId = '';
+  private sandbox = '';
   private size = { cols: 100, rows: 30 };
   private onExit?: (code: number | null) => void;
   private generation = 0;
@@ -92,11 +91,11 @@ class Terminal {
   }
 
   async start(
-    containerId: string,
+    sandbox: string,
     cmd: string[],
     options: { env?: string[]; workdir?: string; banner?: string; onExit?: (code: number | null) => void },
   ): Promise<void> {
-    this.containerId = containerId;
+    this.sandbox = sandbox;
     this.onExit = options.onExit;
     this.reported = false;
     this.checkAfter = 0;
@@ -111,10 +110,10 @@ class Terminal {
     const generation = ++this.generation;
     this.broadcastControl({ type: 'reset' });
     if (options.banner) this.record(Buffer.from(options.banner));
-    // Recording the pid lets the server signal the process later; Docker has no API for it.
+    // Recording the pid lets the server signal the process later; sbx has no command for it.
     const launch = newId();
     const wrapped = ['bash', '-c', RECORD_PID, 'lonca-terminal', this.pidFile, launch, ...cmd];
-    const process = await execTty(containerId, wrapped, { env: options.env, workdir: options.workdir, ...this.size });
+    const process = await execTty(sandbox, wrapped, { env: options.env, workdir: options.workdir, ...this.size });
     this.process = process;
     this.stream = process.stream;
     process.stream.on('data', (data: Buffer) => { if (this.generation === generation) this.record(data); });
@@ -130,36 +129,36 @@ class Terminal {
       const interrupted = code === null || code === 125 || code >= 128;
       if (interrupted) this.checkAfter = Date.now() + DISCONNECT_SETTLE_MS;
       // Losing the stream is not proof that the terminal's jobs exited. The periodic
-      // recovery pass keeps its controls available while Docker is out of reach.
+      // recovery pass keeps its controls available while the sandbox is out of reach.
       try {
         // A sandbox exec would restart a stopped VM just to inspect its dead TTY.
-        const running = await isContainerRunning(this.containerId);
+        const running = await isSandboxRunning(this.sandbox);
         if (this.generation !== generation) return;
         if (!running) {
           this.exited(code);
           return;
         }
         if (interrupted) {
-          this.recovered(this.containerId);
+          this.recovered(this.sandbox);
           return;
         }
-        const record = (await recordStates(this.containerId, ['status', this.pidFile])).get(this.pidFile)?.state;
+        const record = (await recordStates(this.sandbox, ['status', this.pidFile])).get(this.pidFile)?.state;
         if (this.generation !== generation) return;
         if (record === 'dead') this.exited(code);
         // Its own process has ended, so that code is the result, whatever it left running.
         else if (record === 'jobs') this.leaderExited(code);
-        else this.recovered(this.containerId);
+        else this.recovered(this.sandbox);
       } catch {
-        if (this.generation === generation) this.recovered(this.containerId);
+        if (this.generation === generation) this.recovered(this.sandbox);
       }
     };
     process.stream.on('end', finish);
     process.stream.on('close', finish);
     process.stream.on('error', finish);
     publish({ type: 'terminal', terminal: this.info });
-    // Starting the Docker exec is earlier than starting its command. Do not release the
+    // Starting `sbx exec` is earlier than starting its command. Do not release the
     // operation lock until Stop can address this launch rather than a missing/old PID.
-    await execText(containerId, ['bash', '-c', String.raw`
+    await execText(sandbox, ['bash', '-c', String.raw`
 for _ in $(seq 1 100); do
   [ "$(head -c 32 "$1.launch" 2>/dev/null)" = "$2" ] && exit 0
   sleep 0.05
@@ -248,8 +247,8 @@ exit 1
     this.setWindowed(false);
   }
 
-  recovered(containerId: string, onExit?: (code: number | null) => void): void {
-    this.containerId = containerId;
+  recovered(sandbox: string, onExit?: (code: number | null) => void): void {
+    this.sandbox = sandbox;
     if (onExit) this.onExit = onExit;
     if (this.bytes === 0) this.record(Buffer.from('This process survived a lost connection. Its previous terminal output is unavailable. You can stop it or start it again.\r\n'));
     this.info.status = 'running';
@@ -262,14 +261,14 @@ exit 1
     this.info.exitCode = code;
     this.info.jobsOnly = true;
     this.report(code);
-    this.recovered(this.containerId);
+    this.recovered(this.sandbox);
   }
 
   /** Found after a restart with only what it started left. Its result was settled then, or can't be known now. */
-  adoptJobs(containerId: string): void {
+  adoptJobs(sandbox: string): void {
     this.reported = true;
     this.info.jobsOnly = true;
-    this.recovered(containerId);
+    this.recovered(sandbox);
   }
 
   exited(code: number | null): void {
@@ -303,7 +302,7 @@ exit 1
   }
 
   async stop(): Promise<void> {
-    if (await isContainerRunning(this.containerId)) await stopPidFile(this.containerId, this.pidFile);
+    if (await isSandboxRunning(this.sandbox)) await stopPidFile(this.sandbox, this.pidFile);
     // Only retire the handle after all its jobs are gone, even without a TTY stream.
     this.retire();
   }
@@ -340,7 +339,7 @@ action="$1"; shift
 # Each TTY starts a session led by the recorded PID. Interactive Bash puts jobs in
 # separate process groups, so checking/signalling only -$pid would abandon them.
 # The session ID stays reserved while its children survive, even if Bash has exited.
-# Zombies cannot run and need only be reaped by their parent or the container init.
+# Zombies cannot run and need only be reaped by their parent or the VM's init.
 members() { ps -e -o pid=,sid=,stat= | awk -v sid="$1" '$2 == sid && $3 !~ /^Z/ { print $1 }'; }
 forget() { rm -f "$1" "$1.identity" "$1.launch"; }
 # Sets state to leader, jobs, dead or error, and pid and pids for a session that's still there.
@@ -409,8 +408,8 @@ case "$action" in
 esac
 `;
 
-async function recordStates(containerId: string, args: string[]): Promise<Records> {
-  const output = await execText(containerId, ['bash', '-c', SCRIPT_RECORDS, 'lonca-process', ...args], { timeoutMs: 15000, maxBytes: 256 * 1024 });
+async function recordStates(sandbox: string, args: string[]): Promise<Records> {
+  const output = await execText(sandbox, ['bash', '-c', SCRIPT_RECORDS, 'lonca-process', ...args], { timeoutMs: 15000, maxBytes: 256 * 1024 });
   const records: Records = new Map();
   for (const line of output.split('\n')) {
     const [file, state, reason] = line.split('\t');
@@ -419,8 +418,8 @@ async function recordStates(containerId: string, args: string[]): Promise<Record
   return records;
 }
 
-function stopPidFile(containerId: string, file: string): Promise<string> {
-  return execText(containerId, ['bash', '-c', SCRIPT_RECORDS, 'lonca-process', 'stop', file], { timeoutMs: 10000 });
+function stopPidFile(sandbox: string, file: string): Promise<string> {
+  return execText(sandbox, ['bash', '-c', SCRIPT_RECORDS, 'lonca-process', 'stop', file], { timeoutMs: 10000 });
 }
 
 const terminals = new Map<string, Terminal>();
@@ -440,14 +439,24 @@ export function closeTerminalWindow(id: string): void {
   terminals.get(id)?.closeWindow();
 }
 
+/** A terminal can be how someone finds out what's wrong with Codex, so it opens either way. */
+async function setUpCodexIfPossible(workspace: Workspace): Promise<void> {
+  try {
+    await setUpCodex(workspace);
+  } catch (error) {
+    console.error(`could not set Codex up in ${workspace.name}:`, errorMessage(error));
+  }
+}
+
 export function createShell(workspace: Workspace): Promise<TerminalInfo> {
   return scriptQueue.run(workspace.id, () => startShell(workspace));
 }
 
 async function startShell(workspace: Workspace): Promise<TerminalInfo> {
   const project = getProject(workspace.projectId);
-  const containerId = await runningContainer(workspace);
+  const sandbox = await runningSandbox(workspace);
   if (workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
+  await setUpCodexIfPossible(workspace);
   const existing = [...terminals.values()].filter((terminal) => terminal.info.workspaceId === workspace.id && terminal.info.kind === 'shell');
   const id = newId();
   const terminal = new Terminal({
@@ -459,7 +468,7 @@ async function startShell(workspace: Workspace): Promise<TerminalInfo> {
     exitCode: null,
   });
   terminals.set(id, terminal);
-  await terminal.start(containerId, ['bash', '--login'], { env: execEnv(project), workdir: workspace.path });
+  await terminal.start(sandbox, ['bash', '--login'], { env: execEnv(project), workdir: workspace.path });
   return terminal.info;
 }
 
@@ -468,10 +477,11 @@ export function restartShell(workspace: Workspace, id: string): Promise<void> {
     const terminal = terminals.get(id);
     if (!terminal || terminal.info.workspaceId !== workspace.id) throw new HttpError(404, 'No such terminal');
     if (terminal.info.status === 'running' && !terminal.info.disconnected) return;
-    const containerId = await runningContainer(workspace);
+    const sandbox = await runningSandbox(workspace);
     if (workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
+    await setUpCodexIfPossible(workspace);
     await terminal.stop();
-    await terminal.start(containerId, ['bash', '--login'], { env: execEnv(getProject(workspace.projectId)), workdir: workspace.path });
+    await terminal.start(sandbox, ['bash', '--login'], { env: execEnv(getProject(workspace.projectId)), workdir: workspace.path });
   });
 }
 
@@ -494,19 +504,19 @@ function forgetTerminal(terminal: Terminal): void {
 
 export function closeWorkspaceTerminals(workspace: Workspace): Promise<void> {
   return scriptQueue.run(workspace.id, async () => {
-    const containerId = runtimeHandle(workspace);
+    const sandbox = workspace.sandboxName;
     // Every record in the runtime, including those of terminals lost in a restart, stops at once.
     // One that can't be trusted to name its processes is dealt with by stopping the runtime, which
     // ends them all, before checkout cleanup can begin.
     try {
-      if (await isContainerRunning(containerId)) {
-        const records = [...await recordStates(containerId, ['scan', TTY_DIR])];
+      if (await isSandboxRunning(sandbox)) {
+        const records = [...await recordStates(sandbox, ['scan', TTY_DIR])];
         const damaged = records.find(([, record]) => record.state === 'error');
         if (damaged) throw new Error(damaged[1].reason);
-        await Promise.all(records.filter(([, record]) => record.state !== 'dead').map(([file]) => stopPidFile(containerId, file)));
+        await Promise.all(records.filter(([, record]) => record.state !== 'dead').map(([file]) => stopPidFile(sandbox, file)));
       }
     } catch {
-      await stopContainer(containerId);
+      await stopSandbox(sandbox);
     }
     for (const terminal of [...terminals.values()]) {
       if (terminal.info.workspaceId !== workspace.id) continue;
@@ -524,15 +534,16 @@ export function runSetupScript(workspace: Workspace, script: string): Promise<Te
 }
 
 async function startScript(workspace: Workspace, script: string): Promise<TerminalInfo> {
-  const containerId = await runningContainer(workspace);
+  const sandbox = await runningSandbox(workspace);
   if (workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
+  await setUpCodexIfPossible(workspace);
   const id = `${workspace.id}-setup`;
   let terminal = terminals.get(id);
   if (terminal) {
     await terminal.stop();
   } else {
     // A copy can still be running from before a restart.
-    await stopPidFile(containerId, `${TTY_DIR}/${id}.pid`);
+    await stopPidFile(sandbox, `${TTY_DIR}/${id}.pid`);
     terminal = new Terminal({
       id,
       workspaceId: workspace.id,
@@ -555,7 +566,7 @@ async function startScript(workspace: Workspace, script: string): Promise<Termin
   if (setupStep) flushState();
   const banner = script.trim().split('\n').map((line) => `\x1b[2m$ ${line}\x1b[0m\r\n`).join('');
   try {
-    await terminal.start(containerId, ['bash', '-lc', script], {
+    await terminal.start(sandbox, ['bash', '-lc', script], {
       env: execEnv(getProject(workspace.projectId)),
       workdir: workspace.path,
       banner,
@@ -574,8 +585,8 @@ export function stopSetupScript(workspace: Workspace): Promise<void> {
     const id = `${workspace.id}-setup`;
     const terminal = terminals.get(id);
     if (terminal) await terminal.stop();
-    else if (await isContainerRunning(runtimeHandle(workspace))) {
-      await stopPidFile(runtimeHandle(workspace), `${TTY_DIR}/${id}.pid`);
+    else if (await isSandboxRunning(workspace.sandboxName)) {
+      await stopPidFile(workspace.sandboxName, `${TTY_DIR}/${id}.pid`);
     }
     if (!terminal && workspace.steps.find((step) => step.id === 'setup')?.status === 'running') {
       updateRecoveredSetup(workspace, null);
@@ -624,11 +635,11 @@ async function recoverTerminals(): Promise<void> {
 async function recoverWorkspace(workspace: Workspace): Promise<void> {
   if (!state.workspaces.includes(workspace)) return;
   if (workspace.status !== 'ready' && workspace.status !== 'stopped') return;
-  if (workspace.runtime === 'sandbox' && system.sandbox.state !== 'ready') return;
-  const containerId = runtimeHandle(workspace);
+  if (system.sandbox.state !== 'ready') return;
+  const sandbox = workspace.sandboxName;
   const mine = () => [...terminals.values()].filter((terminal) => terminal.info.workspaceId === workspace.id);
   if (mine().some((terminal) => terminal.settling)) return;
-  if (!await isContainerRunning(containerId)) {
+  if (!await isSandboxRunning(sandbox)) {
     for (const terminal of mine()) terminal.settle('stopped');
     needsSearch.delete(workspace.id);
     return;
@@ -638,12 +649,12 @@ async function recoverWorkspace(workspace: Workspace): Promise<void> {
   if (mine().some((terminal) => terminal.settling)) return;
   const search = needsSearch.has(workspace.id);
   const records = search
-    ? await recordStates(containerId, ['scan', TTY_DIR])
-    : await recordStates(containerId, ['status', ...mine().filter((terminal) => terminal.unwatched).map((terminal) => terminal.pidFile)]);
+    ? await recordStates(sandbox, ['scan', TTY_DIR])
+    : await recordStates(sandbox, ['status', ...mine().filter((terminal) => terminal.unwatched).map((terminal) => terminal.pidFile)]);
   if (search) {
     for (const [file, record] of records) {
       const id = /^([a-z0-9]{12}(?:-(?:setup|run))?)\.pid$/.exec(path.posix.basename(file))?.[1];
-      if (id && !terminals.has(id) && (record.state === 'leader' || record.state === 'jobs')) adopt(workspace, containerId, id, record.state);
+      if (id && !terminals.has(id) && (record.state === 'leader' || record.state === 'jobs')) adopt(workspace, sandbox, id, record.state);
     }
   }
   // A damaged record says nothing, so its terminal stays as it is.
@@ -655,7 +666,7 @@ async function recoverWorkspace(workspace: Workspace): Promise<void> {
 }
 
 /** Gives back the controls of a terminal an earlier server started. */
-function adopt(workspace: Workspace, containerId: string, id: string, found: 'leader' | 'jobs'): void {
+function adopt(workspace: Workspace, sandbox: string, id: string, found: 'leader' | 'jobs'): void {
   const script = /-(setup|run)$/.exec(id)?.[1];
   if (script && id !== `${workspace.id}-${script}`) return;
   // Run scripts from older versions still own live processes. Give them ordinary terminal
@@ -665,10 +676,10 @@ function adopt(workspace: Workspace, containerId: string, id: string, found: 'le
   const terminal = new Terminal({ id, workspaceId: workspace.id, kind, title, status: 'running', exitCode: null });
   terminals.set(id, terminal);
   if (found === 'jobs') {
-    terminal.adoptJobs(containerId);
+    terminal.adoptJobs(sandbox);
     return;
   }
-  terminal.recovered(containerId, kind === 'setup' ? (code) => updateRecoveredSetup(workspace, code) : undefined);
+  terminal.recovered(sandbox, kind === 'setup' ? (code) => updateRecoveredSetup(workspace, code) : undefined);
   if (kind === 'setup') {
     const setup = workspace.steps.find((step) => step.id === 'setup');
     if (setup) { setup.status = 'running'; setup.detail = undefined; publishWorkspace(workspace); }

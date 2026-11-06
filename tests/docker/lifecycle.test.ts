@@ -1,9 +1,8 @@
 import fs from 'node:fs';
-import http from 'node:http';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AppState, Project, Workspace } from '../../shared/types.ts';
-import { IN_SANDBOX, Lonca, asRoot, docker, dockerExec, git, makeFixtureRepo, sleep, until } from '../support/harness.ts';
+import { Lonca, asRoot, sandboxExec, git, makeFixtureRepo, sleep, until } from '../support/harness.ts';
 
 const lonca = new Lonca({ port: 48295, instance: 'lifecycle-test', firstWorkspacePort: 50300 });
 let fixture: string;
@@ -34,12 +33,12 @@ describe('repository setup scripts', () => {
   it('exposes and reruns the repository script, including after a server restart', async () => {
     expect(project.settings.setupScript).toBe('');
     expect(await lonca.api('GET', `/workspaces/${workspace.id}/scripts`)).toEqual({ setup: true });
-    expect(dockerExec(workspace.containerName, 'cat .context/setup-runs').output).toBe('repo');
+    expect(sandboxExec(workspace.sandboxName, 'cat .context/setup-runs').output).toBe('repo');
     await lonca.kill();
     await lonca.start();
     await lonca.api('POST', `/workspaces/${workspace.id}/scripts/setup`);
     await until('setup rerun', async () => (await setupStep())?.status === 'done'
-      && dockerExec(workspace.containerName, 'cat .context/setup-runs').output === 'repo\nrepo');
+      && sandboxExec(workspace.sandboxName, 'cat .context/setup-runs').output === 'repo\nrepo');
   });
 
   it('uses the current repository script and records failure, stop, and successful rerun', async () => {
@@ -74,42 +73,17 @@ describe('repository setup scripts', () => {
   });
 });
 
-it.skipIf(IN_SANDBOX)('waits for the firewall when Docker has already started the container', async () => {
-  let reachedHost = false;
-  const target = http.createServer((_req, res) => { reachedHost = true; res.end('host-reached'); });
-  await new Promise<void>((resolve) => target.listen(0, '0.0.0.0', resolve));
-  const port = (target.address() as { port: number }).port;
-  let terminal: Awaited<ReturnType<Lonca['openTerminal']>> | undefined;
-  try {
-    // Slow the entrypoint's DNS lookup to hold open the real firewall startup window.
-    docker('exec', workspace.containerName, 'bash', '-c', 'printf \'#!/bin/bash\nsleep 3\nexec /usr/bin/getent "$@"\n\' > /usr/local/bin/getent; chmod +x /usr/local/bin/getent');
-    docker('stop', '-t', '1', workspace.containerName);
-    docker('start', workspace.containerName);
-    expect(dockerExec(workspace.containerName, 'test -e /run/lonca/ready').code).toBe(1);
-    const created = await lonca.api('POST', `/workspaces/${workspace.id}/terminals`);
-    expect(dockerExec(workspace.containerName, 'test -e /run/lonca/ready').code).toBe(0);
-    terminal = await lonca.openTerminal(created.id);
-    terminal.send(`curl -s --max-time 2 http://host.docker.internal:${port}/; printf '\\nprobe-finished\\n'\n`);
-    await until('host access probe', () => terminal!.output().includes('probe-finished\r\n'));
-    expect(reachedHost).toBe(false);
-  } finally {
-    terminal?.socket.close();
-    docker('exec', workspace.containerName, 'rm', '-f', '/usr/local/bin/getent');
-    await new Promise<void>((resolve) => target.close(() => resolve()));
-  }
-});
-
 it('restores its saved branch after the original local checkout moves', async () => {
   // Preserve a workspace-only commit to prove restoration uses the saved branch.
-  expect(dockerExec(workspace.containerName, "echo saved > saved.txt; git add saved.txt; git -c user.name=Test -c user.email=test@example.com commit --quiet -m saved").code).toBe(0);
-  const commit = dockerExec(workspace.containerName, 'git rev-parse HEAD').output;
+  expect(sandboxExec(workspace.sandboxName, "echo saved > saved.txt; git add saved.txt; git -c user.name=Test -c user.email=test@example.com commit --quiet -m saved").code).toBe(0);
+  const commit = sandboxExec(workspace.sandboxName, 'git rev-parse HEAD').output;
   await lonca.api('PATCH', `/projects/${project.id}`, { settings: { filesToCopy: ['.env*'] } });
   await lonca.api('POST', `/workspaces/${workspace.id}/archive`);
   fs.renameSync(fixture, `${fixture}-moved`);
   try {
     await lonca.api('POST', `/workspaces/${workspace.id}/restore`);
     workspace = await lonca.waitForWorkspace(workspace.id);
-    expect(dockerExec(workspace.containerName, 'git rev-parse HEAD').output).toBe(commit);
+    expect(sandboxExec(workspace.sandboxName, 'git rev-parse HEAD').output).toBe(commit);
     expect(fs.readFileSync(path.join(workspace.path, 'saved.txt'), 'utf8').trim()).toBe('saved');
     await until('restored setup', async () => (await setupStep())?.status === 'done');
   } finally {
@@ -127,7 +101,7 @@ it('does not allocate a workspace while its project is being removed', async () 
     removing = await lonca.waitForWorkspace(made.workspace.id);
     // Hold the managed Git operation so the next request definitely overlaps teardown.
     // Managed deletion bypasses repository hooks, which must not be able to veto cleanup.
-    asRoot(removing.containerName, `cat > /usr/local/bin/git <<'GIT'
+    asRoot(removing.sandboxName, `cat > /usr/local/bin/git <<'GIT'
 #!/bin/bash
 if [[ " $* " == *" branch -D "* ]]; then
   touch /tmp/removal-waiting
@@ -140,12 +114,12 @@ exec /usr/bin/git "$@"
 GIT
 chmod +x /usr/local/bin/git`);
     deleting = lonca.api('DELETE', `/projects/${project.id}`);
-    await until('project teardown hook', () => dockerExec(removing!.containerName, 'test -e /tmp/removal-waiting').code === 0);
+    await until('project teardown hook', () => sandboxExec(removing!.sandboxName, 'test -e /tmp/removal-waiting').code === 0);
     const creating = fetch(`${lonca.url}/api/projects/${project.id}/workspaces`, {
       method: 'POST', headers: { ...lonca.headers, 'content-type': 'application/json' }, body: '{}',
     });
     await sleep(200);
-    expect(dockerExec(removing.containerName, 'touch /tmp/release-removal').code).toBe(0);
+    expect(sandboxExec(removing.sandboxName, 'touch /tmp/release-removal').code).toBe(0);
     await deleting;
     expect((await creating).status).toBe(404);
     const state = await lonca.api<AppState>('GET', '/state');
@@ -153,7 +127,7 @@ chmod +x /usr/local/bin/git`);
     expect(state.workspaces.some((entry) => entry.projectId === project.id)).toBe(false);
     expect(state.sessions.some((entry) => entry.workspaceId === removing!.id)).toBe(false);
   } finally {
-    if (removing) dockerExec(removing.containerName, 'touch /tmp/release-removal');
+    if (removing) sandboxExec(removing.sandboxName, 'touch /tmp/release-removal');
     await deleting?.catch(() => {});
     fs.rmSync(repo, { recursive: true, force: true });
   }

@@ -2,19 +2,18 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Project, ProjectSettings } from '../shared/types.ts';
-import { PREFIX, paths } from './config.ts';
-import { LABEL, docker, removeContainer } from './docker.ts';
+import { paths } from './config.ts';
 import { publish } from './events.ts';
 import { githubGitAuth } from './git-auth.ts';
+import { execText } from './sandbox.ts';
 import { flushState, getSecrets, saveState, state } from './store.ts';
-import { ensureImage } from './system.ts';
 import { HttpError, KeyedQueue, errorMessage, newId, removeTree, slugify } from './util.ts';
 
 // Keep workspace allocation and project removal from overlapping, including port probes.
 export const projectLifecycle = new KeyedQueue();
 const imports = new Map<string, { controller: AbortController; finished: Promise<void> }>();
 
-// Git on the host runs only while setting up a repository, before any container has
+// Git on the host runs only while setting up a repository, before any sandbox has
 // mounted it, or against the user's own checkout. See WORKTREE_SCRIPT in workspaces.ts.
 const HOST_GIT_ENV = {
   ...process.env,
@@ -251,45 +250,19 @@ const IMPORT_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
  * Brings new commits from a local repository with no remote into the project. The project's
- * repository may have been written to by an agent, so git touches it only in a throwaway
- * container, and that container sees just a bundle of the branches, not the local `.git`.
+ * repository may have been written to by an agent, so git touches it only in the workspace's
+ * sandbox, and that sees just a bundle of the branches, not the local `.git`.
  */
-export async function refreshFromLocalRepo(project: Project): Promise<void> {
+export async function refreshFromLocalRepo(project: Project, sandbox: string): Promise<void> {
   if (!project.localPath || project.remoteUrl) return;
   const repo = paths.repo(project.slug);
-  const staging = fs.mkdtempSync(path.join(paths.projectDir(project.slug), 'import-'));
-  const bundle = path.join(staging, 'local.bundle');
-  const name = `${PREFIX}-import-${project.id}`;
+  // In the repository, because that's what the sandbox has mounted.
+  const bundle = path.join(repo, `lonca-import-${newId()}.bundle`);
   try {
     await hostGit(project.localPath, ['bundle', 'create', '--quiet', bundle, '--branches']);
-    await removeContainer(name);
-    const container = await docker.createContainer({
-      name,
-      Image: await ensureImage(),
-      Entrypoint: ['git', '-C', repo, '-c', 'core.hooksPath=/dev/null', 'fetch', '--quiet', bundle, '+refs/heads/*:refs/remotes/origin/*'],
-      Cmd: [],
-      User: 'lonca',
-      Labels: { [LABEL]: PREFIX },
-      HostConfig: {
-        CapDrop: ['ALL'],
-        SecurityOpt: ['no-new-privileges'],
-        NetworkMode: 'none',
-        Binds: [`${repo}:${repo}:rw`, `${bundle}:${bundle}:ro`],
-      },
-    });
-    await container.start();
-    const finished = await Promise.race([
-      container.wait() as Promise<{ StatusCode: number }>,
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), IMPORT_TIMEOUT_MS)),
-    ]);
-    if (finished === null) throw new Error('Importing new commits took too long');
-    if (finished.StatusCode !== 0) {
-      const logs = await container.logs({ stdout: true, stderr: true });
-      throw new Error(logs.toString('utf8').trim() || `git fetch exited with code ${finished.StatusCode}`);
-    }
+    await execText(sandbox, ['git', '-C', repo, '-c', 'core.hooksPath=/dev/null', 'fetch', '--quiet', bundle, '+refs/heads/*:refs/remotes/origin/*'], { timeoutMs: IMPORT_TIMEOUT_MS });
   } finally {
-    await removeContainer(name);
-    await removeTree(staging);
+    fs.rmSync(bundle, { force: true });
   }
 }
 

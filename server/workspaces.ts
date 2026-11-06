@@ -2,20 +2,20 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
-import type { Project, Session, StepId, Workspace, WorkspaceOperation, WorkspaceRuntime, WorkspaceStep } from '../shared/types.ts';
-import { FIRST_WORKSPACE_PORT, PORTS_PER_WORKSPACE, PREFIX, RUNTIME_CHOICE, paths } from './config.ts';
-import { type ContainerSpec, containerState, ensureContainer, isContainerRunning, stopContainer } from './containers.ts';
-import { exec, execText, homeVolume, removeContainer, removeVolume } from './docker.ts';
+import type { Project, Session, StepId, Workspace, WorkspaceOperation, WorkspaceStep } from '../shared/types.ts';
+import { codexSetup, proxySecrets } from './boundary.ts';
+import { FIRST_WORKSPACE_PORT, PORTS_PER_WORKSPACE, PREFIX, paths } from './config.ts';
 import { publish } from './events.ts';
 import { pickWorkspaceName } from './names.ts';
 import { projectLifecycle, refreshFromLocalRepo } from './projects.ts';
-import { ensureSandbox, sandboxHandle } from './sandbox.ts';
+import { ensureSandbox, exec, execText, isSandboxRunning, removeSandbox, sandboxState, stopSandbox } from './sandbox.ts';
 import { deleteTranscript, flushState, getProject, getSecrets, getWorkspace, saveState, state } from './store.ts';
-import { checkSandboxes, ensureCustomTemplate, ensureImage, ensureSandboxImage, secretEnv, system } from './system.ts';
+import { checkSandboxes, ensureCustomTemplate, ensureSandboxImage, system } from './system.ts';
 import { HttpError, KeyedQueue, RuntimeStoppedError, errorMessage, newId, removeTree } from './util.ts';
 
 const lifecycle = new KeyedQueue();
 const repoLock = new KeyedQueue();
+const codexSetups = new KeyedQueue();
 // Names belong to a project, but port blocks are shared by every workspace.
 const allocation = new KeyedQueue();
 
@@ -32,7 +32,7 @@ export function onWorkspaceReady(listener: ReadyListener): void {
   readyListeners.push(listener);
 }
 
-/** Called before a workspace's container goes away, so its processes can be wound down. */
+/** Called before a workspace's sandbox goes away, so its processes can be wound down. */
 export function onWorkspaceTeardown(listener: TeardownListener): void {
   teardownListeners.push(listener);
 }
@@ -88,53 +88,28 @@ function workspaceEnv(workspace: Workspace, project: Project): string[] {
   ];
 }
 
-function containerSpec(workspace: Workspace, project: Project): ContainerSpec {
+/**
+ * Prepares a workspace's sandbox, starting or creating it unless `start` is false. `bare` leaves
+ * out what could stop it starting, which a workspace that's being removed doesn't need.
+ */
+function ensureWorkspaceSandbox(workspace: Workspace, project: Project, options: { bare?: boolean; start?: boolean } = {}): Promise<string> {
+  const bare = options.bare ? { firstPort: undefined, memoryGb: 0, cpus: 0 } : {};
   const settings = project.settings;
-  return {
-    name: workspace.containerName,
-    hostname: workspace.name,
-    image: async () => settings.image || ensureImage(),
-    workdir: workspace.path,
+  // Boot writes Codex's login too, so an update must wait until that write has finished.
+  return codexSetups.run(workspace.id, () => ensureSandbox({
+    name: workspace.sandboxName,
+    image: async () => (!options.bare && settings.image ? ensureCustomTemplate(settings.image) : ensureSandboxImage()),
     env: workspaceEnv(workspace, project),
-    labels: { 'dev.lonca.workspace': workspace.id, 'dev.lonca.project': project.id },
-    binds: [workspace.path, paths.repo(project.slug)],
-    homeVolume: homeVolume(workspace.id),
+    mounts: [workspace.path, paths.repo(project.slug)],
+    agentState: paths.agentState(workspace.id),
+    secrets: proxySecrets(),
+    setup: () => codexSetup(project),
     firstPort: workspace.port,
     network: settings.network,
     memoryGb: settings.memoryGb,
     cpus: settings.cpus,
-  };
-}
-
-/** Reaches a workspace's container or sandbox, whichever it has, through docker.ts and containers.ts. */
-export function runtimeHandle(workspace: Workspace): string {
-  return workspace.runtime === 'sandbox' ? sandboxHandle(workspace.containerName) : workspace.containerName;
-}
-
-/**
- * Prepares a workspace's runtime, starting or creating it unless `start` is false. `bare` leaves
- * out what could stop it starting, which a workspace that's being removed doesn't need.
- */
-function ensureRuntime(workspace: Workspace, project: Project, options: { bare?: boolean; start?: boolean } = {}): Promise<string> {
-  const bare = options.bare ? { firstPort: undefined, memoryGb: 0, cpus: 0 } : {};
-  if (workspace.runtime === 'sandbox') {
-    const settings = project.settings;
-    return ensureSandbox({
-      name: workspace.containerName,
-      image: async () => (!options.bare && settings.image ? ensureCustomTemplate(settings.image) : ensureSandboxImage()),
-      env: workspaceEnv(workspace, project),
-      mounts: [workspace.path, paths.repo(project.slug)],
-      credentials: paths.credentials,
-      agentState: paths.agentState(workspace.id),
-      firstPort: workspace.port,
-      network: settings.network,
-      memoryGb: settings.memoryGb,
-      cpus: settings.cpus,
-      ...bare,
-    }, { start: options.start });
-  }
-  const spec = containerSpec(workspace, project);
-  return ensureContainer(options.bare ? { ...spec, image: ensureImage, ...bare } : spec, { start: options.start });
+    ...bare,
+  }, { start: options.start }));
 }
 
 function projectOf(workspace: Workspace): Project {
@@ -143,14 +118,45 @@ function projectOf(workspace: Workspace): Project {
   return project;
 }
 
-/** Observes a workspace's runtime without waking it for reads or automatic terminals. */
-export async function runningContainer(workspace: Workspace): Promise<string> {
+/** One at a time in each VM, with the settings as they are by then, so that the last to run has the latest. */
+export function setUpCodex(workspace: Workspace, project: Project = projectOf(workspace)): Promise<void> {
+  return codexSetups.run(workspace.id, async () => {
+    const { command, stdin } = codexSetup(project);
+    await execText(workspace.sandboxName, command, { stdin });
+  });
+}
+
+/** Update running VMs for project keys and for global API-key/ChatGPT endpoint changes. */
+export async function applyCodexSetup(project: Project): Promise<void> {
+  const workspaces = state.workspaces.filter((workspace) => workspace.projectId === project.id);
+  await Promise.all(workspaces.map((workspace) => lifecycle.run(workspace.id, async () => {
+    // Creation or rebuilding may already have written an older key. Wait for it to finish,
+    // and check then: a Stop or deletion that came first mustn't be undone by this update.
+    if (getWorkspace(workspace.id) !== workspace) return;
+    try {
+      if (await isSandboxRunning(workspace.sandboxName)) await setUpCodex(workspace, project);
+    } catch (error) {
+      console.error(`could not update Codex’s key in ${workspace.name}:`, errorMessage(error));
+    }
+  })));
+}
+
+/**
+ * Which address Codex uses follows the kind of sign-in, which every project shares. Nothing waits
+ * for this, because a turn, terminal or script sets Codex up before it starts anyway.
+ */
+export function applyCodexSetupEverywhere(): void {
+  for (const project of state.projects) void applyCodexSetup(project);
+}
+
+/** Observes a workspace's sandbox without waking it for reads or automatic terminals. */
+export async function runningSandbox(workspace: Workspace): Promise<string> {
   if (workspace.status !== 'ready') {
     throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
   }
   const checkedAt = workspace.updatedAt;
   try {
-    const id = await ensureRuntime(workspace, projectOf(workspace), { start: false });
+    const id = await ensureWorkspaceSandbox(workspace, projectOf(workspace), { start: false });
     if (workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
     return id;
   } catch (error) {
@@ -225,7 +231,7 @@ fi
 `;
 
 /** Counts each file as it lands, so a retry after a failure partway through reports them all. */
-async function copyFiles(workspace: Workspace, project: Project, containerId: string): Promise<void> {
+async function copyFiles(workspace: Workspace, project: Project, sandbox: string): Promise<void> {
   if (!project.localPath) return;
   for (const pattern of project.settings.filesToCopy) {
     for (const relative of fs.globSync(pattern, { cwd: project.localPath })) {
@@ -233,9 +239,9 @@ async function copyFiles(workspace: Workspace, project: Project, containerId: st
       const source = path.join(project.localPath, relative);
       const stat = fs.lstatSync(source);
       if (!stat.isFile() || stat.size > 25 * 1024 * 1024) continue;
-      // Written from inside the container, so a tracked symlink at this path can't reach the host.
+      // Written from inside the sandbox, so a tracked symlink at this path can't reach the host.
       const result = await execText(
-        containerId,
+        sandbox,
         ['bash', '-c', COPY_FILE_SCRIPT, 'lonca-copy', relative, (stat.mode & 0o777).toString(8)],
         { stdin: fs.readFileSync(source), workdir: workspace.path },
       );
@@ -244,10 +250,10 @@ async function copyFiles(workspace: Workspace, project: Project, containerId: st
   }
 }
 
-export async function configuredSetupScript(workspace: Workspace, containerId?: string): Promise<string> {
+export async function configuredSetupScript(workspace: Workspace, sandbox?: string): Promise<string> {
   const project = projectOf(workspace);
   if (project.settings.setupScript.trim()) return project.settings.setupScript;
-  const file = await exec(containerId ?? await runningContainer(workspace), ['head', '-c', '65536', 'lonca.json'], { workdir: workspace.path, timeoutMs: 10000 });
+  const file = await exec(sandbox ?? await runningSandbox(workspace), ['head', '-c', '65536', 'lonca.json'], { workdir: workspace.path, timeoutMs: 10000 });
   if (file.code !== 0) return '';
   try {
     const script = (JSON.parse(file.stdout.toString('utf8')) as { scripts?: { setup?: unknown } }).scripts?.setup;
@@ -262,14 +268,14 @@ async function provision(workspace: Workspace): Promise<void> {
   let currentStep: StepId = 'image';
   try {
     setStep(workspace, 'image', 'running');
-    if (!project.settings.image) await (workspace.runtime === 'sandbox' ? ensureSandboxImage() : ensureImage());
+    if (!project.settings.image) await ensureSandboxImage();
     setStep(workspace, 'image', 'done');
 
-    currentStep = 'container';
-    setStep(workspace, 'container', 'running');
+    currentStep = 'sandbox';
+    setStep(workspace, 'sandbox', 'running');
     fs.mkdirSync(workspace.path, { recursive: true });
-    const containerId = await ensureRuntime(workspace, project);
-    setStep(workspace, 'container', 'done');
+    const sandbox = await ensureWorkspaceSandbox(workspace, project);
+    setStep(workspace, 'sandbox', 'done');
 
     currentStep = 'worktree';
     setStep(workspace, 'worktree', 'running');
@@ -278,13 +284,13 @@ async function provision(workspace: Workspace): Promise<void> {
       if (!hasRemote) {
         // An archived workspace's branch already lives in our repository. Restoring it
         // must not depend on the original checkout still being at its imported path.
-        const savedBranch = await exec(containerId, ['git', '-C', paths.repo(project.slug), 'show-ref', '--verify', '--quiet', `refs/heads/${workspace.branch}`]);
-        if (savedBranch.code !== 0) await refreshFromLocalRepo(project);
+        const savedBranch = await exec(sandbox, ['git', '-C', paths.repo(project.slug), 'show-ref', '--verify', '--quiet', `refs/heads/${workspace.branch}`]);
+        if (savedBranch.code !== 0) await refreshFromLocalRepo(project, sandbox);
       }
-      return execText(containerId, [
+      return execText(sandbox, [
         'bash', '-c', WORKTREE_SCRIPT, 'lonca-worktree',
         paths.repo(project.slug), workspace.path, workspace.branch, workspace.baseBranch, hasRemote ? '1' : '0',
-      ], { env: [...secretEnv(), 'GIT_HTTP_LOW_SPEED_LIMIT=1000', 'GIT_HTTP_LOW_SPEED_TIME=60'], timeoutMs: LONG_GIT_TIMEOUT_MS });
+      ], { env: ['GIT_HTTP_LOW_SPEED_LIMIT=1000', 'GIT_HTTP_LOW_SPEED_TIME=60'], timeoutMs: LONG_GIT_TIMEOUT_MS });
     });
     if (output.includes('fetch-failed:')) {
       const hint = getSecrets().githubToken ? '' : ' If this repository is private, connect GitHub in Settings.';
@@ -296,7 +302,7 @@ async function provision(workspace: Workspace): Promise<void> {
     if (workspace.steps.find((step) => step.id === 'files')?.status !== 'done') {
       currentStep = 'files';
       setStep(workspace, 'files', 'running');
-      await copyFiles(workspace, project, containerId);
+      await copyFiles(workspace, project, sandbox);
       setStep(workspace, 'files', 'done');
     }
 
@@ -304,7 +310,7 @@ async function provision(workspace: Workspace): Promise<void> {
     // Setup has its own status and retry control. A launch failure must not turn a usable
     // checkout into another creation attempt, potentially while agents are already running.
     try {
-      const setup = await configuredSetupScript(workspace, containerId);
+      const setup = await configuredSetupScript(workspace, sandbox);
       if (setup.trim()) await startSetupScript(workspace, setup);
     } catch (error) {
       setStep(workspace, 'setup', 'error', errorMessage(error));
@@ -318,7 +324,7 @@ async function provision(workspace: Workspace): Promise<void> {
 }
 
 function newSteps(): WorkspaceStep[] {
-  const ids: StepId[] = ['image', 'container', 'worktree', 'files', 'setup'];
+  const ids: StepId[] = ['image', 'sandbox', 'worktree', 'files', 'setup'];
   return ids.map((id) => ({ id, status: 'pending' }));
 }
 
@@ -327,37 +333,41 @@ export interface NewWorkspaceOptions {
 }
 
 // Docker Sandboxes takes names of at most 63 characters, as DNS does.
-const MAX_RUNTIME_NAME = 63;
+const MAX_SANDBOX_NAME = 63;
 
-/** The name of a workspace's container or sandbox, kept short enough for either. */
-export function runtimeName(prefix: string, slug: string, name: string, id: string): string {
+/** The name of a workspace's sandbox, kept short enough. */
+export function sandboxNameFor(prefix: string, slug: string, name: string, id: string): string {
   const full = `${prefix}-${slug}-${name}`;
-  if (full.length <= MAX_RUNTIME_NAME) return full;
+  if (full.length <= MAX_SANDBOX_NAME) return full;
   // A long project name is cut short, and a hash of all of it keeps two such projects apart.
   const hash = crypto.createHash('sha256').update(slug).digest('hex').slice(0, 6);
-  const room = MAX_RUNTIME_NAME - `${prefix}--${hash}-${name}`.length;
+  const room = MAX_SANDBOX_NAME - `${prefix}--${hash}-${name}`.length;
   const shortened = slug.slice(0, Math.max(0, room)).replace(/-+$/, '');
   const named = shortened ? `${prefix}-${shortened}-${hash}-${name}` : `${prefix}-${hash}-${name}`;
-  if (named.length <= MAX_RUNTIME_NAME) return named;
-  if (`${prefix}-${id}`.length <= MAX_RUNTIME_NAME) return `${prefix}-${id}`;
+  if (named.length <= MAX_SANDBOX_NAME) return named;
+  if (`${prefix}-${id}`.length <= MAX_SANDBOX_NAME) return `${prefix}-${id}`;
   throw new HttpError(500, 'LONCA_INSTANCE is too long to name workspaces after. Use a shorter one.');
 }
 
-/** A virtual machine where Docker Sandboxes can run one, and a container where it can't. */
-async function chooseRuntime(): Promise<WorkspaceRuntime> {
+const SANDBOX_PROBLEM: Record<string, string> = {
+  checking: 'Lonca is still checking on Docker Sandboxes.',
+  'not-installed': 'Workspaces need Docker Sandboxes, which isn’t installed. Settings says how to get it.',
+  'signed-out': 'Docker Sandboxes isn’t signed in. Run `sbx login` in a terminal, then try again.',
+};
+
+/** Workspaces can't run without Docker Sandboxes, so there's no use in starting one. */
+async function requireSandboxes(): Promise<void> {
   await checkSandboxes();
   const { state: sandbox, detail } = system.sandbox;
-  if (sandbox === 'ready') return 'sandbox';
-  // Someone who asked for VMs by name should find out, not silently get less isolation.
-  if (RUNTIME_CHOICE === 'sandbox') throw new HttpError(503, `Docker Sandboxes isn’t available (${detail ?? sandbox}), and LONCA_RUNTIME asks for it.`);
-  return 'container';
+  if (sandbox === 'ready') return;
+  throw new HttpError(503, SANDBOX_PROBLEM[sandbox] ?? `Docker Sandboxes can’t run workspaces here: ${detail ?? sandbox}`);
 }
 
 export async function createWorkspace(project: Project, options: NewWorkspaceOptions, makeSession: (workspace: Workspace) => Session): Promise<{ workspace: Workspace; session: Session }> {
   return projectLifecycle.run(project.id, async () => {
     if (!getProject(project.id)) throw new HttpError(404, 'This project no longer exists');
     if (project.status !== 'ready') throw new HttpError(409, `${project.name} isn’t ready yet`);
-    const runtime = await chooseRuntime();
+    await requireSandboxes();
     return allocation.run('workspaces', async () => {
       const taken = new Set(state.workspaces.filter((entry) => entry.projectId === project.id).map((entry) => entry.name));
       const name = pickWorkspaceName(taken);
@@ -373,8 +383,7 @@ export async function createWorkspace(project: Project, options: NewWorkspaceOpt
         branch: prefix ? `${prefix}/${name}` : name,
         baseBranch: options.baseBranch ?? project.settings.defaultBranch,
         path: paths.worktree(project.slug, name),
-        containerName: runtimeName(PREFIX, project.slug, name, id),
-        runtime,
+        sandboxName: sandboxNameFor(PREFIX, project.slug, name, id),
         port,
         status: 'creating',
         pendingOperation: 'create',
@@ -436,28 +445,28 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
         await provision(workspace);
         break;
       case 'start':
-        await ensureRuntime(workspace, projectOf(workspace));
+        await ensureWorkspaceSandbox(workspace, projectOf(workspace));
         finishOperation(workspace, 'ready');
         break;
       case 'stop':
       case 'rebuild':
       case 'archive':
       case 'delete':
-        // Operations that keep conversations need the stopped runtime's unread
+        // Operations that keep conversations need the stopped sandbox's unread
         // output. Explicit deletion only needs its processes confirmed dead and
-        // must still reach teardown's fallback if the old runtime cannot start.
+        // must still reach teardown's fallback if the old sandbox cannot start.
         if (operation !== 'delete'
           && state.sessions.some((session) => session.workspaceId === workspace.id && session.activeRunId)
-          && await containerState(runtimeHandle(workspace)) === 'stopped') {
-          await ensureRuntime(workspace, projectOf(workspace));
+          && await sandboxState(workspace.sandboxName) === 'stopped') {
+          await ensureWorkspaceSandbox(workspace, projectOf(workspace));
         }
         for (const listener of teardownListeners) await listener(workspace);
         if (operation === 'stop') {
-          await stopContainer(runtimeHandle(workspace));
+          await stopSandbox(workspace.sandboxName);
           finishOperation(workspace, 'stopped');
         } else if (operation === 'rebuild') {
-          await removeContainer(runtimeHandle(workspace));
-          await ensureRuntime(workspace, projectOf(workspace));
+          await removeSandbox(workspace.sandboxName);
+          await ensureWorkspaceSandbox(workspace, projectOf(workspace));
           finishOperation(workspace, 'ready');
         } else {
           await teardown(workspace, projectOf(workspace), operation === 'delete');
@@ -465,7 +474,6 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
             workspace.diff = null;
             finishOperation(workspace, 'archived');
           } else {
-            await removeVolume(homeVolume(workspace.id));
             await removeTree(paths.agentState(workspace.id));
             const sessions = state.sessions.filter((session) => session.workspaceId === workspace.id);
             await Promise.all(sessions.map((session) => deleteTranscript(session.id)));
@@ -486,7 +494,7 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
         }
     }
   } catch (error) {
-    // Keep intent even if cleanup already removed the checkout, branch, or runtime.
+    // Keep intent even if cleanup already removed the checkout, branch, or sandbox.
     workspace.pendingOperation = operation;
     // Starting has an explicit retry control and accepts messages into the saved queue.
     workspace.status = operation === 'start' ? 'stopped' : 'error';
@@ -522,8 +530,8 @@ export function restoreWorkspace(workspace: Workspace): void {
 
 export function startWorkspace(workspace: Workspace): Promise<void> {
   return lifecycle.run(workspace.id, async () => {
-    // Several messages can request the same wake while the runtime is starting.
-    if (workspace.status === 'ready' && await isContainerRunning(runtimeHandle(workspace))) return;
+    // Several messages can request the same wake while the sandbox is starting.
+    if (workspace.status === 'ready' && await isSandboxRunning(workspace.sandboxName)) return;
     if (workspace.status !== 'stopped' && workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
     await performOperation(workspace, 'start');
   });
@@ -536,8 +544,8 @@ export function stopWorkspace(workspace: Workspace): Promise<void> {
   });
 }
 
-/** Replaces the container to apply new project settings or image. Files and home are kept. */
-export function recreateContainer(workspace: Workspace): Promise<void> {
+/** Replaces the sandbox to apply new project settings or a new template. Files and conversations are kept. */
+export function rebuildWorkspace(workspace: Workspace): Promise<void> {
   return lifecycle.run(workspace.id, async () => {
     if (workspace.status !== 'ready' && workspace.status !== 'stopped') {
       throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
@@ -548,34 +556,34 @@ export function recreateContainer(workspace: Workspace): Promise<void> {
 
 async function teardown(workspace: Workspace, project: Project, deleteBranch: boolean): Promise<void> {
   fs.mkdirSync(workspace.path, { recursive: true });
-  // Begin from a fresh runtime. Something an agent left running, such as a server it started
+  // Begin from a fresh sandbox. Something an agent left running, such as a server it started
   // with nohup, would otherwise keep writing to the checkout while it's being removed.
-  await stopContainer(runtimeHandle(workspace));
+  await stopSandbox(workspace.sandboxName);
   try {
-    let containerId: string;
+    let sandbox: string;
     try {
-      containerId = await ensureRuntime(workspace, project);
+      sandbox = await ensureWorkspaceSandbox(workspace, project);
     } catch {
-      // A bad custom image or a taken port must not make a workspace impossible to remove.
-      await removeContainer(runtimeHandle(workspace));
-      containerId = await ensureRuntime(workspace, project, { bare: true });
+      // A bad custom template or a taken port must not make a workspace impossible to remove.
+      await removeSandbox(workspace.sandboxName);
+      sandbox = await ensureWorkspaceSandbox(workspace, project, { bare: true });
     }
     await repoLock.run(project.id, () =>
-      execText(containerId, [
+      execText(sandbox, [
         'bash', '-c', TEARDOWN_SCRIPT, 'lonca-teardown',
         paths.repo(project.slug), workspace.path, workspace.branch, deleteBranch ? '1' : '0',
       ], { timeoutMs: LONG_GIT_TIMEOUT_MS }),
     );
-    await removeContainer(runtimeHandle(workspace));
+    await removeSandbox(workspace.sandboxName);
   } catch (error) {
-    // The runtime was only started for this, and shouldn't stay up waiting for a retry.
-    await stopContainer(runtimeHandle(workspace)).catch(() => {});
+    // The sandbox was only started for this, and shouldn't stay up waiting for a retry.
+    await stopSandbox(workspace.sandboxName).catch(() => {});
     throw error;
   }
   await removeTree(workspace.path);
 }
 
-/** Removes the container and checkout but keeps the branch, chat history and home directory. */
+/** Removes the sandbox and checkout but keeps the branch and chat history. */
 export function archiveWorkspace(workspace: Workspace): Promise<void> {
   return lifecycle.run(workspace.id, async () => {
     if (workspace.status === 'archived') return;
@@ -610,20 +618,20 @@ export function markInterruptedWork(): void {
   saveState();
 }
 
-/** Brings saved state in line with Docker, which can change while nothing is watching it. */
+/** Brings saved state in line with Docker Sandboxes, which can change while nothing is watching it. */
 export async function reconcileWorkspaces(): Promise<void> {
   await Promise.all(state.workspaces.map((workspace) => lifecycle.run(workspace.id, async () => {
     if (workspace.status !== 'ready' && workspace.status !== 'stopped') return;
-    // A failed start may have left a running container whose entrypoint is not ready.
-    // Keep the explicit Start retry until ensureRuntime verifies it can accept work.
+    // A failed start may have left a running sandbox that didn't finish booting.
+    // Keep the explicit Start retry until it's been shown it can accept work.
     if (workspace.pendingOperation === 'start') return;
     // With Docker Sandboxes signed out, a VM can't be asked. Its record stands until it can be.
-    if (workspace.runtime === 'sandbox' && system.sandbox.state !== 'ready') return;
+    if (system.sandbox.state !== 'ready') return;
     let status: Workspace['status'];
     try {
-      status = (await isContainerRunning(runtimeHandle(workspace))) ? 'ready' : 'stopped';
+      status = (await isSandboxRunning(workspace.sandboxName)) ? 'ready' : 'stopped';
     } catch (error) {
-      // One runtime that can't be asked mustn't hold up the others. Its record stands for now.
+      // One sandbox that can't be asked mustn't hold up the others. Its record stands for now.
       console.error(`could not check on ${workspace.name}:`, errorMessage(error));
       return;
     }

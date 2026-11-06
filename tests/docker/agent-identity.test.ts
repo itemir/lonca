@@ -3,14 +3,14 @@ import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { agentProcessCommand } from '../../server/agents/process.ts';
 import type { Session, Workspace } from '../../shared/types.ts';
-import { FAKE_SANDBOX, IN_SANDBOX, REAL_SANDBOX, RUNTIME, Lonca, asRoot, docker, dockerExec, makeFixtureRepo, sbx, sleep, until } from '../support/harness.ts';
+import { FAKE_SANDBOX, REAL_SANDBOX, RUNTIME, Lonca, asRoot, docker, sandboxExec, makeFixtureRepo, sbx, sleep, until } from '../support/harness.ts';
 
-const currentLauncher = fs.readFileSync(new URL('../../docker/workspace/lonca-run', import.meta.url), 'utf8');
+const currentLauncher = fs.readFileSync(new URL('../../template/lonca-run', import.meta.url), 'utf8');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const command = (...args: Parameters<typeof agentProcessCommand>) => agentProcessCommand(...args).map(quote).join(' ');
 
 describe('agent process identity', () => {
-  const lonca = new Lonca({ port: REAL_SANDBOX ? 48335 : IN_SANDBOX ? 48325 : 48315, instance: `agent-identity-${RUNTIME}`, firstWorkspacePort: REAL_SANDBOX ? 54100 : IN_SANDBOX ? 53100 : 52100 });
+  const lonca = new Lonca({ port: REAL_SANDBOX ? 48335 : 48325, instance: `agent-identity-${RUNTIME}`, firstWorkspacePort: REAL_SANDBOX ? 54100 : 53100});
   const fixture = makeFixtureRepo();
   let workspace: Workspace;
   let claudePath: string;
@@ -18,14 +18,14 @@ describe('agent process identity', () => {
   let serial = 0;
 
   function writeScript(file: string, body: string): void {
-    asRoot(workspace.containerName, `printf %s ${quote(body)} > ${quote(file)}\nchmod +x ${quote(file)}`);
+    asRoot(workspace.sandboxName, `printf %s ${quote(body)} > ${quote(file)}\nchmod +x ${quote(file)}`);
   }
 
   beforeAll(async () => {
     await lonca.start();
     const project = await lonca.waitForProject((await lonca.api('POST', '/projects', { path: fixture })).id);
     workspace = await lonca.waitForWorkspace((await lonca.api('POST', `/projects/${project.id}/workspaces`, {})).workspace.id);
-    claudePath = dockerExec(workspace.containerName, 'command -v claude').output;
+    claudePath = sandboxExec(workspace.sandboxName, 'command -v claude').output;
     expect(claudePath).toMatch(/^\//);
   });
 
@@ -46,7 +46,7 @@ while true; do echo tick >> .context/identity-heartbeat; sleep 0.1; done
     for (const { dir, pid } of directRuns.splice(0)) {
       // These are only processes created by this test, including intentionally
       // stale records that the production signal path must refuse to trust.
-      dockerExec(workspace.containerName, `kill -KILL -- -${pid} 2>/dev/null; rm -rf ${quote(dir)}`);
+      sandboxExec(workspace.sandboxName, `kill -KILL -- -${pid} 2>/dev/null; rm -rf ${quote(dir)}`);
     }
     const sessions = (await lonca.api('GET', '/state')).sessions as Session[];
     for (const session of sessions.filter((entry) => entry.activeRunId)) {
@@ -68,8 +68,8 @@ while true; do echo tick >> .context/identity-heartbeat; sleep 0.1; done
     await lonca.api('POST', `/sessions/${session.id}/messages`, { text: 'Run until stopped', attachments: [] });
     await until('the agent to execute', () => fs.existsSync(path.join(workspace.path, '.context/identity-agent-started')), 15000);
     const dir = `/var/tmp/lonca/agent-runs/${(await lonca.session(session.id)).activeRunId}`;
-    const pid = dockerExec(workspace.containerName, `cat ${dir}/pid`).output;
-    expect(dockerExec(workspace.containerName, command('status', dir))).toMatchObject({ code: 0, output: 'alive' });
+    const pid = sandboxExec(workspace.sandboxName, `cat ${dir}/pid`).output;
+    expect(sandboxExec(workspace.sandboxName, command('status', dir))).toMatchObject({ code: 0, output: 'alive' });
     return { session, dir, pid };
   }
 
@@ -102,14 +102,14 @@ while true; do sleep 0.1; done
         const text = recover ? 'output-written-while-offline' : 'imports-isolated';
         if (recover) {
           await lonca.stop();
-          expect(dockerExec(workspace.containerName, `printf '%s\\n' ${quote(event(text))} >> ${quote(`${dir}/out.jsonl`)}`).code).toBe(0);
+          expect(sandboxExec(workspace.sandboxName, `printf '%s\\n' ${quote(event(text))} >> ${quote(`${dir}/out.jsonl`)}`).code).toBe(0);
           await lonca.start();
         }
         await until('the agent output to be followed', async () => (await lonca.items(session.id))
           .some((item) => item.type === 'text' && item.text === text), 15000);
         await lonca.api('POST', `/sessions/${session.id}/interrupt`);
         await lonca.waitForIdle(session.id, 15000);
-        expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).not.toBe(0);
+        expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).not.toBe(0);
         expect(await lonca.session(session.id)).toMatchObject({ activeRunId: null, status: 'idle' });
         expect((await lonca.items(session.id)).find((item) => item.type === 'result')).toMatchObject({ interrupted: true });
       }
@@ -135,22 +135,22 @@ while true; do sleep 0.1; done
 
   it('does not adopt or signal a foreign process named by a PID record', () => {
     const dir = `/var/tmp/lonca/agent-runs/identity-test-${++serial}`;
-    const result = dockerExec(workspace.containerName, `mkdir -p ${dir}\necho replay-this-output > ${dir}/out.jsonl\nsetsid sleep 600 </dev/null >/dev/null 2>&1 &\necho $! > ${dir}/pid\ncat ${dir}/pid`);
+    const result = sandboxExec(workspace.sandboxName, `mkdir -p ${dir}\necho replay-this-output > ${dir}/out.jsonl\nsetsid sleep 600 </dev/null >/dev/null 2>&1 &\necho $! > ${dir}/pid\ncat ${dir}/pid`);
     expect(result.code).toBe(0);
     const pid = result.output;
     directRuns.push({ dir, pid });
-    expect(dockerExec(workspace.containerName, command('status', dir))).toMatchObject({ code: 0, output: 'dead' });
-    expect(dockerExec(workspace.containerName, `timeout 5 ${command('follow', dir, '0')}`)).toMatchObject({ code: 0, output: 'replay-this-output' });
-    for (const signal of ['TERM', 'KILL']) expect(dockerExec(workspace.containerName, command('signal', dir, signal)).code).toBe(0);
-    expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, command('status', dir))).toMatchObject({ code: 0, output: 'dead' });
+    expect(sandboxExec(workspace.sandboxName, `timeout 5 ${command('follow', dir, '0')}`)).toMatchObject({ code: 0, output: 'replay-this-output' });
+    for (const signal of ['TERM', 'KILL']) expect(sandboxExec(workspace.sandboxName, command('signal', dir, signal)).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).toBe(0);
   });
 
   it('replays a nonzero exit completed while the server was down', async () => {
     const { session, dir } = await startAgent();
     await lonca.stop();
-    expect(dockerExec(workspace.containerName, command('signal', dir, 'KILL')).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, command('signal', dir, 'KILL')).code).toBe(0);
     // Preserve completed output and a nonzero result, as lonca-run normally does.
-    expect(dockerExec(workspace.containerName, `echo 17 > ${dir}/exit\necho saved-error > ${dir}/err.log`).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `echo 17 > ${dir}/exit\necho saved-error > ${dir}/err.log`).code).toBe(0);
     await lonca.start();
     await lonca.waitForIdle(session.id);
     expect((await lonca.items(session.id)).find((item) => item.type === 'notice' && item.level === 'error')).toMatchObject({ text: 'saved-error' });
@@ -172,8 +172,8 @@ while true; do sleep 0.1; done
     await lonca.api('POST', `/sessions/${session.id}/interrupt`);
     await lonca.kill();
     // The run directory outlives the boot, so recovery has to tell its PID from a new process reusing it.
-    docker('restart', '-t', '1', workspace.containerName);
-    const replacement = docker('exec', '--user', 'agent', workspace.containerName, 'python3', '-c', `
+    docker('restart', '-t', '1', workspace.sandboxName);
+    const replacement = docker('exec', '--user', 'agent', workspace.sandboxName, 'python3', '-c', `
 import os, signal, sys, time
 target = int(sys.argv[1])
 while True:
@@ -196,18 +196,18 @@ while True:
     await lonca.waitForIdle(session.id);
     await lonca.api('POST', `/sessions/${session.id}/interrupt`);
     await sleep(4500); // Include a possible delayed KILL from Stop.
-    expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).toBe(0);
     expect(await lonca.session(session.id)).toMatchObject({ status: 'idle', activeRunId: null });
   });
 
   it.skipIf(!REAL_SANDBOX)('rejects run records retained across a real VM reboot', async () => {
     const { session, dir } = await startAgent();
-    const boot = dockerExec(workspace.containerName, 'cat /proc/sys/kernel/random/boot_id').output;
+    const boot = sandboxExec(workspace.sandboxName, 'cat /proc/sys/kernel/random/boot_id').output;
     await lonca.kill();
-    sbx('stop', workspace.containerName);
-    sbx('exec', '--user', 'agent', workspace.containerName, '--', 'true');
-    expect(dockerExec(workspace.containerName, `cat ${dir}/pid`).code).toBe(0);
-    expect(dockerExec(workspace.containerName, 'cat /proc/sys/kernel/random/boot_id').output).not.toBe(boot);
+    sbx('stop', workspace.sandboxName);
+    sbx('exec', '--user', 'agent', workspace.sandboxName, '--', 'true');
+    expect(sandboxExec(workspace.sandboxName, `cat ${dir}/pid`).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, 'cat /proc/sys/kernel/random/boot_id').output).not.toBe(boot);
     await lonca.start();
     await lonca.waitForIdle(session.id);
     expect(await lonca.session(session.id)).toMatchObject({ status: 'idle', activeRunId: null });

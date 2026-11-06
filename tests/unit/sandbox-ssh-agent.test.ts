@@ -38,16 +38,16 @@ afterEach(async () => {
 });
 
 async function runCommands(): Promise<PromiseSettledResult<unknown>[]> {
-  const { isSandboxRunning, sandboxExec, sandboxStream, sandboxTty } = await import('../../server/sandbox.ts');
+  const { isSandboxRunning, exec, execStream, execTty } = await import('../../server/sandbox.ts');
   return Promise.allSettled([
     isSandboxRunning('test'),
-    sandboxExec('test', ['true']),
-    sandboxStream('test', ['true']).then(async (stream) => {
+    exec('test', ['true']),
+    execStream('test', ['true']).then(async (stream) => {
       stream.stdout.resume();
       stream.stderr.resume();
       await stream.finished;
     }),
-    sandboxTty('test', ['true'], {}).then(async (tty) => {
+    execTty('test', ['true'], {}).then(async (tty) => {
       tty.stream.resume();
       await tty.exitCode();
     }),

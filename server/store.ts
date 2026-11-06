@@ -15,6 +15,8 @@ interface StateFile {
   sessions: Session[];
   settings: AppSettings;
   catalog: Catalog;
+  /** The template `catalog` was read from. */
+  catalogTemplate?: string;
 }
 
 export interface Secrets {
@@ -31,13 +33,26 @@ function defaultSettings(): AppSettings {
     defaultAgent: 'claude',
     defaultModel: 'claude-opus-5-5',
     defaultEffort: 'high',
+    leadDefault: { agent: 'claude', model: 'claude-opus-5-5', effort: 'high' },
+    leadMaxAgents: 4,
+    notifications: true,
   };
 }
 
-function writeAtomic(file: string, content: string, mode: number): void {
+export function writeAtomic(file: string, content: string, mode: number): void {
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, content, { mode });
   fs.renameSync(tmp, file);
+}
+
+/** Workspaces saved when some could run in containers. Those get a VM the next time they start. */
+function upgradeWorkspace(saved: Workspace & { containerName?: string; runtime?: string }): Workspace {
+  const { containerName, runtime: _runtime, ...workspace } = saved;
+  return {
+    ...workspace,
+    sandboxName: workspace.sandboxName ?? containerName!,
+    steps: workspace.steps.map((step) => ((step.id as string) === 'container' ? { ...step, id: 'sandbox' } : step)),
+  };
 }
 
 function load(): StateFile {
@@ -45,6 +60,7 @@ function load(): StateFile {
     const parsed = JSON.parse(fs.readFileSync(paths.state, 'utf8')) as StateFile;
     return {
       ...parsed,
+      workspaces: parsed.workspaces.map(upgradeWorkspace),
       settings: { ...defaultSettings(), ...parsed.settings },
       // Only Codex's list is discovered at runtime. Claude's ships with the app, so upgrades update it.
       catalog: { claude: DEFAULT_CATALOG.claude, codex: parsed.catalog?.codex ?? DEFAULT_CATALOG.codex },
@@ -114,7 +130,36 @@ export function updateSecrets(patch: Partial<Secrets>): void {
     if (!secrets[key]) delete secrets[key];
   }
   writeAtomic(paths.secrets, JSON.stringify(secrets, null, 2), 0o600);
+  shareSecretsWithProxy();
 }
+
+type BoundaryName = 'claude' | 'codex' | 'github';
+
+/** What the proxy on this computer sends for a virtual machine. It reads this for every request, so a change applies at once. */
+export function setBoundaryValue(name: BoundaryName, value: string | undefined): void {
+  const file = path.join(paths.boundary, name);
+  if (!value) {
+    fs.rmSync(file, { force: true });
+    return;
+  }
+  fs.mkdirSync(paths.boundary, { recursive: true, mode: 0o700 });
+  writeAtomic(file, value, 0o600);
+}
+
+export function boundaryValue(name: BoundaryName): string | undefined {
+  try {
+    return fs.readFileSync(path.join(paths.boundary, name), 'utf8') || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function shareSecretsWithProxy(): void {
+  setBoundaryValue('claude', secrets.claudeToken);
+  setBoundaryValue('github', secrets.githubToken);
+}
+
+shareSecretsWithProxy();
 
 function mask(secret: string | undefined): string | null {
   return secret ? `••••${secret.slice(-4)}` : null;

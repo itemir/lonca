@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowUp, PanelLeft } from 'lucide-react';
-import type { AgentId } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { type ModelChoice, ModelPicker } from '../components/ModelPicker.tsx';
 import { IconButton } from '../components/ui.tsx';
@@ -21,11 +20,7 @@ export function Create() {
   const [branch, setBranch] = useState('');
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
-  const [choice, setChoice] = useState<ModelChoice>({
-    agent: settings.defaultAgent as AgentId,
-    model: settings.defaultModel,
-    effort: settings.defaultEffort,
-  });
+  const [choice, setChoice] = useState<ModelChoice>(settings.leadDefault);
 
   const project = ready.find((entry) => entry.id === projectId) ?? ready[0];
 
@@ -82,7 +77,7 @@ export function Create() {
                 rows={5}
                 autoFocus
                 value={prompt}
-                placeholder="What should the agent work on? You can also leave this empty and write it later."
+                placeholder="What should the Lead work on? You can also leave this empty and write it later."
                 onChange={(event) => setPrompt(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void create();
@@ -90,6 +85,7 @@ export function Create() {
               />
               <div className="composer-bar">
                 <ModelPicker catalog={catalog} value={choice} onChange={setChoice} up={false} />
+                <span className="field-help create-help">The Lead’s model. It locks when you send the first message.</span>
                 <span className="spacer" />
                 <button type="submit" className="send-button" aria-label="Create workspace" title="Create workspace" disabled={busy}>
                   <ArrowUp size={17} strokeWidth={2.4} />

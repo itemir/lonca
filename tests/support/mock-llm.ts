@@ -2,15 +2,19 @@
 // tests drive the real `claude` and `codex` CLIs inside a real container without
 // credentials or token spend. A prompt containing `RUN: <shell command>` makes the
 // mock call the CLI's shell tool with that command, then finish with a short reply.
-// `SLOW` delays the response, and `THINK` adds a thinking block for Claude.
+// `SLOW` delays the response, and `THINK` adds a thinking block for Claude. A line with
+// `TOOL: <name> <json>` calls one of Lonca's tools for a Lead, and there can be several.
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 export interface MockLlm {
   port: number;
-  requests: { path: string; model?: string; auth?: string }[];
+  /** `body` is the whole request, for checking what a CLI was told. */
+  requests: { path: string; model?: string; auth?: string; body: string }[];
   /** Answers Codex's requests with a 401, as the real API does without a valid login. */
   refuseCodex: boolean;
+  /** Models that answer with a 429, as the real APIs do at a usage limit. */
+  limited: Set<string>;
   close(): Promise<void>;
 }
 
@@ -32,6 +36,10 @@ function promptOf(content: unknown): string {
 
 function wantedCommand(prompt: string): string | null {
   return /RUN: (.+)/.exec(prompt)?.[1]?.trim() ?? null;
+}
+
+function wantedTools(prompt: string): { name: string; input: unknown }[] {
+  return [...prompt.matchAll(/^.*TOOL: (\w+) (.+)$/gm)].map((match) => ({ name: match[1], input: JSON.parse(match[2]) }));
 }
 
 let counter = 0;
@@ -61,7 +69,15 @@ async function anthropicStream(res: http.ServerResponse, body: any): Promise<voi
   }
   if (prompt.includes('SLOW')) await sleep(SLOW_MS);
   const reply = hasToolResult ? 'The command finished.' : `Mock Claude here. You said: ${prompt.slice(0, 80)}`;
-  if (command && hasBash) {
+  const teamCalls = hasToolResult ? [] : wantedTools(prompt).filter((call) => (body.tools ?? []).some((tool: any) => tool.name === `mcp__lonca__${call.name}`));
+  if (teamCalls.length > 0) {
+    for (const [offset, call] of teamCalls.entries()) {
+      sse(res, 'content_block_start', { type: 'content_block_start', index: index + offset, content_block: { type: 'tool_use', id: `toolu_mock_${counter}_${offset}`, name: `mcp__lonca__${call.name}`, input: {} } });
+      sse(res, 'content_block_delta', { type: 'content_block_delta', index: index + offset, delta: { type: 'input_json_delta', partial_json: JSON.stringify(call.input) } });
+      sse(res, 'content_block_stop', { type: 'content_block_stop', index: index + offset });
+    }
+    sse(res, 'message_delta', { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 20 } });
+  } else if (command && hasBash) {
     sse(res, 'content_block_start', { type: 'content_block_start', index, content_block: { type: 'text', text: '' } });
     sse(res, 'content_block_delta', { type: 'content_block_delta', index, delta: { type: 'text_delta', text: 'Running that now.' } });
     sse(res, 'content_block_stop', { type: 'content_block_stop', index });
@@ -119,6 +135,23 @@ function codexToolCall(tools: any[], command: string, callId: string): unknown {
   return { type: 'function_call', id: `fc_${callId}`, call_id: callId, name: shell.name, arguments: JSON.stringify(args) };
 }
 
+// Depending on the model, Codex offers MCP tools inside its code tool, or has the model find them first.
+function codexTeamCalls(tools: any[], calls: { name: string; input: unknown }[], searched: boolean, callId: string): unknown[] {
+  if (tools.some((tool) => tool.type === 'custom' && tool.name === 'exec')) {
+    return [{
+      type: 'custom_tool_call', id: `ctc_${callId}`, call_id: callId, name: 'exec',
+      input: calls.map((call) => `text(JSON.stringify(await tools.mcp__lonca__${call.name}(${JSON.stringify(call.input)})));`).join('\n'),
+    }];
+  }
+  if (!searched) {
+    const query = [...new Set(calls.map((call) => call.name))].join(' ');
+    return [{ type: 'tool_search_call', id: `ts_${callId}`, call_id: callId, execution: 'client', status: 'completed', arguments: { query, limit: 8 } }];
+  }
+  return calls.map((call, index) => ({
+    type: 'function_call', id: `fc_${callId}_${index}`, call_id: `${callId}_${index}`, namespace: 'mcp__lonca', name: call.name, arguments: JSON.stringify(call.input),
+  }));
+}
+
 async function responsesStream(res: http.ServerResponse, body: any): Promise<void> {
   const input: any[] = Array.isArray(body.input) ? body.input : [];
   const lastUserIndex = input.findLastIndex((item) => item.type === 'message' && item.role === 'user');
@@ -131,9 +164,13 @@ async function responsesStream(res: http.ServerResponse, body: any): Promise<voi
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
   sse(res, 'response.created', { type: 'response.created', response: { id } });
   if (prompt.includes('SLOW')) await sleep(SLOW_MS);
-  const toolCall = command ? codexToolCall(codexTools(body), command, `call_${counter}`) : null;
-  if (toolCall) {
-    sse(res, 'response.output_item.done', { type: 'response.output_item.done', item: toolCall });
+  const teamCalls = hasToolResult ? [] : wantedTools(prompt);
+  const searched = input.slice(lastUserIndex + 1).some((item) => item.type === 'tool_search_output');
+  const toolCalls = teamCalls.length > 0
+    ? codexTeamCalls(codexTools(body), teamCalls, searched, `call_${counter}`)
+    : [command ? codexToolCall(codexTools(body), command, `call_${counter}`) : null].filter(Boolean);
+  if (toolCalls.length > 0) {
+    for (const toolCall of toolCalls) sse(res, 'response.output_item.done', { type: 'response.output_item.done', item: toolCall });
   } else {
     const text = hasToolResult ? 'The command finished.' : `Mock Codex here. You said: ${prompt.slice(0, 80)}`;
     const itemId = `msg_${counter}`;
@@ -162,7 +199,7 @@ async function responsesStream(res: http.ServerResponse, body: any): Promise<voi
 
 export function startMockLlm(port = 0): Promise<MockLlm> {
   const requests: MockLlm['requests'] = [];
-  const mock: MockLlm = { port: 0, requests, refuseCodex: false, close: async () => {} };
+  const mock: MockLlm = { port: 0, requests, refuseCodex: false, limited: new Set(), close: async () => {} };
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk) => chunks.push(chunk));
@@ -174,8 +211,15 @@ export function startMockLlm(port = 0): Promise<MockLlm> {
       } catch {
         // Some CLI background calls send non-JSON bodies; they get the default reply.
       }
-      requests.push({ path, model: body.model, auth: req.headers.authorization ?? (req.headers['x-api-key'] as string | undefined) });
-      if (req.method === 'POST' && path.endsWith('/messages/count_tokens')) {
+      requests.push({ path, model: body.model, auth: req.headers.authorization ?? (req.headers['x-api-key'] as string | undefined), body: JSON.stringify(body) });
+      if (req.method === 'POST' && mock.limited.has(body.model) && path.endsWith('/messages')) {
+        // Told not to retry, as with a subscription: an API key's client would keep trying for minutes.
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '3600', 'x-should-retry': 'false' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Number of requests has exceeded your rate limit.' } }));
+      } else if (req.method === 'POST' && mock.limited.has(body.model) && path.endsWith('/responses')) {
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '3600' });
+        res.end(JSON.stringify({ error: { type: 'usage_limit_reached', message: "You've hit your usage limit.", resets_in_seconds: 3600 } }));
+      } else if (req.method === 'POST' && path.endsWith('/messages/count_tokens')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ input_tokens: 12 }));
       } else if (req.method === 'POST' && path.endsWith('/messages')) {
@@ -194,8 +238,11 @@ export function startMockLlm(port = 0): Promise<MockLlm> {
       }
     });
   });
-  return new Promise((resolve) => {
-    server.listen(port, '0.0.0.0', () => {
+  return new Promise((resolve, reject) => {
+    // Not one the system picks: those overlap the ports tests give to workspaces, and a workspace
+    // publishing this one would take its traffic, leaving every CLI with an empty reply.
+    const listen = () => server.listen(port || 41000 + Math.floor(Math.random() * 5000), '0.0.0.0');
+    server.on('listening', () => {
       mock.port = (server.address() as AddressInfo).port;
       mock.close = () => new Promise((done) => {
         server.closeAllConnections();
@@ -203,6 +250,12 @@ export function startMockLlm(port = 0): Promise<MockLlm> {
       });
       resolve(mock);
     });
+    let attempts = 0;
+    server.on('error', (error: NodeJS.ErrnoException) => {
+      if (port || error.code !== 'EADDRINUSE' || ++attempts > 20) reject(error);
+      else listen();
+    });
+    listen();
   });
 }
 

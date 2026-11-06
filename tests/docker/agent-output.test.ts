@@ -3,13 +3,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Session, Workspace } from '../../shared/types.ts';
-import { IN_SANDBOX, RUNTIME, Lonca, asRoot, docker, dockerExec, makeFixtureRepo, removeRuntime, runtimeRunning, sbx, sleep, until } from '../support/harness.ts';
+import { RUNTIME, Lonca, asRoot, sandboxExec, makeFixtureRepo, removeSandbox, sandboxRunning, sbx, sleep, until } from '../support/harness.ts';
+import { SANDBOX_BOOT } from '../../server/sandbox.ts';
 
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const expected = Array.from({ length: 1010 }, (_, i) => `answer café 🐈 ${i}`);
 
 describe('agent output completion', () => {
-  const lonca = new Lonca({ port: IN_SANDBOX ? 48328 : 48318, instance: `agent-output-${RUNTIME}`, firstWorkspacePort: IN_SANDBOX ? 54500 : 53500 });
+  const lonca = new Lonca({ port: 48328, instance: `agent-output-${RUNTIME}`, firstWorkspacePort: 54500});
   const fixture = makeFixtureRepo();
   const control = path.join(lonca.home, 'output-fault.json');
   const faults = path.join(lonca.home, 'output-faults.jsonl');
@@ -27,7 +28,7 @@ describe('agent output completion', () => {
   });
 
   function installCli() {
-    const cli = dockerExec(workspace.containerName, 'command -v claude').output;
+    const cli = sandboxExec(workspace.sandboxName, 'command -v claude').output;
     const script = `#!/usr/bin/python3
 import json, os, sys, time
 prompt = sys.stdin.read().strip()
@@ -49,7 +50,7 @@ if prompt == 'fail':
 sys.stdout.write(json.dumps({'type': 'result', 'is_error': False}) + ('' if prompt == 'unterminated' else '\\n'))
 sys.stdout.flush()
 `;
-    asRoot(workspace.containerName, `printf %s ${quote(script)} > ${quote(cli)}\nchmod +x ${quote(cli)}`);
+    asRoot(workspace.sandboxName, `printf %s ${quote(script)} > ${quote(cli)}\nchmod +x ${quote(cli)}`);
   }
 
   beforeEach(async () => {
@@ -88,7 +89,7 @@ sys.stdout.flush()
   async function completeOffline(runId: string) {
     await lonca.kill();
     fs.writeFileSync(marker('release'), 'finish');
-    await until('offline completion', () => dockerExec(workspace.containerName, `test -f /var/tmp/lonca/agent-runs/${runId}/exit`).code === 0);
+    await until('offline completion', () => sandboxExec(workspace.sandboxName, `test -f /var/tmp/lonca/agent-runs/${runId}/exit`).code === 0);
   }
 
   async function expectSaved(id: string, wanted = expected) {
@@ -110,7 +111,7 @@ sys.stdout.flush()
     await until('the failed read', () => fs.existsSync(faults));
     expect(await lonca.session(session.id)).toMatchObject({ status: 'running', activeRunId: runId });
     expect((await textItems(session.id)).map((item) => item.text)).toEqual(expect.arrayContaining(initial.map((item) => item.text)));
-    expect(dockerExec(workspace.containerName, `test -s /var/tmp/lonca/agent-runs/${runId}/out.jsonl`).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `test -s /var/tmp/lonca/agent-runs/${runId}/out.jsonl`).code).toBe(0);
     // A second crash during the failed replay must keep the old answers too.
     await lonca.kill();
     fs.rmSync(control);
@@ -136,7 +137,7 @@ sys.stdout.flush()
     await until('the failed receipt to be retried', () => fs.existsSync(faults) && fs.readFileSync(faults, 'utf8').trim().split('\n').length >= 2);
     expect(await lonca.session(session.id)).toMatchObject({ status: 'running', activeRunId: runId, queue: [queued.id] });
     expect(started()).toEqual(['normal']);
-    expect(dockerExec(workspace.containerName, `test -s /var/tmp/lonca/agent-runs/${runId}/out.jsonl`).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `test -s /var/tmp/lonca/agent-runs/${runId}/out.jsonl`).code).toBe(0);
     fs.rmSync(control);
     await lonca.waitForIdle(session.id);
     expect(started()).toEqual(['normal', 'follow-up']);
@@ -166,7 +167,7 @@ sys.stdout.flush()
     await completeOffline(runId);
     const file = `/var/tmp/lonca/agent-runs/${runId}/out.jsonl`;
     const replace = damage === 'FIFO' ? `mkfifo ${file}` : damage === 'directory' ? `mkdir ${file}` : 'true';
-    expect(dockerExec(workspace.containerName, `rm ${file}\n${replace}`).code).toBe(0);
+    expect(sandboxExec(workspace.sandboxName, `rm ${file}\n${replace}`).code).toBe(0);
     await lonca.start();
     await lonca.waitForIdle(session.id);
     const items = await lonca.items(session.id);
@@ -190,7 +191,7 @@ sys.stdout.flush()
     expect(items.filter((item) => item.type === 'text').map((item) => item.text)).toEqual(expected);
     expect(items.find((item) => item.type === 'result')).toMatchObject({ failed: prompt === 'fail' });
     if (prompt === 'fail') expect(items.find((item) => item.type === 'notice' && item.text === 'saved CLI failure')).toBeDefined();
-    await until('saved output cleanup', () => dockerExec(workspace.containerName, `test ! -d /var/tmp/lonca/agent-runs/${runId}`).code === 0);
+    await until('saved output cleanup', () => sandboxExec(workspace.sandboxName, `test ! -d /var/tmp/lonca/agent-runs/${runId}`).code === 0);
     await lonca.kill();
     await lonca.start();
     expect(await lonca.items(session.id)).toEqual(items);
@@ -210,17 +211,13 @@ sys.stdout.flush()
   function stopRuntime() {
     // A fake sandbox shares its host kernel's boot ID. Force the boot hook to
     // exercise the same path as a VM with a genuinely new boot ID.
-    if (IN_SANDBOX) {
-      expect(dockerExec(workspace.containerName, 'rm -f /var/tmp/lonca/boot').code).toBe(0);
-      sbx('stop', workspace.containerName);
-    } else docker('stop', workspace.containerName);
+    expect(sandboxExec(workspace.sandboxName, 'rm -f /var/tmp/lonca/boot').code).toBe(0);
+    sbx('stop', workspace.sandboxName);
   }
 
   function restartRuntime() {
-    if (IN_SANDBOX) {
-      sbx('run', '--detach', '--name', workspace.containerName);
-      expect(dockerExec(workspace.containerName, `lonca-boot ${quote(path.join(lonca.home, 'credentials'))} ${quote(path.join(lonca.home, 'agent-state', workspace.id))}`).code).toBe(0);
-    } else docker('start', workspace.containerName);
+    sbx('run', '--detach', '--name', workspace.sandboxName);
+    expect(sandboxExec(workspace.sandboxName, `bash -c ${quote(SANDBOX_BOOT)} lonca-boot ${quote(path.join(lonca.home, 'agent-state', workspace.id))}`).code).toBe(0);
   }
 
   it.each(['start', 'restart before recovery'] as const)('recovers offline output and then queued work after %s', async (action) => {
@@ -251,7 +248,7 @@ sys.stdout.flush()
     fs.writeFileSync(marker('release'), 'finish');
     await until('cut attachment', () => fs.existsSync(faults));
     fault('attach');
-    await until('completed CLI', () => dockerExec(workspace.containerName, `test -f /var/tmp/lonca/agent-runs/${runId}/exit`).code === 0);
+    await until('completed CLI', () => sandboxExec(workspace.sandboxName, `test -f /var/tmp/lonca/agent-runs/${runId}/exit`).code === 0);
     stopRuntime();
     await lonca.waitForWorkspace(workspace.id, 'stopped');
     expect(await lonca.session(session.id)).toMatchObject({ status: 'running', activeRunId: runId });
@@ -281,13 +278,13 @@ sys.stdout.flush()
     await lonca.api('DELETE', `/sessions/${session.id}`);
     expect((await lonca.api('GET', '/state')).sessions.some((entry: Session) => entry.id === session.id)).toBe(false);
     await sleep(1000); // Include asynchronous raw-output cleanup.
-    expect(runtimeRunning(workspace.containerName)).toBe(false);
+    expect(sandboxRunning(workspace.sandboxName)).toBe(false);
   });
 
   it('preserves saved history and ends recovery when the runtime has been removed', async () => {
     const { session, runId } = await begin();
     await completeOffline(runId);
-    removeRuntime(workspace.containerName);
+    removeSandbox(workspace.sandboxName);
     await lonca.start();
     await lonca.waitForIdle(session.id);
     const items = await lonca.items(session.id);

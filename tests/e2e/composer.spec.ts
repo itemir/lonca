@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { expect, test } from '@playwright/test';
 import type { Project, Session, Workspace } from '../../shared/types.ts';
-import { Lonca, makeFixtureRepo, removeRuntime } from '../support/harness.ts';
+import { Lonca, makeFixtureRepo, removeSandbox } from '../support/harness.ts';
 
 const lonca = new Lonca({ port: 47383, instance: 'e2e-composer', firstWorkspacePort: 46800 });
 let fixture: string;
@@ -15,7 +15,8 @@ test.beforeAll(async () => {
   await lonca.waitForProject(project.id);
   const made = await lonca.api<{ workspace: Workspace; session: Session }>('POST', `/projects/${project.id}/workspaces`, {});
   workspace = await lonca.waitForWorkspace(made.workspace.id);
-  first = await lonca.api<Session>('PATCH', `/sessions/${made.session.id}`, { title: 'First conversation' });
+  const conversation = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, {});
+  first = await lonca.api<Session>('PATCH', `/sessions/${conversation.id}`, { title: 'First conversation' });
   const second = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, {});
   await lonca.api('PATCH', `/sessions/${second.id}`, { title: 'Second conversation' });
 });
@@ -96,7 +97,7 @@ test('recovers a failed send alongside a newer draft and attachments after retur
 
 test('keeps an accepted message out of the draft when the workspace cannot start', async ({ page }) => {
   await lonca.api('POST', `/workspaces/${workspace.id}/stop`);
-  removeRuntime(workspace.containerName);
+  removeSandbox(workspace.sandboxName);
   await lonca.api('PATCH', `/projects/${workspace.projectId}`, { settings: { image: 'lonca-missing-composer-test:never-built' } });
   try {
     await page.goto(`${lonca.url}/w/${workspace.id}?token=${lonca.token}`);

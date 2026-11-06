@@ -4,16 +4,15 @@ import { createServer } from 'node:http';
 import os from 'node:os';
 import express from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
-import type { AppState } from '../shared/types.ts';
+import type { AppState, ClientEvent } from '../shared/types.ts';
 import { resumeActiveRuns, retryActiveRuns } from './agents/runner.ts';
 import { createApi } from './api.ts';
 import { launchUrl, parseRequestUrl, requireLocalRequest, requireToken, securityHeaders, upgradeAllowed } from './auth.ts';
 import { HTTP_PORT, LONCA_HOME, WEB_DIST } from './config.ts';
 import { subscribe } from './events.ts';
+import { setClientFocus } from './notify.ts';
 import { flushState, flushTranscripts, saveState, state } from './store.ts';
-import {
-  checkDocker, checkSandboxes, ensureImage, ensureSandboxImage, onSandboxesReady, refreshAgents, refreshCatalog, system,
-} from './system.ts';
+import { checkSandboxes, ensureSandboxImage, moveCodexLogin, onSandboxesReady, refreshAgents, refreshCodexCatalog, system } from './system.ts';
 import { attachTerminal, closeWorkspaceTerminals, reconcileTerminals, runSetupScript } from './terminals.ts';
 import { reapLeftoverLogins } from './logins.ts';
 import { abortImports, reconcileProjects } from './projects.ts';
@@ -71,7 +70,18 @@ server.on('upgrade', (req, socket, head) => {
       const unsubscribe = subscribe((event) => {
         if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(event));
       });
-      client.on('close', unsubscribe);
+      client.on('close', () => {
+        unsubscribe();
+        setClientFocus(client, false);
+      });
+      client.on('message', (data) => {
+        try {
+          const event = JSON.parse(data.toString()) as ClientEvent;
+          if (event.type === 'focus') setClientFocus(client, event.focused === true);
+        } catch {
+          // Nothing else is sent this way, so there's nothing to do with it.
+        }
+      });
       return;
     }
     const terminal = /^\/ws\/terminals\/([\w-]+)(\/window)?$/.exec(url?.pathname ?? '');
@@ -87,7 +97,7 @@ server.on('upgrade', (req, socket, head) => {
 let prepared = false;
 let preparing = false;
 
-/** Work that needs Docker. Runs once it is reachable, which may be long after startup. */
+/** Work that needs Docker Sandboxes. Runs once it's usable, which may be long after startup. */
 async function prepare(): Promise<void> {
   if (prepared || preparing) return;
   preparing = true;
@@ -103,39 +113,41 @@ async function prepare(): Promise<void> {
     preparing = false;
   }
   try {
-    await ensureImage();
+    await ensureSandboxImage();
     await reapLeftoverLogins();
-    await Promise.all([refreshCatalog(), refreshAgents()]);
+    await refreshAgents();
+    void refreshCodexCatalog();
   } catch (error) {
     console.error('startup task failed:', errorMessage(error));
   }
 }
 
-// Once VMs can be used, have the image ready for the first one and pick up any that were out of reach.
+// Once workspaces can run, pick up any that were out of reach.
 onSandboxesReady(() => {
   prepared = false;
-  void ensureSandboxImage().catch((error) => console.error('could not prepare the sandbox image:', errorMessage(error)));
 });
 
-// Often enough to notice someone has signed in, without running `sbx` every few seconds.
+// Every time while workspaces can't run, to pick up as soon as they can. Otherwise only often
+// enough to notice they've stopped being able to, without running `sbx` every few seconds.
 const SANDBOX_CHECK_EVERY = 6;
 let checks = 0;
 
-async function watchDocker(): Promise<void> {
-  if (checks++ % SANDBOX_CHECK_EVERY === 0) {
+async function watchSandboxes(): Promise<void> {
+  if (system.sandbox.state !== 'ready' || checks++ % SANDBOX_CHECK_EVERY === 0) {
     await checkSandboxes().catch((error) => console.error('could not check for Docker Sandboxes:', errorMessage(error)));
   }
-  if (await checkDocker()) {
+  if (system.sandbox.state === 'ready') {
     await prepare();
     if (prepared) await retryActiveRuns();
+    // Finding out about the template can fail with the rest of startup having worked.
+    if (prepared && system.image.state === 'unknown') await ensureSandboxImage().catch((error) => console.error('could not check for the template:', errorMessage(error)));
     await reconcileTerminals().catch((error) => console.error('could not check script processes:', errorMessage(error)));
-    // Something between here and the first check failed, perhaps a build that has since worked.
-    if (prepared && !system.agentsChecked && system.image.state === 'ready') void refreshAgents().catch(() => {});
   } else {
     prepared = false;
   }
 }
 
+moveCodexLogin();
 reconcileProjects();
 markInterruptedWork();
 
@@ -146,8 +158,11 @@ server.listen(HTTP_PORT, '127.0.0.1', () => {
     const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
     execFile(opener, [url], () => {});
   }
-  void watchDocker();
-  setInterval(() => void watchDocker(), 5000).unref();
+  void refreshAgents();
+  void watchSandboxes();
+  setInterval(() => void watchSandboxes(), 5000).unref();
+  // Signing in is checked when it changes, but a Codex sign-in also has to be renewed before it ends.
+  setInterval(() => void refreshAgents().catch((error) => console.error('could not check sign-ins:', errorMessage(error))), 60 * 60 * 1000).unref();
 });
 
 server.on('error', (error: NodeJS.ErrnoException) => {

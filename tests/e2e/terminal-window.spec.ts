@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import type { AppState, TerminalInfo, Workspace } from '../../shared/types.ts';
-import { Lonca, dockerExec, makeFixtureRepo } from '../support/harness.ts';
+import { Lonca, sandboxExec, makeFixtureRepo } from '../support/harness.ts';
 
 const lonca = new Lonca({ port: 48373, instance: 'terminal-window-ui', firstWorkspacePort: 58700 });
 let fixture: string;
@@ -37,6 +37,9 @@ async function ttySize(view: Page): Promise<string> {
   return new RegExp(`${marker}=(\\d+ \\d+)`).exec(await screen(view).innerText())![1];
 }
 
+/** A new size takes a moment to reach a terminal in a virtual machine, and a line typed meanwhile can come out garbled. */
+const settle = (view: Page) => view.waitForTimeout(1500);
+
 const rowHeight = (view: Page) => view.locator('.terminal-view:visible .xterm-rows > div').first().evaluate((row) => row.getBoundingClientRect().height);
 
 async function terminalInfo(id: string): Promise<TerminalInfo | undefined> {
@@ -48,6 +51,7 @@ async function openWorkspace(page: Page): Promise<{ workspace: Workspace; termin
   const workspace = await lonca.waitForWorkspace((await lonca.api('POST', `/projects/${projectId}/workspaces`, {})).workspace.id);
   await page.goto(`${lonca.url}/w/${workspace.id}?token=${lonca.token}`);
   await expect(screen(page)).toContainText(workspace.name, { timeout: 20000 });
+  await settle(page);
   const { terminals } = await lonca.api<AppState>('GET', '/state');
   return { workspace, terminal: terminals.find((terminal) => terminal.workspaceId === workspace.id)! };
 }
@@ -57,6 +61,7 @@ async function moveToWindow(page: Page, title = 'Terminal'): Promise<Page> {
   await moveButton(page, title).click();
   const view = await opening;
   await expect(view.locator('.terminal-view')).toBeVisible();
+  await settle(view);
   return view;
 }
 
@@ -232,18 +237,18 @@ test('doesn’t answer old terminal queries at the prompt each time a view attac
   // The answer is read here, so it's only left on the prompt if the query gets answered again.
   await run(page, `printf '\\033[c'; read -rs -t 2 -d c answer; printf 'answered=%q\\n' "$answer"`);
   await expect(screen(page)).toContainText(/answered=\$'\\E\[\?1;2'/);
-  const prompt = `lonca@${workspace.name} ${workspace.name} %`;
-  const lastLine = async (view: Page) => (await screen(view).innerText()).trim().split('\n').at(-1);
+  // However the prompt wraps, nothing has been typed after it.
+  const endsAtPrompt = async (view: Page) => (await screen(view).innerText()).replace(/\s/g, '').endsWith(`:${workspace.name}$`);
 
   await page.reload();
   await expect(screen(page)).toContainText('answered=');
   await page.waitForTimeout(400);
-  expect(await lastLine(page)).toBe(prompt);
+  expect(await endsAtPrompt(page)).toBe(true);
 
   const view = await moveToWindow(page);
   await expect(screen(view)).toContainText('answered=');
   await view.waitForTimeout(400);
-  expect(await lastLine(view)).toBe(prompt);
+  expect(await endsAtPrompt(view)).toBe(true);
 
   // Programs still get their answers: one asked for now is the real thing.
   await run(view, `printf '\\033[c'; read -rs -t 2 -d c answer; printf 'live=%q\\n' "$answer"`);
@@ -294,7 +299,7 @@ test('fits a terminal when its tab is selected, even if the panel changed size b
   await openWorkspace(page);
   await page.getByRole('button', { name: 'New terminal' }).click();
   await expect(page.getByRole('tab', { name: 'Terminal 2' })).toHaveAttribute('aria-selected', 'true');
-  await expect(screen(page)).toContainText('%');
+  await expect(screen(page)).toContainText('$');
   const before = await ttySize(page);
   // Short enough for the panel's height limit to take effect.
   await page.setViewportSize({ width: 1440, height: 300 });
@@ -302,7 +307,7 @@ test('fits a terminal when its tab is selected, even if the panel changed size b
   const after = await ttySize(page);
 
   await page.getByRole('tab', { name: 'Terminal', exact: true }).click();
-  await expect(screen(page)).toContainText('%');
+  await expect(screen(page)).toContainText('$');
   await expect.poll(() => ttySize(page)).toBe(after);
 });
 
@@ -325,21 +330,21 @@ test('recovers and closes a legacy Run process even when it is the only terminal
     await lonca.api('PATCH', `/projects/${projectId}`, { settings: { setupScript: '' } });
   }
   const record = `/var/tmp/lonca/tty/${workspace.id}`;
-  const pid = dockerExec(workspace.containerName, `cat ${record}-setup.pid`).output;
+  const pid = sandboxExec(workspace.sandboxName, `cat ${record}-setup.pid`).output;
   expect(pid).toMatch(/^\d+$/);
   await lonca.kill();
   // The old Run feature used the same process records with a different suffix.
-  expect(dockerExec(workspace.containerName, `for suffix in pid pid.identity pid.launch; do mv ${record}-setup.$suffix ${record}-run.$suffix; done`).code).toBe(0);
+  expect(sandboxExec(workspace.sandboxName, `for suffix in pid pid.identity pid.launch; do mv ${record}-setup.$suffix ${record}-run.$suffix; done`).code).toBe(0);
   await lonca.start();
   const id = `${workspace.id}-run`;
   await expect.poll(() => terminalInfo(id), { timeout: 20000 }).toMatchObject({ kind: 'shell', status: 'running', disconnected: true });
-  expect(dockerExec(workspace.containerName, `kill -0 ${pid}`).code).toBe(0);
+  expect(sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).toBe(0);
 
   await page.goto(`${lonca.url}/w/${workspace.id}?token=${lonca.token}`);
   await expect(page.getByRole('tab', { name: 'Recovered run script', exact: true })).toBeVisible();
   expect((await lonca.api<AppState>('GET', '/state')).terminals.filter((entry) => entry.workspaceId === workspace.id)).toHaveLength(1);
   await page.getByRole('button', { name: 'Close Recovered run script', exact: true }).click();
-  await expect.poll(() => dockerExec(workspace.containerName, `kill -0 ${pid}`).code).not.toBe(0);
+  await expect.poll(() => sandboxExec(workspace.sandboxName, `kill -0 ${pid}`).code).not.toBe(0);
   await expect.poll(() => terminalInfo(id)).toBeUndefined();
   await expect(screen(page)).toContainText(workspace.name);
 });

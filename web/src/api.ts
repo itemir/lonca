@@ -1,5 +1,5 @@
 import type {
-  AgentId, Attachment, ChangeSet, Checks, FileContent, FileEntry, LoginMethod, LoginState, Project, ProjectSettings, SearchHit, Session,
+  AgentId, Attachment, ChangeSet, Checks, FileContent, FileEntry, LeadChoice, LoginMethod, LoginState, Playbook, Project, ProjectSettings, SearchHit, Session,
   SessionSnapshot, TerminalInfo, UserItem, Workspace, AppState, AppSettings,
 } from '../../shared/types.ts';
 import { accessToken } from './auth.ts';
@@ -79,6 +79,15 @@ export const api = {
 
   createSession: (workspaceId: string, options: { agent?: AgentId; model?: string; effort?: string } = {}) =>
     request<Session>('POST', `/workspaces/${workspaceId}/sessions`, options),
+  createLead: (workspaceId: string) => request<Session>('POST', `/workspaces/${workspaceId}/lead`),
+  switchLead: (workspaceId: string, choice: LeadChoice) => request<Session>('POST', `/workspaces/${workspaceId}/lead/switch`, choice),
+  closeLead: (id: string, stopAgents: boolean) => request<void>('POST', `/sessions/${id}/close`, { stopAgents }),
+  stopAgents: (workspaceId: string) => request<void>('POST', `/workspaces/${workspaceId}/agents/stop`),
+  markRead: (id: string) => request<void>('POST', `/sessions/${id}/read`),
+  retrySession: (id: string) => request<void>('POST', `/sessions/${id}/retry`),
+  playbook: (project?: string) => request<Playbook>('GET', `/playbook?${query({ project: project ?? '' })}`),
+  savePlaybook: (content: string, project?: string) => request<Playbook>('PUT', '/playbook', { content, project }),
+  resetPlaybook: (project?: string) => request<Playbook>('DELETE', `/playbook?${query({ project: project ?? '' })}`),
   session: (id: string) => request<SessionSnapshot>('GET', `/sessions/${id}`),
   updateSession: (id: string, patch: { title?: string; agent?: AgentId; model?: string; effort?: string }) =>
     request<Session>('PATCH', `/sessions/${id}`, patch),

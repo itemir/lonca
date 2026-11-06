@@ -2,10 +2,36 @@ import fs from 'node:fs';
 
 const script = fs.readFileSync(new URL('./process.py', import.meta.url), 'utf8');
 
-/** Send the current protocol with each exec so existing workspace images use it too. */
+/** Send the current protocol with each exec so existing VMs use it too. */
 export function agentProcessCommand(action: 'status' | 'follow' | 'signal', dir: string, ...args: string[]): string[] {
   // Keep project modules and Python startup settings out of the control helper's imports.
   return ['python3', '-I', '-c', script, action, dir, ...args];
+}
+
+const toolsScript = fs.readFileSync(new URL('./lonca-tools.py', import.meta.url), 'utf8');
+
+/** A Lead's tools, with what they offer written into the script so that one file carries it all. */
+export function leadToolsScript(tools: unknown): string {
+  return `TOOLS = ${JSON.stringify(JSON.stringify(tools))}\n${toolsScript}`;
+}
+
+export interface ToolCall {
+  id: string;
+  tool: string;
+  args: Record<string, unknown>;
+}
+
+/** Tool calls reach the server on the follower's stderr, ahead of its final receipt. */
+export function parseToolCall(line: string): ToolCall | null {
+  if (!line.startsWith('LONCA_CALL ')) return null;
+  try {
+    const call = JSON.parse(line.slice('LONCA_CALL '.length)) as ToolCall;
+    // The id becomes a file name in the workspace, and an agent could have written this.
+    if (typeof call.id !== 'string' || !/^[a-f0-9]{32}$/.test(call.id) || typeof call.tool !== 'string') return null;
+    return { id: call.id, tool: call.tool, args: call.args && typeof call.args === 'object' ? call.args : {} };
+  } catch {
+    return null;
+  }
 }
 
 export interface AgentOutputReceipt {

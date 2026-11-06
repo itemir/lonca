@@ -1,10 +1,12 @@
 import type { TextItem, ThinkingItem, ToolItem, ToolKind } from '../../shared/types.ts';
+import { describeTeamTool } from './team-tools.ts';
 import { type AgentAdapter, type AgentParser, type ChatOp, clipEdit, clipOutput } from './types.ts';
 
 interface ToolDescription {
   kind: ToolKind;
   title: string;
   detail?: string;
+  agentId?: string;
 }
 
 function str(value: unknown): string | undefined {
@@ -40,6 +42,7 @@ export function describeClaudeTool(name: string, input: Record<string, unknown>)
       return { kind: 'other', title: 'Used skill', detail: str(input.skill) };
     default: {
       const mcp = /^mcp__(.+?)__(.+)$/.exec(name);
+      if (mcp?.[1] === 'lonca') return describeTeamTool(mcp[2], input);
       if (mcp) return { kind: 'other', title: `${mcp[1]}: ${mcp[2]}` };
       return { kind: 'other', title: name };
     }
@@ -82,6 +85,7 @@ export function createClaudeParser(runId: string): AgentParser {
   const tools = new Map<string, ToolItem>();
   let extraBlocks = 0;
   let sawError = false;
+  let limitResetsAt: number | undefined;
 
   const itemId = (messageId: string, index: number | string) => `${runId}:${messageId}:${index}`;
 
@@ -130,11 +134,13 @@ export function createClaudeParser(runId: string): AgentParser {
       // The CLI reports failures like a missing login as a fake assistant message.
       const text = (message?.content ?? []).map((block: { text?: string }) => block.text ?? '').join('\n') || 'The agent reported an error.';
       sawError = true;
+      const limited = event.error === 'rate_limit' || event.api_error_status === 429;
       ops.push({
         op: 'upsert',
         item: {
           id: itemId(message?.id ?? 'error', 'error'), ts: Date.now(), runId, type: 'notice', level: 'error', text,
-          code: event.error === 'authentication_failed' ? 'auth' : undefined,
+          code: event.error === 'authentication_failed' ? 'auth' : limited ? 'limit' : undefined,
+          ...(limited && limitResetsAt ? { resetsAt: limitResetsAt } : {}),
         },
       });
       return ops;
@@ -229,6 +235,12 @@ export function createClaudeParser(runId: string): AgentParser {
             return [{ op: 'upsert', item: { id: `${runId}:compact:${event.uuid ?? Date.now()}`, ts: Date.now(), runId, type: 'notice', level: 'info', text: 'The conversation was summarized to free up context.' } }];
           }
           return [];
+        case 'rate_limit_event':
+          // Says when the limit ends, and comes ahead of the error that says it was reached.
+          if (event.rate_limit_info?.status === 'rejected' && typeof event.rate_limit_info.resetsAt === 'number') {
+            limitResetsAt = event.rate_limit_info.resetsAt * 1000;
+          }
+          return [];
         case 'stream_event':
           return streamEvent(event.event, event.api_message_id ?? 'message', event.parent_tool_use_id ?? undefined);
         case 'assistant':
@@ -259,17 +271,19 @@ export function createClaudeParser(runId: string): AgentParser {
 }
 
 export const claudeAdapter: AgentAdapter = {
-  command({ session, systemPrompt }) {
+  command({ session, systemPrompt, tools }) {
     return [
       'claude', '-p',
       '--output-format', 'stream-json',
       '--verbose',
       '--include-partial-messages',
-      // The container is the sandbox, so the agent doesn't also need to ask permission.
+      // The virtual machine is the sandbox, so the agent doesn't also need to ask permission.
       '--permission-mode', 'bypassPermissions',
       '--model', session.model,
       '--effort', session.effort,
       '--append-system-prompt', systemPrompt,
+      // A Lead's agents have to be ones the user can see, so its CLI's own kind are off.
+      ...(tools ? ['--mcp-config', JSON.stringify({ mcpServers: { lonca: { type: 'stdio', ...tools } } }), '--strict-mcp-config', '--disallowedTools', 'Task', 'Agent'] : []),
       ...(session.resumeId ? ['--resume', session.resumeId] : []),
     ];
   },

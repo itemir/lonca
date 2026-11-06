@@ -38,7 +38,7 @@ const THEME = {
 };
 
 /**
- * A terminal connected to a process in a container. Stays mounted while hidden to keep its state.
+ * A terminal connected to a process in a workspace. Stays mounted while hidden to keep its state.
  * `onWindowClosed` makes this the terminal's own window, and says when the server has closed that.
  */
 export function TerminalView({ id, active, autoFocus = true, onWindowClosed }: {
