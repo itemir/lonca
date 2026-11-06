@@ -15,7 +15,7 @@ import { claudeAdapter } from './claude.ts';
 import { codexAdapter } from './codex.ts';
 import { playbookFor } from './playbook.ts';
 import { agentProcessCommand, leadToolsScript, parseOutputReceipt, parseToolCall, type ToolCall } from './process.ts';
-import { scratchDir, sessionPrompt, userPrompt } from './prompt.ts';
+import { currentJobNote, scratchDir, sessionPrompt, userPrompt } from './prompt.ts';
 import { sanitizeItem } from './sanitize.ts';
 import { TEAM_TOOLS } from './team-tools.ts';
 import type { AgentAdapter, AgentParser, ChatOp } from './types.ts';
@@ -649,7 +649,7 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
     if (session.agent === 'codex') await setUpCodex(workspace, project);
     await execText(sandbox, ['mkdir', '-p', run.dir, ...(session.work ? [scratchDir(session.id)] : [])]);
     await execText(sandbox, ['bash', '-c', 'cat > "$0"', `${run.dir}/prompt`], {
-      stdin: userPrompt([playbookUpdate(session, project), item.context, item.text].filter(Boolean).join('\n\n'), attachments),
+      stdin: userPrompt([playbookUpdate(session, project), item.context, item.text, currentJobNote(session)].filter(Boolean).join('\n\n'), attachments),
     });
     if (session.role === 'lead') {
       await execText(sandbox, ['bash', '-c', 'mkdir -p "$0/replies" && cat > "$0/lonca-tools.py"', run.dir], { stdin: leadToolsScript(TEAM_TOOLS) });

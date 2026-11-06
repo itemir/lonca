@@ -380,6 +380,49 @@ describe('a Lead and its agents', () => {
 });
 
 describe('queued jobs and Lead stops', () => {
+  it.each(['message', 'retry'])('keeps the current job after cancelling its queued message and resuming with %s', async (method) => {
+    const { workspace, lead } = await newWorkspace();
+    await send(lead.id, spawn('Changing jobs', 'ORIGINAL-WRITING-REQUEST', { job: 'implement' }));
+    await until('the agent', async () => (await agents(workspace)).length === 1);
+    await settled(lead);
+    const [agent] = await agents(workspace);
+    expect(agent.resumeId).toBeTruthy();
+
+    if (method === 'retry') {
+      // A retry repeats the last request, including any old job-change instructions it carried.
+      await send(lead.id, tool('message_agent', { id: agent.id, job: 'review', text: 'EARLIER-REVIEW-REQUEST' }));
+      await settled(lead);
+      expect(users(await lonca.items(agent.id)).at(-1)?.text).toContain('Your job is to review.');
+    }
+    const job = method === 'message' ? 'review' : 'implement';
+    await lonca.api('POST', `/sessions/${agent.id}/interrupt`);
+    await send(lead.id, tool('message_agent', { id: agent.id, job, text: 'CANCELLED-JOB-CHANGE' }));
+    await settled(lead);
+    const changed = await lonca.session(agent.id);
+    expect(changed).toMatchObject({ work: { job }, held: true, userStopped: true });
+    expect(changed.queue).toHaveLength(1);
+    await lonca.api('DELETE', `/sessions/${agent.id}/queue/${changed.queue[0]}`);
+    await lonca.kill();
+    await lonca.start();
+    expect(await lonca.session(agent.id)).toMatchObject({ work: { job }, held: true, queue: [] });
+
+    const before = mock.requests.length;
+    if (method === 'message') await send(agent.id, 'RESUME-AFTER-CANCEL');
+    else await lonca.api('POST', `/sessions/${agent.id}/retry`);
+    await settled(lead);
+    expect(await lonca.session(agent.id)).toMatchObject({ work: { job }, lastOutcome: 'completed', held: false, resumeId: agent.resumeId });
+
+    // Inspect the new message sent by the real Claude CLI, not the system prompt it kept from turn one.
+    const request = mock.requests.slice(before).find((entry) => entry.path.endsWith('/messages') && entry.body.includes('You work for the Lead'));
+    expect(request).toBeDefined();
+    const messages = JSON.parse(request!.body).messages as { role: string; content: string | { type: string; text?: string }[] }[];
+    const content = messages.filter((message) => message.role === 'user').at(-1)?.content;
+    const prompt = typeof content === 'string' ? content : content?.filter((block) => block.type === 'text').map((block) => block.text).join('\n');
+    expect(prompt).toContain(method === 'message' ? 'RESUME-AFTER-CANCEL' : 'EARLIER-REVIEW-REQUEST');
+    expect(prompt).not.toContain('CANCELLED-JOB-CHANGE');
+    expect(prompt?.match(/Your job is to (analyze|implement|review)\./g)?.at(-1)).toBe(`Your job is to ${job}.`);
+  });
+
   it('keeps the old job until earlier queued messages have finished', async () => {
     const { workspace, lead } = await newWorkspace();
     await send(lead.id, spawn('Queued writer', 'SLOW start writing', { job: 'implement' }));
