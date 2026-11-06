@@ -132,18 +132,20 @@ export interface ConfirmOptions {
   body: ReactNode;
   action: string;
   danger?: boolean;
+  /** For an action that reaches beyond Lonca, where pressing Enter by habit shouldn't do it. */
+  focusCancel?: boolean;
   onConfirm: () => void;
 }
 
-export function ConfirmDialog({ title, body, action, danger, onConfirm, onClose }: ConfirmOptions & { onClose: () => void }) {
+export function ConfirmDialog({ title, body, action, danger, focusCancel, onConfirm, onClose }: ConfirmOptions & { onClose: () => void }) {
   return (
     <Modal title={title} onClose={onClose}>
       <div className="confirm-body">{body}</div>
       <div className="modal-actions">
-        <button type="button" className="button" onClick={onClose}>Cancel</button>
+        <button type="button" className="button" autoFocus={focusCancel} onClick={onClose}>Cancel</button>
         <button
           type="button"
-          autoFocus
+          autoFocus={!focusCancel}
           className={`button ${danger ? 'button-danger' : 'button-primary'}`}
           onClick={() => {
             onClose();

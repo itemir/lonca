@@ -4,10 +4,10 @@ import express, { type NextFunction, type Request, type Response, Router } from 
 import { z } from 'zod';
 import type { AgentId, AppState, Project, Session, Workspace } from '../shared/types.ts';
 import { playbookFor, resetPlaybook, savePlaybook } from './agents/playbook.ts';
-import { cancelQueued, createLead, createSession, deleteSession, flushQueue, interruptSession, publishSession, sendMessage } from './agents/runner.ts';
+import { cancelQueued, createLead, createSession, deleteSession, flushQueue, interruptSession, publishSession, reportWorkspaceStopped, sendMessage } from './agents/runner.ts';
 import { checkButtonCanStart, closeWorkspaceLead, holdWhenStopped, markRead, stopAgents, switchLead, tryAgain, warnOfOtherWriter } from './agents/team.ts';
 import { projectCodexKey } from './boundary.ts';
-import { execText } from './sandbox.ts';
+import { execText, sbxLogout } from './sandbox.ts';
 import {
   getChanges, getChecks, getFileDiff, listDirectory, readWorkspaceFile, safeAttachmentName, searchFiles,
 } from './inspect.ts';
@@ -15,7 +15,7 @@ import { publish } from './events.ts';
 import {
   addProjectFromPath, addProjectFromUrl, listBranches, projectLifecycle, publishProject, removeProject,
 } from './projects.ts';
-import { logins } from './logins.ts';
+import { dockerLogins, logins } from './logins.ts';
 import { flushState, getProject, getSession, getWorkspace, isClaudeCredential, saveState, secretsStatus, state, updateSecrets } from './store.ts';
 import {
   checkClaudeCredential, checkCodexKey, checkSandboxes, clearAgentRejected, rebuildImage, refreshAgents, saveCodexApiKey, signOutCodex, system,
@@ -27,7 +27,7 @@ import { sessionSnapshot } from './transcript.ts';
 import { HttpError, errorMessage, newId } from './util.ts';
 import {
   archiveWorkspace, configuredSetupScript, createWorkspace, deleteWorkspace, publishWorkspace, rebuildWorkspace, restoreWorkspace,
-  applyCodexSetup, applyCodexSetupEverywhere, retryWorkspace, runningSandbox, startWorkspace, stopWorkspace,
+  applyCodexSetup, applyCodexSetupEverywhere, markStoppedBySignOut, retryWorkspace, runningSandbox, startWorkspace, stopWorkspace,
 } from './workspaces.ts';
 
 const execFileAsync = promisify(execFile);
@@ -554,6 +554,32 @@ export function createApi(me: AppState['me']): Router {
   api.post('/sandboxes/check', async (_req, res) => {
     await checkSandboxes();
     res.json(system.sandbox);
+  });
+
+  // Docker Sandboxes' own sign-in, which is the user's for the whole computer.
+
+  api.post('/sandboxes/login', async (_req, res) => {
+    if (system.sandbox.state === 'ready') throw new HttpError(409, 'Docker Sandboxes is already signed in.');
+    res.status(201).json(await dockerLogins.start());
+  });
+
+  api.delete('/sandboxes/login', async (_req, res) => {
+    await dockerLogins.cancel();
+    res.status(204).end();
+  });
+
+  api.post('/sandboxes/logout', async (_req, res) => {
+    // Finishing one that's under way would sign back in, so it has to be gone first.
+    await dockerLogins.cancel();
+    const failure = await sbxLogout().then(() => null, (error: unknown) => error);
+    await checkSandboxes({ fresh: true });
+    // Already signed out, say from a terminal, is as good as signing out, and stopped them too.
+    if (failure && system.sandbox.state !== 'signed-out') throw new HttpError(502, `Docker Sandboxes couldn’t sign out: ${errorMessage(failure)}`);
+    // Not waited for: it queues behind each workspace's operation, which can take a long time.
+    // Should the server stop first, the check when sbx is ready again finds them stopped anyway.
+    void markStoppedBySignOut((workspace) => reportWorkspaceStopped(workspace.id))
+      .catch((error) => console.error('could not mark workspaces stopped:', errorMessage(error)));
+    res.status(204).end();
   });
 
   api.post('/image/rebuild', (_req, res) => {

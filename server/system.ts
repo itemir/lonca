@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AgentId, AgentStatus, Catalog, LoginMethod, ModelOption, SystemStatus } from '../shared/types.ts';
+import type { AgentId, AgentStatus, Catalog, DockerLoginState, LoginMethod, ModelOption, SystemStatus } from '../shared/types.ts';
 import { PREFIX, paths } from './config.ts';
 import { publish } from './events.ts';
 import { SandboxError, buildTemplate, cleanUpTemplateBuild, detectSandboxes, ensureSandbox, exec, isSandboxRunning, removeSandbox, templateLoaded, templateTag } from './sandbox.ts';
@@ -22,24 +22,40 @@ function publishSystem(): void {
 
 let checkingSandboxes: Promise<void> | null = null;
 let sandboxesReadyListener: () => void = () => {};
+let foundReadyListener: () => void = () => {};
 
 /** Called when workspaces can run, having not been able to a moment ago. */
 export function onSandboxesReady(listener: () => void): void {
   sandboxesReadyListener = listener;
 }
 
-/** Finds out whether workspaces can run. Safe to call often. */
-export function checkSandboxes(): Promise<void> {
+/** Called by every check that finds workspaces can run, whether or not they could before. */
+export function onSandboxesFoundReady(listener: () => void): void {
+  foundReadyListener = listener;
+}
+
+/**
+ * Finds out whether workspaces can run. Safe to call often. A check that began before something
+ * changed reports the old answer, so `fresh` waits for one that starts after it.
+ */
+export async function checkSandboxes(options: { fresh?: boolean } = {}): Promise<void> {
+  if (options.fresh && checkingSandboxes) await checkingSandboxes.catch(() => {});
   checkingSandboxes ??= detectSandboxes().then((sandbox) => {
     const changed = JSON.stringify(sandbox) !== JSON.stringify(system.sandbox);
     const nowReady = sandbox.state === 'ready' && system.sandbox.state !== 'ready';
     system.sandbox = sandbox;
     if (changed) publishSystem();
     if (nowReady) sandboxesReadyListener();
+    if (sandbox.state === 'ready') foundReadyListener();
   }).finally(() => {
     checkingSandboxes = null;
   });
   return checkingSandboxes;
+}
+
+export function setDockerLogin(login: DockerLoginState | null): void {
+  system.dockerLogin = login ?? undefined;
+  publishSystem();
 }
 
 function imageLog(): (text: string) => void {

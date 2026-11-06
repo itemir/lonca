@@ -1600,7 +1600,7 @@ describe('when Docker Sandboxes can’t run workspaces', () => {
     fs.writeFileSync(path.join(home(), 'signed-out'), '');
     await withServer({}, async (server, created) => {
       expect(await sandboxState(server)).toBe('signed-out');
-      await expect(server.api('POST', `/projects/${created.id}/workspaces`, {})).rejects.toThrow(/503.*sbx login/);
+      await expect(server.api('POST', `/projects/${created.id}/workspaces`, {})).rejects.toThrow(/503.*Sign in to Docker/);
 
       fs.rmSync(path.join(home(), 'signed-out'));
       fs.writeFileSync(path.join(home(), 'virtualization'), 'fail');
@@ -1631,7 +1631,7 @@ describe('when Docker Sandboxes can’t run workspaces', () => {
       fs.writeFileSync(path.join(home(), 'signed-out'), '');
       await sleep(2000);
       expect(await sandboxState(server)).toBe('signed-out');
-      await expect(server.api('GET', `/workspaces/${workspace.id}/files?path=.`)).rejects.toThrow(/sbx login/);
+      await expect(server.api('GET', `/workspaces/${workspace.id}/files?path=.`)).rejects.toThrow(/Sign in to Docker/);
       expect((await server.workspace(workspace.id)).status).toBe('ready');
       fs.rmSync(path.join(home(), 'signed-out'));
       expect(await sandboxState(server)).toBe('ready');
@@ -1641,6 +1641,68 @@ describe('when Docker Sandboxes can’t run workspaces', () => {
       expect((await server.workspace(workspace.id)).status).toBe('ready');
       await server.api('DELETE', `/workspaces/${workspace.id}`);
       expect(fs.existsSync(workspace.path)).toBe(false);
+    });
+  });
+
+  it('signs out from Settings, which stops its workspaces, and signs back in', async () => {
+    await withServer({}, async (server, created) => {
+      expect(await sandboxState(server)).toBe('ready');
+      const made = await server.api('POST', `/projects/${created.id}/workspaces`, {});
+      const workspace: Workspace = await server.waitForWorkspace(made.workspace.id);
+      expect(sandboxRunning(workspace.sandboxName)).toBe(true);
+      // An agent partway through a turn, with some of its answer saved and the rest to come.
+      const cli = sandboxExec(workspace.sandboxName, 'command -v claude').output;
+      asRoot(workspace.sandboxName, `cat > '${cli}' <<'CLI'
+#!/bin/bash
+cat >/dev/null
+echo '{"type":"assistant","message":{"id":"saved","content":[{"type":"text","text":"saved answer"}]}}'
+sleep 600
+CLI
+chmod +x '${cli}'`);
+      const session = made.session as Session;
+      await server.api('POST', `/sessions/${session.id}/messages`, { text: 'Keep running' });
+      await until('the agent’s first output', async () => (await server.items(session.id)).some((item) => item.type === 'text'), 60000);
+      const stoppedNotices = async () => (await server.items(session.id)).filter((item) => item.type === 'notice' && item.text.startsWith('The workspace stopped.')).length;
+
+      await server.api('POST', '/sandboxes/logout');
+      expect((await server.api('GET', '/state')).system.sandbox.state).toBe('signed-out');
+      expect(sandboxRunning(workspace.sandboxName)).toBe(false);
+      // Lonca knows it stopped them, though it can't ask until it's signed in again.
+      await until('the workspace to be stopped', async () => (await server.workspace(workspace.id)).status === 'stopped', 10000);
+      // Its conversation hears about it now, and only once, though it's still waiting to read the rest.
+      await until('the conversation to be told', async () => await stoppedNotices() === 1, 10000);
+      expect((await server.session(session.id)).activeRunId).toBeTruthy();
+      await expect(server.api('POST', `/workspaces/${workspace.id}/start`)).rejects.toThrow(/Sign in to Docker/);
+
+      const login = await server.api('POST', '/sandboxes/login');
+      expect(login).toMatchObject({ phase: 'starting' });
+      await until('the code', async () => (await server.api('GET', '/state')).system.dockerLogin?.code === 'VKNZ-LBTN', 10000);
+      fs.writeFileSync(path.join(home(), 'login-approve'), '');
+      await until('the sign-in to finish', async () => (await server.api('GET', '/state')).system.dockerLogin?.phase === 'done', 20000);
+      expect((await server.api('GET', '/state')).system.sandbox.state).toBe('ready');
+
+      // Nothing wakes it, and it's all there once it's started.
+      await sleep(6000);
+      expect((await server.workspace(workspace.id)).status).toBe('stopped');
+      expect(sandboxRunning(workspace.sandboxName)).toBe(false);
+      expect(await stoppedNotices()).toBe(1);
+      await server.api('POST', `/workspaces/${workspace.id}/start`);
+      await server.waitForWorkspace(workspace.id);
+      await server.waitForIdle(session.id);
+      expect((await server.items(session.id)).some((item) => item.type === 'text' && item.text === 'saved answer')).toBe(true);
+      const inVm = (await server.api<FileEntry[]>('GET', `/workspaces/${workspace.id}/files?path=.`)).map((entry) => entry.name);
+      expect(inVm).toContain('README.md');
+
+      // Signed out from a terminal a moment before, which stopped it too: signing out in Lonca
+      // finds it already done, and marks it all the same.
+      sbx('stop', workspace.sandboxName);
+      fs.writeFileSync(path.join(home(), 'signed-out'), '');
+      await server.api('POST', '/sandboxes/logout');
+      await until('the workspace to be stopped', async () => (await server.workspace(workspace.id)).status === 'stopped', 10000);
+      expect((await server.api('GET', '/state')).system.sandbox.state).toBe('signed-out');
+      fs.rmSync(path.join(home(), 'signed-out'));
+      expect(await sandboxState(server)).toBe('ready');
+      await server.api('DELETE', `/workspaces/${workspace.id}`);
     });
   });
 });

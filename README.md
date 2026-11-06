@@ -9,7 +9,7 @@ Run coding agents side by side from your browser. Every workspace is a real git 
 You need [Node.js](https://nodejs.org) 22.18 or newer, git, and [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/), which gives each workspace its own virtual machine. It runs on Macs with Apple silicon and on Ubuntu 24.04 or later with KVM, is free for local use, and needs a Docker account. Docker Desktop isn't needed. On a Mac:
 
 ```sh
-brew trust docker/tap && brew install docker/tap/sbx && sbx login
+brew trust docker/tap && brew install docker/tap/sbx
 ```
 
 Then:
@@ -19,11 +19,12 @@ npm install
 npm start
 ```
 
-Lonca opens in your browser. The first start builds the workspace template, which takes a few minutes. After that:
+Lonca opens in your browser. After that:
 
-1. **Sign in to an agent.** The home page walks you through it (see [Signing in](#signing-in)).
-2. **Add a project.** Give it a GitHub repository (`owner/repo` or a URL), or a folder on your computer.
-3. **Press + next to the project** to create a workspace, and tell its [Lead](#the-lead) what you want done.
+1. **Sign in to Docker.** Settings does it for you (see [Signing in](#signing-in)), or run `sbx login` in a terminal. Then Lonca builds the workspace template, which takes a few minutes the first time.
+2. **Sign in to an agent.** The home page walks you through it (see [Signing in](#signing-in)).
+3. **Add a project.** Give it a GitHub repository (`owner/repo` or a URL), or a folder on your computer.
+4. **Press + next to the project** to create a workspace, and tell its [Lead](#the-lead) what you want done.
 
 To reopen Lonca later, run `npm start` again. The link it prints contains an access token, and your browser remembers it after the first visit.
 
@@ -83,7 +84,11 @@ Inside a workspace, `LONCA_PORT` is the first of ten ports published on your `lo
 
 ## Signing in
 
-Lonca signs in separately from the CLIs on your computer and leaves those logins alone. Sharing one would break them: both CLIs rotate their refresh tokens, so refreshing a copy would log your computer out.
+Docker Sandboxes needs a Docker account. **Sign in to Docker** under Settings > Isolation shows a one-time code and a link to Docker's sign-in page, where you approve it. Lonca runs `sbx login` on your computer to do this, so it's the same login `sbx` uses in your terminal, kept by `sbx` itself. Lonca never sees it, and signing in from either one signs in both.
+
+**Sign out of Docker** signs `sbx` out on the whole computer, your terminal included. It also stops every sandbox running on the computer: all of Lonca's workspaces, any agents working in them, and sandboxes that aren't Lonca's. Settings asks before it does. A workspace's files and conversations are kept, and you start it again once you've signed back in, which recovers any agent output left unread.
+
+For the agents, Lonca signs in separately from the CLIs on your computer and leaves those logins alone. Sharing one would break them: both CLIs rotate their refresh tokens, so refreshing a copy would log your computer out.
 
 - **Claude:** open the sign-in page and approve access, and your browser comes back to Lonca by itself. Lonca runs `claude setup-token` out of sight in a small virtual machine of its own and saves the token it creates, which never reaches the page. This needs a Claude subscription; you can use an Anthropic API key instead.
 - **Codex:** open the sign-in page and approve access, and your browser comes back to Lonca by itself. Lonca runs `codex login` out of sight in the same place. Signing in this way, Codex also asks OpenAI for an API key. It doesn't use one with this login, so Lonca doesn't keep it. You can use an OpenAI API key instead.
@@ -215,6 +220,7 @@ Recovery tests cover operations and their failure boundaries together:
 | A conversation that can't be read on opening or after a reconnect, and recovering from it, in the browser | `tests/e2e/hydration.spec.ts` |
 | Archiving out of a failed operation, restoring from it, and deleting after a failed archive or delete, in the browser | `tests/e2e/workspace-close.spec.ts` |
 | A Lead's tool calls made while the server was down or repeated after a crash, agents that finish while it's down, usage limits, stopped agents and Leads, closing a Lead with agents running | `tests/docker/lead.test.ts`, `tests/e2e/lead.spec.ts` |
+| Signing Docker Sandboxes in and out: reading what `sbx login` prints, cancelling, time limits, the warning before signing out, and workspaces stopped by it | `tests/unit/docker-login.test.ts`, `tests/e2e/docker-signin.spec.ts`, `tests/docker/lonca.test.ts` |
 | Credentials staying out of every process and file in a workspace; what the proxy is told, per sandbox; renewing Codex's sign-in; moving the login from where older workspaces can see it | `tests/docker/boundary.test.ts`, `tests/unit/boundary.test.ts` |
 
 The outage tests cut their own server off from the stand-in for `sbx`, leaving its sandboxes running. They need that stand-in, so they're skipped in `test:sandbox`.

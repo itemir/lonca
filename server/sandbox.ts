@@ -5,6 +5,7 @@ import path from 'node:path';
 import { Duplex, PassThrough } from 'node:stream';
 import type { SandboxStatus } from '../shared/types.ts';
 import { LONCA_HOME, PORTS_PER_WORKSPACE, PREFIX, TEMPLATE_DIR, TTY_DIR } from './config.ts';
+import { forgetSbxLogin, recordSbxLogin } from './sbx-login-pid.ts';
 import { emptyAgent } from './ssh-agent.ts';
 import { KeyedQueue, RuntimeStoppedError, errorMessage, newId, removeTree, sleep } from './util.ts';
 
@@ -86,15 +87,19 @@ async function cliEnv(extra: Record<string, string> = {}): Promise<NodeJS.Proces
   return { ...env, SBX_NO_TELEMETRY: '1', ...extra, SSH_AUTH_SOCK: agent };
 }
 
+const SIGNED_OUT = 'Docker Sandboxes isn’t signed in. Sign in to Docker in Lonca’s Settings, then try again.';
+
 function failureFrom(stderr: string, fallback: string): SandboxError {
   const text = stderr.trim();
-  if (/not signed in/i.test(text)) return new SandboxError('Docker Sandboxes isn’t signed in. Run `sbx login` in a terminal, then try again.');
+  if (/not signed in/i.test(text)) return new SandboxError(SIGNED_OUT);
   return new SandboxError(text || fallback);
 }
 
 /** Runs an `sbx` management command and returns its stdout, rejecting if it fails. */
 async function sbx(args: string[], options: { timeoutMs?: number } = {}): Promise<string> {
   const environment = await cliEnv();
+  // Starting one is the other way to undo what signing out is doing.
+  if (args[0] === 'run') refuseWhileSigningOut();
   return new Promise((resolve, reject) => {
     const child = spawn(sbxPath(), args, { stdio: ['ignore', 'pipe', 'pipe'], env: environment });
     const stdout: Buffer[] = [];
@@ -172,6 +177,84 @@ export async function removeSandbox(name: string): Promise<void> {
   forgetListing();
 }
 
+export interface SbxLogin {
+  stdout: NodeJS.ReadableStream;
+  exited: Promise<{ code: number | null; stderr: string }>;
+  kill(): void;
+}
+
+/**
+ * Starts `sbx login` on this computer, not in a VM: it's the user's own login, which the helper
+ * needs as much as any workspace. It prints a one-time code and waits until someone's used it.
+ * Its own prompts would be no use here, so it gets no input.
+ */
+export async function startSbxLogin(): Promise<SbxLogin> {
+  const environment = await cliEnv();
+  const sbxCommand = sbxPath();
+  const child = spawn(sbxCommand, ['login'], { stdio: ['ignore', 'pipe', 'pipe'], env: environment });
+  // For the next server, should this one be killed before it can end it.
+  if (child.pid) recordSbxLogin(child.pid, `${sbxCommand} login`);
+  const stderr: Buffer[] = [];
+  child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+  const exited = new Promise<{ code: number | null; stderr: string }>((resolve) => {
+    const finish = (code: number | null) => resolve({ code, stderr: Buffer.concat(stderr).toString('utf8').slice(-4096) });
+    child.on('close', finish);
+    child.on('error', (error) => {
+      stderr.push(Buffer.from(`error: ${errorMessage(error)}\n`));
+      finish(null);
+    });
+  });
+  let closed = false;
+  // A sign-in nobody's following any more shouldn't stay waiting for one.
+  const leaving = () => child.kill('SIGTERM');
+  process.once('exit', leaving);
+  void exited.then(() => {
+    closed = true;
+    process.off('exit', leaving);
+    if (child.pid) forgetSbxLogin(child.pid);
+  });
+  return {
+    stdout: child.stdout,
+    exited,
+    // Asked first, so it can tell Docker it's given up, and then made to.
+    kill: () => {
+      if (closed) return;
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        if (!closed) child.kill('SIGKILL');
+      }, 5000).unref();
+    },
+  };
+}
+
+// While sbx is stopping every sandbox, `sbx exec` would start one again, and a check just before
+// can't tell. So nothing new runs in one until it's done, by which time it isn't signed in.
+let signingOut: Promise<void> | null = null;
+
+function refuseWhileSigningOut(): void {
+  if (signingOut) throw new SandboxError('Docker Sandboxes is signing out.');
+}
+
+/**
+ * Signs this computer's Docker Sandboxes out, which stops every sandbox running on it, Lonca's or
+ * not. Asking again meanwhile waits for the same one, and gets its answer.
+ */
+export function sbxLogout(): Promise<void> {
+  signingOut ??= sbx(['logout', '--force'], { timeoutMs: CREATE_TIMEOUT_MS }).then(() => {}).finally(() => {
+    signingOut = null;
+    afterSignInChange();
+  });
+  return signingOut;
+}
+
+/** What Lonca knew about sandboxes may no longer be so, once someone else may be signed in. */
+export function afterSignInChange(): void {
+  forgetListing();
+  booted.clear();
+  // Harmless if a policy is there, and it may not be for an account that's new to this computer.
+  policyReady = false;
+}
+
 // Why Docker Sandboxes can't be used, in the terms the settings page explains it.
 
 function missing(): SandboxStatus {
@@ -180,7 +263,7 @@ function missing(): SandboxStatus {
   }
   return {
     state: 'not-installed',
-    ...(process.platform === 'darwin' ? { install: 'brew trust docker/tap && brew install docker/tap/sbx && sbx login' } : {}),
+    ...(process.platform === 'darwin' ? { install: 'brew trust docker/tap && brew install docker/tap/sbx' } : {}),
   };
 }
 
@@ -505,6 +588,7 @@ export async function exec(name: string, cmd: string[], options: ExecOptions = {
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const { args, env } = execArgs(name, ['timeout', '-k', '2', String(Math.ceil(timeoutMs / 1000)), ...cmd], { ...options, interactive: hasStdin });
   const environment = await cliEnv(env);
+  refuseWhileSigningOut();
   return new Promise((resolve, reject) => {
     const child = spawn(sbxPath(), args, { stdio: [hasStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'], env: environment });
     let truncated = false;
@@ -563,7 +647,9 @@ export async function execText(name: string, cmd: string[], options: ExecOptions
 /** Runs a command and streams its output without buffering it. */
 export async function execStream(name: string, cmd: string[], options: ExecOptions = {}): Promise<OutputStream> {
   const { args, env } = execArgs(name, cmd, options);
-  const child = spawn(sbxPath(), args, { stdio: ['ignore', 'pipe', 'pipe'], env: await cliEnv(env) });
+  const environment = await cliEnv(env);
+  refuseWhileSigningOut();
+  const child = spawn(sbxPath(), args, { stdio: ['ignore', 'pipe', 'pipe'], env: environment });
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   child.stdout.pipe(stdout);
@@ -590,7 +676,9 @@ export async function execTty(
     ['lonca-pty', ttyFile, String(options.cols ?? 80), String(options.rows ?? 24), ...cmd],
     { ...options, interactive: true },
   );
-  const child = spawn(sbxPath(), args, { stdio: ['pipe', 'pipe', 'pipe'], env: await cliEnv(env) });
+  const environment = await cliEnv(env);
+  refuseWhileSigningOut();
+  const child = spawn(sbxPath(), args, { stdio: ['pipe', 'pipe', 'pipe'], env: environment });
   child.stdin.on('error', () => {});
   const stream = new Duplex({
     read() {},

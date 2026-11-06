@@ -137,6 +137,46 @@ exec_in_sandbox() {
   exec docker exec ${flags[@]+"${flags[@]}"} "$name" "$@"
 }
 
+# Prints what the real one does, then waits for the test: `login-approve` in $FAKE_SBX_DIR signs in,
+# `login-deny` fails as the real one does when the page refuses it.
+login() {
+  local code
+  code=$(cat "$state/login-code" 2>/dev/null || echo VKNZ-LBTN)
+  echo login >> "$state/calls.log"
+  printf 'By logging in, you agree to our Subscription Service Agreement. For more details, see https://www.docker.com/legal/docker-subscription-service-agreement/ \n\n'
+  printf 'Your one-time device confirmation code is: %s\n' "$code"
+  printf 'Complete sign-in in your browser, then return to this terminal.\n'
+  printf 'Open this URL to sign in: https://login.docker.com/activate?user_code=%s\n\n' "$code"
+  printf 'Waiting for authentication...\n'
+  trap 'echo "error: auth login failed: completing login: context canceled" >&2; exit 1' TERM INT
+  while :; do
+    if [ -e "$state/login-approve" ]; then
+      rm -f "$state/login-approve" "$state/signed-out"
+      echo 'Login succeeded'
+      exit 0
+    fi
+    if [ -e "$state/login-deny" ]; then
+      rm -f "$state/login-deny"
+      echo 'error: auth login failed: completing login: access denied' >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+}
+
+# The real one stops every sandbox on the computer. This stops only this server's, when it names
+# one, so that servers running alongside it in other tests keep theirs.
+logout() {
+  if [ "${1:-}" != --force ]; then
+    echo 'error: stdin is not a terminal; run this command in a terminal to answer the prompt' >&2
+    exit 1
+  fi
+  signed_in
+  echo logout >> "$state/calls.log"
+  docker ps -q "${filters[@]}" | xargs -r docker stop -t 1 >/dev/null
+  touch "$state/signed-out"
+}
+
 command=${1:-}
 [ $# -eq 0 ] || shift
 case "$command" in
@@ -146,6 +186,8 @@ case "$command" in
     printf '{"version":"1.0","checks":[{"name":"Virtualization","status":"%s","message":"not supported here","detail":"","hint":"Turn on hardware virtualization"}]}\n' "$status"
     ;;
   ls) signed_in; list ;;
+  login) login ;;
+  logout) logout "$@" ;;
   run) run_sandbox "$@" ;;
   exec) exec_in_sandbox "$@" ;;
   stop) signed_in; docker stop -t 1 "$1" >/dev/null ;;

@@ -352,7 +352,7 @@ export function sandboxNameFor(prefix: string, slug: string, name: string, id: s
 const SANDBOX_PROBLEM: Record<string, string> = {
   checking: 'Lonca is still checking on Docker Sandboxes.',
   'not-installed': 'Workspaces need Docker Sandboxes, which isn’t installed. Settings says how to get it.',
-  'signed-out': 'Docker Sandboxes isn’t signed in. Run `sbx login` in a terminal, then try again.',
+  'signed-out': 'Docker Sandboxes isn’t signed in. Sign in to Docker in Lonca’s Settings, then try again.',
 };
 
 /** Workspaces can't run without Docker Sandboxes, so there's no use in starting one. */
@@ -616,6 +616,19 @@ export function markInterruptedWork(): void {
     }
   }
   saveState();
+}
+
+/**
+ * Signing Docker Sandboxes out stops every sandbox on the computer, which nothing can ask about
+ * until it's signed in again. Workspaces in the middle of something find out for themselves.
+ */
+export async function markStoppedBySignOut(onStopped: (workspace: Workspace) => void): Promise<void> {
+  await Promise.all(state.workspaces.map((workspace) => lifecycle.run(workspace.id, async () => {
+    if (workspace.status !== 'ready' || workspace.pendingOperation) return;
+    workspace.status = 'stopped';
+    publishWorkspace(workspace);
+    onStopped(workspace);
+  })));
 }
 
 /** Brings saved state in line with Docker Sandboxes, which can change while nothing is watching it. */

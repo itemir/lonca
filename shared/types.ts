@@ -330,8 +330,27 @@ export interface SandboxStatus {
   sshAgentForwarding?: boolean;
 }
 
+export type DockerLoginFailure = 'expired' | 'no-code' | 'stopped' | 'unavailable' | 'unchecked';
+
+/**
+ * Signing Docker Sandboxes in with `sbx login`, which is the user's own login for the whole
+ * computer. It never includes a credential: the one-time code is only good for this sign-in.
+ */
+export interface DockerLoginState {
+  phase: 'starting' | 'waiting' | 'checking' | 'done' | 'failed';
+  /** The page where the code is entered. */
+  url?: string;
+  code?: string;
+  failure?: DockerLoginFailure;
+  message?: string;
+  /** What sbx printed, once it's failed. */
+  output?: string;
+}
+
 export interface SystemStatus {
   sandbox: SandboxStatus;
+  /** The last sign-in to Docker Sandboxes from Lonca, if there's been one since it started. */
+  dockerLogin?: DockerLoginState;
   image: { tag: string; state: 'unknown' | 'building' | 'ready' | 'error'; log: string; error?: string };
   agents: Record<AgentId, AgentStatus>;
   /** False until sign-in status has been checked once, before which "signed out" means nothing. */

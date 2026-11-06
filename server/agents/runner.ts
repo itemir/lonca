@@ -83,6 +83,8 @@ interface ActiveRun {
   stopped: boolean;
   /** The exact playbook sent in this turn, acknowledged only when the turn completes. */
   playbookVersion?: string;
+  /** The conversation has been told its workspace stopped. */
+  reportedStopped?: boolean;
 }
 
 const runs = new Map<string, ActiveRun>();
@@ -249,6 +251,19 @@ export function notice(sessionId: string, runId: string | undefined, level: 'inf
   transcriptFor(sessionId).upsert({ id: newId(), ts: Date.now(), runId, type: 'notice', level, text });
 }
 
+function reportStopped(run: ActiveRun): void {
+  if (!run.reportedStopped) notice(run.sessionId, run.runId, 'info', 'The workspace stopped. Start it to recover the remaining conversation output.');
+  run.reportedStopped = true;
+}
+
+/**
+ * For a workspace stopped where its followers can't see it, such as by signing Docker Sandboxes
+ * out. They carry on following, and read what's left once it's started.
+ */
+export function reportWorkspaceStopped(workspaceId: string): void {
+  for (const run of runs.values()) if (run.workspaceId === workspaceId) reportStopped(run);
+}
+
 interface PendingLine {
   data: Buffer;
   skipping: boolean;
@@ -336,7 +351,6 @@ async function follow(run: ActiveRun): Promise<void> {
   let skipping = false;
   let reported = false;
   let reportedUnavailable = false;
-  let reportedStopped = false;
   let exit = { code: null as number | null, stderr: '' };
   let complete = false;
   for (;;) {
@@ -359,8 +373,7 @@ async function follow(run: ActiveRun): Promise<void> {
         workspace.status = 'stopped';
         publishWorkspace(workspace);
       }
-      if (!reportedStopped) notice(run.sessionId, run.runId, 'info', 'The workspace stopped. Start it to recover the remaining conversation output.');
-      reportedStopped = true;
+      reportStopped(run);
     }
     if (runtime !== 'running') {
       await sleep(2000);
