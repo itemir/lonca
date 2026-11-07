@@ -81,7 +81,7 @@ test.beforeAll(async ({ browser }) => {
     if (message.type() === 'error' && /Content Security Policy/i.test(message.text())) pageErrors.push(message.text());
   });
   await page.goto(`${lonca.url}/?token=${lonca.token}`);
-  await expect(page.getByText('My workspaces')).toBeVisible();
+  await expect(page.getByText('My projects')).toBeVisible();
   await expect(page).toHaveURL(`${lonca.url}/`);
 });
 
@@ -104,10 +104,10 @@ test('asks for the access link instead of showing the app', async ({ browser }) 
 test('ignores a stray link with a bad token instead of logging you out', async () => {
   const other = await page.context().newPage();
   await other.goto(`${lonca.url}/?token=wrong`);
-  await expect(other.getByText('My workspaces')).toBeVisible();
+  await expect(other.getByText('My projects')).toBeVisible();
   await expect(other).toHaveURL(`${lonca.url}/`);
   await other.reload();
-  await expect(other.getByText('My workspaces')).toBeVisible();
+  await expect(other.getByText('My projects')).toBeVisible();
   await other.close();
 });
 
@@ -856,7 +856,7 @@ test('removes a project and everything in it', async () => {
 
 test('keeps the page in place when the terminal takes focus', async () => {
   await page.goto(`${lonca.url}/`);
-  await expect(page.getByText('My workspaces')).toBeVisible();
+  await expect(page.getByText('My projects')).toBeVisible();
   const scrolled = await page.evaluate(`
     window.scrollTo(0, 500);
     document.documentElement.scrollTop = 500;
