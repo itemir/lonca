@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Duplex, PassThrough } from 'node:stream';
 import type { SandboxStatus } from '../shared/types.ts';
-import { LONCA_HOME, PORTS_PER_WORKSPACE, PREFIX, TEMPLATE_DIR, TTY_DIR } from './config.ts';
+import { LONCA_HOME, PORTS_PER_WORKSPACE, PREFIX, TEMPLATE_DIR, TEMPLATE_NAME, TTY_DIR } from './config.ts';
 import { forgetSbxLogin, recordSbxLogin } from './sbx-login-pid.ts';
 import { emptyAgent } from './ssh-agent.ts';
 import { KeyedQueue, RuntimeStoppedError, errorMessage, newId, removeTree, sleep } from './util.ts';
@@ -331,6 +331,49 @@ export async function templateLoaded(image: string): Promise<boolean> {
   return templateListIncludes(await sbx(['template', 'ls', '--quiet']), image);
 }
 
+export interface TemplateImage {
+  id: string;
+  repository: string;
+  tag: string;
+}
+
+export function parseTemplateList(output: string): TemplateImage[] {
+  return (JSON.parse(output.trim() || '[]') as TemplateImage[] | null) ?? [];
+}
+
+export async function listTemplates(): Promise<TemplateImage[]> {
+  return parseTemplateList(await sbx(['template', 'ls', '--json']));
+}
+
+const isOwnTemplate = (image: TemplateImage) => image.repository === `docker.io/library/${TEMPLATE_NAME}`;
+// Docker Sandboxes gives a template this second name when a VM is first made from it, and an image
+// stays on disk until all its names have gone. Saving over a template leaves it with only this one.
+const isVmCopy = (image: TemplateImage) => image.repository === 'docker.io/library/sandbox-kit-assembled';
+
+/** The image a template's name points to now. */
+export function imageNamed(images: TemplateImage[], name: string): string | undefined {
+  return images.find((image) => `${image.repository}:${image.tag}` === imageReference(name))?.id;
+}
+
+export function ownTemplateImages(images: TemplateImage[]): string[] {
+  return images.filter(isOwnTemplate).map((image) => image.id);
+}
+
+/**
+ * Which of these can go: those still there, apart from any to keep or with a name that isn't
+ * Lonca's to remove, such as a project's own template or Docker's that Lonca's are built from.
+ */
+export function removableImages(images: TemplateImage[], candidates: string[], keep: Set<string | undefined>): string[] {
+  const listed = new Set(images.map((image) => image.id));
+  const namedByOthers = new Set(images.filter((image) => !isOwnTemplate(image) && !isVmCopy(image)).map((image) => image.id));
+  return [...new Set(candidates)].filter((id) => listed.has(id) && !keep.has(id) && !namedByOthers.has(id));
+}
+
+/** By ID, which takes all its names at once, and can't catch a newer image that's taken one of them. */
+export async function removeTemplateImage(id: string): Promise<void> {
+  await sbx(['template', 'rm', '--force', id]);
+}
+
 let tag: string | undefined;
 
 /** Changes with what a template is made from, so upgrades rebuild it by themselves. Read once, so that editing those files doesn't rebuild it under a running server. */
@@ -341,7 +384,7 @@ export function templateTag(): string {
       hash.update(name);
       hash.update(fs.readFileSync(path.join(TEMPLATE_DIR, name)));
     }
-    tag = `lonca-sandbox:${hash.digest('hex').slice(0, 12)}`;
+    tag = `${TEMPLATE_NAME}:${hash.digest('hex').slice(0, 12)}`;
   }
   return tag;
 }
@@ -358,10 +401,15 @@ export async function cleanUpTemplateBuild(): Promise<void> {
   await removeTree(BUILD_DIR);
 }
 
-/** Makes the template new workspaces start from: a VM from Docker's own, with what Lonca adds installed in it, saved. */
-export async function buildTemplate(tag: string, options: { fresh?: boolean }, onLog: (text: string) => void): Promise<void> {
+/**
+ * Makes the template new workspaces start from: a VM from Docker's own, with what Lonca adds
+ * installed in it, saved. Returns the image that saving over the template took its name from,
+ * which would otherwise be forgotten and stay on disk under its VM copy.
+ */
+export async function buildTemplate(tag: string, options: { fresh?: boolean }, onLog: (text: string) => void): Promise<string | undefined> {
   const name = BUILDER;
   const staging = BUILD_DIR;
+  const replaced = imageNamed(await listTemplates().catch(() => []), tag);
   try {
     await cleanUpTemplateBuild();
     fs.cpSync(TEMPLATE_DIR, staging, { recursive: true });
@@ -376,6 +424,7 @@ export async function buildTemplate(tag: string, options: { fresh?: boolean }, o
     onLog('Saving it…\n');
     await sbx(['stop', name], { timeoutMs: CREATE_TIMEOUT_MS });
     await sbx(['template', 'save', name, tag], { timeoutMs: BUILD_TIMEOUT_MS });
+    return replaced;
   } finally {
     await cleanUpTemplateBuild().catch(() => {});
   }
@@ -469,6 +518,10 @@ set -eu
 state="$1"
 mkdir -p "$HOME/.claude" "$HOME/.codex"
 [ -e "$HOME/.claude.json" ] || echo '{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}' > "$HOME/.claude.json"
+
+# Its disks are sparse files on the host. The root one gives back what's deleted from it by itself,
+# Docker's only when mounted to, and every boot mounts it afresh.
+sudo -n mount -o remount,discard /var/lib/docker 2>/dev/null || true
 
 # Rebuilding a workspace replaces its VM, and conversations have to outlive that to be resumed.
 mkdir -p "$state/claude-projects" "$state/codex-sessions"

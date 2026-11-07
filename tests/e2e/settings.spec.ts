@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import type { AppState } from '../../shared/types.ts';
+import type { AppState, SystemStatus } from '../../shared/types.ts';
 import { Lonca } from '../support/harness.ts';
 
 const lonca = new Lonca({ port: 48303, instance: 'e2e-settings', firstWorkspacePort: 51200 });
@@ -97,3 +97,24 @@ test('keeps the latest value when a second save overlaps a delayed first save', 
     release();
   }
 });
+
+test('warns in the sidebar and in Settings while the disk is nearly full', async ({ page }) => {
+  // The server only says so with less than 20 GB free, so this adds it to everything the page hears.
+  const nearlyFull = (system: SystemStatus): SystemStatus => ({ ...system, lowDisk: { freeGb: 7 } });
+  await page.route('**/api/state', async (route) => {
+    const response = await route.fetch();
+    const state = await response.json() as AppState;
+    await route.fulfill({ response, json: { ...state, system: nearlyFull(state.system) } });
+  });
+  await page.routeWebSocket(/\/ws(\?|$)/, (socket) => {
+    const server = socket.connectToServer();
+    server.onMessage((message) => {
+      const event = JSON.parse(String(message)) as { type: string; system?: SystemStatus };
+      socket.send(JSON.stringify(event.type === 'system' && event.system ? { ...event, system: nearlyFull(event.system) } : event));
+    });
+  });
+  await page.goto(`${lonca.url}/settings?token=${lonca.token}`);
+  await expect(page.getByRole('link', { name: 'Disk almost full' })).toBeVisible();
+  await expect(page.getByText(/^Only 7 GB is left on this computer’s disk\./)).toBeVisible();
+});
+

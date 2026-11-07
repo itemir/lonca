@@ -148,6 +148,18 @@ Agents run with their own permission prompts turned off, since the workspace is 
 - Local repositories with no remote can't be pushed from a workspace. Their commits stay on the branch in `~/.lonca/projects/<project>/repo.git`, and you can fetch them from there.
 - Lonca is for one person on one computer. To use it from elsewhere, forward its port over SSH instead of exposing it.
 
+## Disk space
+
+Everything a workspace's agents install or download stays on your computer's disk until the workspace goes. Each virtual machine has two disks, kept as files that start at about 6 MB each and grow as they're used: up to 20 GB for the machine's own files, and up to 10 GB for its Docker engine's images and containers. Workspaces don't share these, so a browser or Docker image that five of them download takes up five times the space. What's deleted inside a virtual machine usually comes back within about a minute. Worktrees are on your computer too, along with anything like `node_modules` in them.
+
+To get space back, archive workspaces you aren't using, which removes the virtual machine and the worktree. Rebuilding one from its **⋯** menu replaces only the virtual machine, which keeps the worktree and conversations but loses everything else on its disks, such as its home directory and Docker images. If several workspaces need the same heavy tools, installing them once in a project's template, as described under [Limitations](#limitations), means they share one copy, though not of Docker images, which a template can't hold.
+
+A template takes up about 1.5 GB beyond what templates share. Lonca removes one when it's replaced, when it starts and finds an older one, and when the last virtual machine made from it goes. Until then a workspace holds on to the template it was made from, which it needs to be saved as a template itself.
+
+When less than 20 GB is left, the status at the foot of the sidebar says **Disk almost full**, and Settings says how much is left. It goes by the disk your home folder is on, where Docker Sandboxes keeps virtual machines' disks, or the one `LONCA_HOME` is on if that has less room.
+
+If your computer's disk does fill up, virtual machines' disks can turn read-only and agents fail in confusing ways, whereas a virtual machine that only fills its own disk just reports that it's out of space. Free up some space, then restart the affected workspaces with `sbx stop <virtual machine>` and **Start** in Lonca. If one's still stuck, rebuild it.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -162,8 +174,10 @@ To remove Lonca completely, delete `~/.lonca` and the virtual machines and templ
 
 ```sh
 sbx ls -q | grep '^lonca-' | xargs sbx rm --force
-sbx template ls -q | grep lonca-sandbox | xargs sbx template rm --force
+sbx template ls --json | jq -r '.[] | select(.repository == "docker.io/library/lonca-sandbox").id' | sort -u | xargs -n1 sbx template rm --force
 ```
+
+A template that was replaced while a workspace was on it stays with only the name `sandbox-kit-assembled:<hash>`. `sbx template ls` lists those, and `sbx template rm --force <image ID>` removes one.
 
 If you used Lonca when workspaces ran in containers, this removes what's left of that. Do it before starting this version, because agents can still be running in those containers. A workspace from then gets a virtual machine the next time it starts. Its files are kept, and its agents' conversations start afresh.
 
@@ -187,7 +201,7 @@ npm run test:sandbox # the integration tests again, in real virtual machines (ne
 
 The Docker and browser suites run the real `claude` and `codex` CLIs. They need Docker, which Lonca itself doesn't, because `tests/support/fake-sbx` stands in for `sbx` with plain containers. What's replaced is the models behind them, by a scripted server in `tests/support/mock-llm.ts`, and for the sign-in tests the services that sign in, by `tests/support/fake-signin.mjs`, so the suites need no credentials and spend no tokens. They use their own throwaway home directories and sandboxes and clean up after themselves, so they're safe to run alongside a real instance.
 
-That exercises everything of Lonca's on the way to a virtual machine, without a Docker account, but it can't stand in for the VM itself, its proxy, its network rules or its file sharing. Only `test:sandbox` covers those.
+Tests keep a template of their own, `lonca-instance-sandbox`, as any instance with `LONCA_INSTANCE` set does, so a run can't touch the one your server uses. That exercises everything of Lonca's on the way to a virtual machine, without a Docker account, but it can't stand in for the VM itself, its proxy, its network rules or its file sharing. Only `test:sandbox` covers those.
 
 | Directory | Contents |
 | --- | --- |

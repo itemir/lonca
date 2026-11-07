@@ -68,6 +68,21 @@ export function removeSandbox(name: string): void {
   sbx('rm', '--force', name);
 }
 
+export function templateImages(): { id: string; repository: string; tag: string }[] {
+  return JSON.parse(sbx('template', 'ls', '--json'));
+}
+
+/** Which image a template's name points to, if it's there. */
+export function templateImage(name: string): string | undefined {
+  return templateImages().find((image) => `${image.repository}:${image.tag}` === `docker.io/library/${name}`)?.id;
+}
+
+/** Removes a template by its image, as that takes the second name it gets when a VM's made from it. */
+export function removeTemplate(name: string): void {
+  const id = templateImage(name);
+  if (id) sbx('template', 'rm', '--force', id);
+}
+
 export function sandboxExec(sandbox: string, script: string): { code: number; output: string } {
   const { file, args, env } = execCommand(sandbox, script);
   try {
@@ -318,12 +333,25 @@ export class Lonca {
     });
   }
 
+  /** What was replaced while a workspace was on it. The server frees that as a workspace goes, but this one's gone first. */
+  private removeReplacedTemplates(): void {
+    const saved = path.join(this.home, 'state.json');
+    if (!fs.existsSync(saved)) return;
+    const used = (JSON.parse(fs.readFileSync(saved, 'utf8')) as { workspaces: Workspace[] }).workspaces.map((workspace) => workspace.templateImage);
+    const images = templateImages();
+    const named = new Set(images.filter((image) => !image.repository.endsWith('/sandbox-kit-assembled')).map((image) => image.id));
+    for (const id of new Set(images.map((image) => image.id))) {
+      if (used.includes(id) && !named.has(id)) sbx('template', 'rm', '--force', id);
+    }
+  }
+
   /** Removes the server, its home directory and every Docker resource it created. */
   async destroy(): Promise<void> {
     this.setOffline(false);
     await this.kill();
     const sandboxes = (JSON.parse(sbx('ls', '--json')) as { name: string }[]).map((entry) => entry.name);
     for (const name of sandboxes.filter((entry) => entry.startsWith(`${this.prefix}-`))) sbx('rm', '--force', name);
+    this.removeReplacedTemplates();
     fs.rmSync(this.home, { recursive: true, force: true });
   }
 }

@@ -90,6 +90,8 @@ export interface Workspace {
   path: string;
   /** Named for the common case: a sandbox has one of these too. */
   sandboxName: string;
+  /** The image its VM was made from, as nothing else can say which that was. */
+  templateImage?: string;
   /** What its Lead runs on, which a new Lead inherits. */
   lead?: LeadChoice;
   /** Set by the Lead's first message. After that `lead` only changes when it can't run. */
@@ -355,6 +357,8 @@ export interface SystemStatus {
   agents: Record<AgentId, AgentStatus>;
   /** False until sign-in status has been checked once, before which "signed out" means nothing. */
   agentsChecked: boolean;
+  /** Set while this computer's disk is nearly full, which can turn virtual machines' disks read-only. */
+  lowDisk?: { freeGb: number };
 }
 
 export interface AppSettings {

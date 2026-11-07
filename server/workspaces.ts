@@ -10,7 +10,7 @@ import { pickWorkspaceName } from './names.ts';
 import { projectLifecycle, refreshFromLocalRepo } from './projects.ts';
 import { ensureSandbox, exec, execText, isSandboxRunning, removeSandbox, sandboxState, stopSandbox } from './sandbox.ts';
 import { deleteTranscript, flushState, getProject, getSecrets, getWorkspace, saveState, state } from './store.ts';
-import { checkSandboxes, ensureCustomTemplate, ensureSandboxImage, system } from './system.ts';
+import { checkSandboxes, ensureCustomTemplate, ensureSandboxImage, releaseTemplateImage, system, templateImageOf } from './system.ts';
 import { HttpError, KeyedQueue, RuntimeStoppedError, errorMessage, newId, removeTree } from './util.ts';
 
 const lifecycle = new KeyedQueue();
@@ -100,7 +100,13 @@ function ensureWorkspaceSandbox(workspace: Workspace, project: Project, options:
   // Boot writes Codex's login too, so an update must wait until that write has finished.
   return codexSetups.run(workspace.id, () => ensureSandbox({
     name: workspace.sandboxName,
-    image: async () => (!options.bare && settings.image ? ensureCustomTemplate(settings.image) : ensureSandboxImage()),
+    image: async () => {
+      const image = await (!options.bare && settings.image ? ensureCustomTemplate(settings.image) : ensureSandboxImage());
+      // Not being able to tell only means that image might go while the VM still wants it.
+      workspace.templateImage = await templateImageOf(image).catch(() => undefined);
+      saveState();
+      return image;
+    },
     env: workspaceEnv(workspace, project),
     mounts: [workspace.path, paths.repo(project.slug)],
     agentState: paths.agentState(workspace.id),
@@ -439,6 +445,7 @@ function finishOperation(workspace: Workspace, status: 'ready' | 'stopped' | 'ar
 /** Called under the workspace lock, for both original requests and retries. */
 async function performOperation(workspace: Workspace, operation: WorkspaceOperation): Promise<void> {
   if (!getWorkspace(workspace.id)) throw new HttpError(404, 'This workspace no longer exists');
+  const previousImage = workspace.templateImage;
   try {
     beginOperation(workspace, operation);
     switch (operation) {
@@ -504,6 +511,8 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
     publishWorkspace(workspace);
     flushState();
     throw error;
+  } finally {
+    if (previousImage && previousImage !== workspace.templateImage) releaseTemplateImage(previousImage);
   }
 }
 
@@ -577,6 +586,7 @@ async function teardown(workspace: Workspace, project: Project, deleteBranch: bo
       ], { timeoutMs: LONG_GIT_TIMEOUT_MS }),
     );
     await removeSandbox(workspace.sandboxName);
+    workspace.templateImage = undefined;
   } catch (error) {
     // The sandbox was only started for this, and shouldn't stay up waiting for a retry.
     await stopSandbox(workspace.sandboxName).catch(() => {});

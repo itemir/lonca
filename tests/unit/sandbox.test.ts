@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BLOCKED_DESTINATIONS, allowRule, createArgs, execArgs, parseSandboxList, secretArgs, templateListIncludes, type SandboxSpec } from '../../server/sandbox.ts';
+import { BLOCKED_DESTINATIONS, allowRule, createArgs, execArgs, imageNamed, ownTemplateImages, parseSandboxList, parseTemplateList, removableImages, secretArgs, templateListIncludes, type SandboxSpec } from '../../server/sandbox.ts';
 
 const spec: SandboxSpec = {
   name: 'lonca-app-amman',
@@ -11,6 +11,53 @@ const spec: SandboxSpec = {
   setup: () => ({ command: ['true'] }),
   network: 'internet',
 };
+
+describe('removing old templates', () => {
+  const named = (id: string, repository: string, tag: string) => ({ id, repository: `docker.io/library/${repository}`, tag });
+  const own = (id: string, tag = id) => named(id, 'lonca-sandbox', tag);
+  const copy = (id: string, tag = `${id}-copy`) => named(id, 'sandbox-kit-assembled', tag);
+  const base = { id: 'base', repository: 'docker.io/docker/sandbox-templates', tag: 'shell-docker' };
+
+  it('reads the list, which may be empty', () => {
+    expect(parseTemplateList('[{"id":"a","repository":"r","tag":"t","size":1}]')).toEqual([{ id: 'a', repository: 'r', tag: 't', size: 1 }]);
+    expect(parseTemplateList('[]')).toEqual([]);
+    expect(parseTemplateList('null')).toEqual([]);
+    expect(parseTemplateList('')).toEqual([]);
+  });
+
+  it('finds the image a name points to, however the name is written', () => {
+    const images = [own('now', 'tag'), copy('now'), base];
+    expect(imageNamed(images, 'lonca-sandbox:tag')).toBe('now');
+    expect(imageNamed(images, 'docker/sandbox-templates:shell-docker')).toBe('base');
+    expect(imageNamed(images, 'lonca-sandbox:other')).toBeUndefined();
+    expect(imageNamed(images, 'other:tag')).toBeUndefined();
+  });
+
+  it('counts as its own only what’s under Lonca’s name, not a copy or a second instance’s', () => {
+    const images = [own('a'), own('b'), copy('a'), copy('orphan'), named('c', 'lonca-instance-sandbox', 'c'), named('d', 'my-template', '1'), base];
+    expect(ownTemplateImages(images)).toEqual(['a', 'b']);
+  });
+
+  it('frees an image of Lonca’s, or one with only a copy’s name left', () => {
+    const images = [own('old'), copy('old'), copy('replaced'), own('now'), copy('now')];
+    expect(removableImages(images, ['old', 'replaced'], new Set(['now']))).toEqual(['old', 'replaced']);
+  });
+
+  it('keeps the current template and whatever a workspace’s VM was made from', () => {
+    const images = [own('old'), copy('old'), copy('replaced'), own('now')];
+    expect(removableImages(images, ['old', 'replaced', 'now'], new Set(['now', 'replaced', undefined]))).toEqual(['old']);
+  });
+
+  it('keeps anything something else has a name for, whatever else it has', () => {
+    const images = [base, copy('base'), named('mine', 'my-template', '1'), copy('mine'), own('both'), named('both', 'my-template', '2'), named('other', 'lonca-instance-sandbox', 'x')];
+    expect(removableImages(images, ['base', 'mine', 'both', 'other'], new Set())).toEqual([]);
+  });
+
+  it('ignores what’s already gone, and asks once about each image', () => {
+    expect(removableImages([own('a'), copy('a')], ['a', 'a', 'gone'], new Set())).toEqual(['a']);
+    expect(removableImages([], ['a'], new Set())).toEqual([]);
+  });
+});
 
 describe('talking to the sbx CLI', () => {
   it('reads the sandbox list, which may be empty', () => {
