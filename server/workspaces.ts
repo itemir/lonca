@@ -83,6 +83,8 @@ function workspaceEnv(workspace: Workspace, project: Project): string[] {
     `LONCA_WORKSPACE_NAME=${workspace.name}`,
     `LONCA_WORKSPACE_PATH=${workspace.path}`,
     `LONCA_PROJECT=${project.name}`,
+    // Terminal prompts go by this, as the VM's name does, rather than a name that can be changed.
+    `LONCA_PROJECT_SLUG=${project.slug}`,
     `LONCA_DEFAULT_BRANCH=${workspace.baseBranch}`,
     `LONCA_PORT=${workspace.port}`,
   ];
