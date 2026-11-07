@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ChangeSet, ChatItem, FileContent, FileEntry, LoginState, Project, Session, TextItem, ToolItem, Workspace } from '../../shared/types.ts';
-import { BLOCKED_DESTINATIONS, templateTag } from '../../server/sandbox.ts';
+import { BLOCKED_DESTINATIONS, SANDBOX_BOOT, templateTag } from '../../server/sandbox.ts';
 import { FAKE_SANDBOX, FAKE_SBX, FAKE_SBX_DIR, Lonca, REAL_SANDBOX, docker, sandboxExec, sandboxExecAsync, git, installFakeSignIn, makeFixtureRepo, removeFakeSignIn, removeSandbox, sandboxRunning, sandboxSshKeys, sbx, setFakeSignIn, sleep, until, asRoot } from '../support/harness.ts';
 import { type MockLlm, startMockLlm } from '../support/mock-llm.ts';
 
@@ -16,6 +16,7 @@ let project: Project;
 let a: { workspace: Workspace; session: Session };
 let b: { workspace: Workspace; session: Session };
 
+const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const texts = (items: ChatItem[]) => items.filter((item): item is TextItem => item.type === 'text').map((item) => item.text);
 const tools = (items: ChatItem[]) => items.filter((item): item is ToolItem => item.type === 'tool');
 
@@ -451,6 +452,25 @@ describe('terminals', () => {
       return state.terminals.find((entry: { id: string }) => entry.id === info.id)?.status === 'exited';
     }, 10000);
     second.socket.close();
+    await lonca.api('DELETE', `/terminals/${info.id}`);
+  });
+
+  it('names its prompt after the project and the branch checked out', async () => {
+    // Booting again writes the prompt again, without ~/.bashrc sourcing it twice.
+    const state = path.join(lonca.home, 'agent-state', a.workspace.id);
+    expect(sandboxExec(a.workspace.sandboxName, `bash -c ${quote(SANDBOX_BOOT)} lonca-boot ${quote(state)}`).code).toBe(0);
+    expect(sandboxExec(a.workspace.sandboxName, 'grep -c terminal-prompt.sh ~/.bashrc').output.trim()).toBe('1');
+
+    const prompt = (branch: string) => `lonca@${project.slug}-${branch}:${path.basename(a.workspace.path)}$ `;
+    const after = (output: string, marker: string) => output.slice(output.lastIndexOf(marker));
+    const info = await lonca.api('POST', `/workspaces/${a.workspace.id}/terminals`);
+    const terminal = await lonca.openTerminal(info.id);
+    await until('the prompt', () => terminal.output().includes(prompt(a.workspace.branch.split('/').at(-1)!)), 10000);
+    terminal.send('git switch -q -c someone/elsewhere && echo switched-away\n');
+    await until('the prompt on the other branch', () => after(terminal.output(), 'switched-away').includes(prompt('elsewhere')), 10000);
+    terminal.send(`git switch -q ${a.workspace.branch} && git branch -q -D someone/elsewhere && echo switched-back\n`);
+    await until('the prompt back on its own branch', () => after(terminal.output(), 'switched-back').includes(prompt(a.workspace.branch.split('/').at(-1)!)), 10000);
+    terminal.socket.close();
     await lonca.api('DELETE', `/terminals/${info.id}`);
   });
 

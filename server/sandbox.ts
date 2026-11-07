@@ -460,6 +460,8 @@ export function allowRule(network: SandboxSpec['network']): string {
   return network === 'host' ? '**,localhost' : '**';
 }
 
+const TERMINAL_PROMPT = fs.readFileSync(new URL('./terminal-prompt.sh', import.meta.url), 'utf8').trimEnd();
+
 // A sandbox doesn't run an entrypoint of ours, so this runs after starting one. It's sent rather
 // than kept in the template so that it also works on VMs made from older ones.
 export const SANDBOX_BOOT = String.raw`
@@ -480,6 +482,16 @@ if [ "$(cat /var/tmp/lonca/boot 2>/dev/null)" != "$boot" ]; then
   mkdir -p /var/tmp/lonca/tty
   echo "$boot" > /var/tmp/lonca/boot
 fi
+
+# Terminals go by the project and branch. ~/.bashrc sets a prompt of its own, so its end sources
+# this. A VM where that can't be done still works, with the prompt it had.
+{
+  cat > /var/tmp/lonca/terminal-prompt.sh <<'LONCA_PROMPT'
+${TERMINAL_PROMPT}
+LONCA_PROMPT
+  grep -qsF /var/tmp/lonca/terminal-prompt.sh "$HOME/.bashrc" ||
+    printf '\n[ ! -f /var/tmp/lonca/terminal-prompt.sh ] || . /var/tmp/lonca/terminal-prompt.sh\n' >> "$HOME/.bashrc"
+} || true
 `;
 
 const byName = new KeyedQueue();
