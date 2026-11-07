@@ -17,6 +17,7 @@ import {
 } from './inspect.ts';
 import { publish } from './events.ts';
 import { mergePullRequest, mergeRequestSchema } from './merge.ts';
+import { closeForwards } from './ports.ts';
 import {
   addProjectFromPath, addProjectFromUrl, listBranches, projectLifecycle, publishProject, removeProject,
 } from './projects.ts';
@@ -642,6 +643,8 @@ export function createApi(me: AppState['me']): Router {
   api.post('/sandboxes/logout', async (_req, res) => {
     // Finishing one that's under way would sign back in, so it has to be gone first.
     await dockerLogins.cancel();
+    // Signing out stops every sandbox, so forwards close first, as they do before any stop.
+    await Promise.all(state.workspaces.map((workspace) => closeForwards(workspace)));
     const failure = await sbxLogout().then(() => null, (error: unknown) => error);
     await checkSandboxes({ fresh: true });
     // Already signed out, say from a terminal, is as good as signing out, and stopped them too.

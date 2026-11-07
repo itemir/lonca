@@ -66,10 +66,36 @@ export const TEAM_TOOLS = [
       required: ['id'],
     },
   },
+  {
+    name: 'forward_port',
+    description: 'Forward a port on the user\'s localhost to a port in this virtual machine, so the user can open a server running here. Returns the URL to give them, and what\'s listening on the port: a server has to listen on 0.0.0.0, not only localhost, to be reachable. Forwards close when the workspace stops.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        port: { type: 'integer', description: 'The port in this virtual machine.' },
+        host_port: { type: 'integer', description: 'The port on the user\'s localhost. Leave it out to use the same number if it\'s free, or else one Lonca chooses.' },
+      },
+      required: ['port'],
+    },
+  },
+  {
+    name: 'close_port',
+    description: 'Stop forwarding a port you forwarded with forward_port.',
+    inputSchema: { type: 'object', properties: { port: { type: 'integer', description: 'The port in this virtual machine.' } }, required: ['port'] },
+  },
+  {
+    name: 'list_ports',
+    description: 'List the ports the user can open on their localhost: this workspace\'s ten published ports and what you\'ve forwarded, each with what\'s listening on it.',
+    inputSchema: { type: 'object', properties: {} },
+  },
 ];
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value ? value : undefined;
+}
+
+function portText(value: unknown): string | undefined {
+  return (typeof value === 'number' || typeof value === 'string') && /^\d+$/.test(String(value)) ? String(value) : undefined;
 }
 
 export function describeTeamTool(name: string, input: Record<string, unknown>): { kind: ToolKind; title: string; detail?: string; agentId?: string } {
@@ -87,6 +113,15 @@ export function describeTeamTool(name: string, input: Record<string, unknown>): 
       return { kind: 'team', title: 'Asked to try again:', agentId };
     case 'team_status':
       return { kind: 'team', title: 'Checked on the agents' };
+    case 'forward_port': {
+      const port = portText(input.port);
+      const hostPort = portText(input.host_port);
+      return { kind: 'web', title: `${port ? `Forwarded port ${port}` : 'Forwarded a port'}${hostPort ? ` to localhost:${hostPort}` : ''}` };
+    }
+    case 'close_port':
+      return { kind: 'web', title: portText(input.port) ? `Stopped forwarding port ${portText(input.port)}` : 'Stopped forwarding a port' };
+    case 'list_ports':
+      return { kind: 'web', title: 'Checked the ports' };
     default:
       return { kind: 'team', title: name };
   }

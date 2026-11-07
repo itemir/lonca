@@ -15,15 +15,17 @@ import { HttpError, KeyedQueue, RuntimeStoppedError, errorMessage, newId, remove
 
 const lifecycle = new KeyedQueue();
 const codexSetups = new KeyedQueue();
-// Names belong to a project, but port blocks are shared by every workspace.
+// Names belong to a project, but ports on this computer are shared by every workspace.
 const allocation = new KeyedQueue();
 
 type ReadyListener = (workspace: Workspace) => void;
 type TeardownListener = (workspace: Workspace) => Promise<void>;
+type StartListener = (workspace: Workspace, sandbox: string) => Promise<void>;
 type ScriptStarter = (workspace: Workspace, script: string) => Promise<void>;
 
 const readyListeners: ReadyListener[] = [];
 const teardownListeners: TeardownListener[] = [];
+const startListeners: StartListener[] = [];
 let startSetupScript: ScriptStarter = async () => {};
 
 /** Called when a workspace can accept work, to start any messages sent while it was booting. */
@@ -34,6 +36,11 @@ export function onWorkspaceReady(listener: ReadyListener): void {
 /** Called before a workspace's sandbox goes away, so its processes can be wound down. */
 export function onWorkspaceTeardown(listener: TeardownListener): void {
   teardownListeners.push(listener);
+}
+
+/** Called when Lonca has started a workspace's sandbox, before it takes work, to clear what its last run left. */
+export function onWorkspaceStarted(listener: StartListener): void {
+  startListeners.push(listener);
 }
 
 export function setSetupScriptStarter(starter: ScriptStarter): void {
@@ -55,7 +62,8 @@ function setStep(workspace: Workspace, id: StepId, status: WorkspaceStep['status
   publishWorkspace(workspace);
 }
 
-function isPortFree(port: number): Promise<boolean> {
+/** Whether nothing on this computer is listening on a port of its loopback. */
+export function isPortFree(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = net.createServer();
     server.once('error', () => resolve(false));
@@ -63,11 +71,19 @@ function isPortFree(port: number): Promise<boolean> {
   });
 }
 
+/** Ports on this computer go to one workspace or forward at a time, so that two can't be given the same one. */
+export function reserveHostPorts<T>(task: () => Promise<T>): Promise<T> {
+  return allocation.run('workspaces', task);
+}
+
 /** Finds a block of ten ports not used by another workspace or anything else on the host. */
 async function allocatePorts(): Promise<number> {
   const used = new Set(state.workspaces.map((workspace) => workspace.port));
+  // A stopped workspace's forward isn't listening, but sbx can publish it again when that starts.
+  const forwarded = state.workspaces.flatMap((workspace) => (workspace.forwards ?? []).map((forward) => forward.hostPort));
   for (let first = FIRST_WORKSPACE_PORT; first < 60000; first += PORTS_PER_WORKSPACE) {
     if (used.has(first)) continue;
+    if (forwarded.some((port) => port >= first && port < first + PORTS_PER_WORKSPACE)) continue;
     const checks = await Promise.all(
       Array.from({ length: PORTS_PER_WORKSPACE }, (_, offset) => isPortFree(first + offset)),
     );
@@ -113,6 +129,13 @@ function ensureWorkspaceSandbox(workspace: Workspace, project: Project, options:
     memoryGb: settings.memoryGb,
     cpus: settings.cpus,
   }, { start: options.start }));
+}
+
+/** Starts a workspace's sandbox for it to take work. sbx brings back what its last run had, which this clears. */
+async function startWorkspaceSandbox(workspace: Workspace, project: Project): Promise<string> {
+  const sandbox = await ensureWorkspaceSandbox(workspace, project);
+  for (const listener of startListeners) await listener(workspace, sandbox);
+  return sandbox;
 }
 
 function projectOf(workspace: Workspace): Project {
@@ -281,7 +304,7 @@ async function provision(workspace: Workspace): Promise<void> {
 
     currentStep = 'sandbox';
     setStep(workspace, 'sandbox', 'running');
-    const sandbox = await ensureWorkspaceSandbox(workspace, project);
+    const sandbox = await startWorkspaceSandbox(workspace, project);
     setStep(workspace, 'sandbox', 'done');
 
     if (workspace.steps.find((step) => step.id === 'files')?.status !== 'done') {
@@ -434,7 +457,7 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
         await provision(workspace);
         break;
       case 'start':
-        await ensureWorkspaceSandbox(workspace, projectOf(workspace));
+        await startWorkspaceSandbox(workspace, projectOf(workspace));
         finishOperation(workspace, 'ready');
         break;
       case 'stop':
@@ -454,7 +477,9 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
           finishOperation(workspace, 'stopped');
         } else if (operation === 'rebuild') {
           await removeSandbox(workspace.sandboxName);
-          await ensureWorkspaceSandbox(workspace, projectOf(workspace));
+          // Removing a sandbox lets go of every port it had, including any forward that couldn't be closed.
+          workspace.forwards = undefined;
+          await startWorkspaceSandbox(workspace, projectOf(workspace));
           finishOperation(workspace, 'ready');
         } else {
           // Once the VM has gone, nothing an agent left running can still be writing to the checkout.
@@ -463,6 +488,7 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
           if (operation === 'archive') {
             await removeCheckoutFiles(workspace.path);
             workspace.diff = null;
+            workspace.forwards = undefined;
             finishOperation(workspace, 'archived');
           } else {
             await removeTree(workspace.path);

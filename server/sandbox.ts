@@ -98,8 +98,9 @@ function failureFrom(stderr: string, fallback: string): SandboxError {
 /** Runs an `sbx` management command and returns its stdout, rejecting if it fails. */
 async function sbx(args: string[], options: { timeoutMs?: number } = {}): Promise<string> {
   const environment = await cliEnv();
-  // Starting one is the other way to undo what signing out is doing.
-  if (args[0] === 'run') refuseWhileSigningOut();
+  // Starting one is the other way to undo what signing out is doing, and publishing a port on a
+  // stopped one starts it.
+  if (args[0] === 'run' || args[0] === 'ports') refuseWhileSigningOut();
   return new Promise((resolve, reject) => {
     const child = spawn(sbxPath(), args, { stdio: ['ignore', 'pipe', 'pipe'], env: environment });
     const stdout: Buffer[] = [];
@@ -494,7 +495,7 @@ export function createArgs(spec: SandboxSpec, image: string): string[] {
   if (spec.cpus) args.push('--cpus', String(Math.ceil(spec.cpus)));
   if (spec.firstPort) {
     for (let port = spec.firstPort; port < spec.firstPort + PORTS_PER_WORKSPACE; port++) {
-      args.push('--publish', `127.0.0.1:${port}:${port}`);
+      args.push('--publish', portSpec(port, port));
     }
   }
   if (spec.network === 'internet') {
@@ -502,6 +503,20 @@ export function createArgs(spec: SandboxSpec, image: string): string[] {
   }
   args.push('shell', ...spec.mounts, spec.agentState);
   return args;
+}
+
+/** On loopback only, as the ten a workspace is created with are. Unpublishing names it the same way. */
+export function portSpec(hostPort: number, port: number): string {
+  return `127.0.0.1:${hostPort}:${port}`;
+}
+
+/** Forwards a port of this computer to one in a sandbox. sbx publishes it again whenever the sandbox restarts. */
+export async function publishPort(name: string, hostPort: number, port: number): Promise<void> {
+  await sbx(['ports', name, '--publish', portSpec(hostPort, port)]);
+}
+
+export async function unpublishPort(name: string, hostPort: number, port: number): Promise<void> {
+  await sbx(['ports', name, '--unpublish', portSpec(hostPort, port)]);
 }
 
 /** The global policy may only allow some sites. A workspace has the internet. */

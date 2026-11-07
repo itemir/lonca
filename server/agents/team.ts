@@ -7,6 +7,7 @@ import {
   projectBringsKey,
 } from '../../shared/profiles.ts';
 import { notifyUser } from '../notify.ts';
+import { closePort, forwardPort, listPorts } from '../ports.ts';
 import { getProject, getSession, getWorkspace, state } from '../store.ts';
 import { getProfile, system } from '../system.ts';
 import { transcriptFor } from '../transcript.ts';
@@ -130,6 +131,18 @@ function jobArg(args: Record<string, unknown>): AgentJob | undefined {
   if (args.job === undefined) return undefined;
   if (!JOBS.includes(args.job as AgentJob)) throw new ToolError(`job must be one of: ${JOBS.join(', ')}.`);
   return args.job as AgentJob;
+}
+
+/** A CLI can send a number as text. */
+function portArg(args: Record<string, unknown>, name: string): number {
+  const raw = args[name];
+  const value = typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : raw;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65535) throw new ToolError(`${name} must be a port number, from 1 to 65535.`);
+  return value;
+}
+
+function optionalPortArg(args: Record<string, unknown>, name: string): number | undefined {
+  return args[name] === undefined || args[name] === null ? undefined : portArg(args, name);
 }
 
 /** How many are working, if that leaves no room for this agent to start a turn. */
@@ -306,13 +319,16 @@ async function retryAgent(lead: Session, workspace: Workspace, call: ToolCall): 
   return text;
 }
 
+// A call to one of these that's repeated, as after a restart, gets its first reply rather than acting again.
+const MUTATING_TOOLS = ['spawn_agent', 'message_agent', 'stop_agent', 'retry_agent', 'forward_port', 'close_port'];
+
 export async function handleToolCall(lead: Session, call: ToolCall): Promise<{ text: string; failed?: boolean }> {
   const accepted = lead.toolReplies?.[call.id];
   if (accepted) return accepted;
   const workspace = getWorkspace(lead.workspaceId);
   if (!workspace) return { text: 'This workspace no longer exists.', failed: true };
   const reply = await dispatchToolCall(lead, workspace, call);
-  if (!['spawn_agent', 'message_agent', 'stop_agent', 'retry_agent'].includes(call.tool)) return reply;
+  if (!MUTATING_TOOLS.includes(call.tool)) return reply;
   // Mutations save their reply with acceptance. Save refusals and legacy deduplication too:
   // replay must not turn "ask the user" or "wait for room" into new work after state changes.
   const recorded = lead.toolReplies?.[call.id];
@@ -330,6 +346,9 @@ async function dispatchToolCall(lead: Session, workspace: Workspace, call: ToolC
       case 'team_status': return { text: teamStatus(lead, workspace) };
       case 'stop_agent': return { text: await stopAgent(lead, call) };
       case 'retry_agent': return { text: await retryAgent(lead, workspace, call) };
+      case 'forward_port': return { text: await forwardPort(workspace, portArg(call.args, 'port'), optionalPortArg(call.args, 'host_port')) };
+      case 'close_port': return { text: await closePort(workspace, portArg(call.args, 'port')) };
+      case 'list_ports': return { text: await listPorts(workspace) };
       default: return { text: `There's no tool called ${call.tool}.`, failed: true };
     }
   } catch (error) {
