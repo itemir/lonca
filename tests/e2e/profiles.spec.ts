@@ -204,4 +204,21 @@ test.describe('on a phone held sideways', () => {
     await expect(page.locator('.model-popover').getByRole('button', { name: 'Opus 5.5' })).toBeInViewport();
     await shot(page, 'picker-sideways-five-sign-ins');
   });
+
+  test('keeps every sign-in in reach from a locked model', async ({ page }) => {
+    for (const name of ['sixth', 'seventh', 'eighth']) await lonca.api('POST', '/profiles', { agent: 'claude', name });
+    const { workspace, lead } = await newWorkspace();
+    // Its first message locks the Lead's model, which leaves only its sign-in to change.
+    await lonca.api('POST', `/sessions/${lead.id}/messages`, { text: 'LOCK THE MODEL' });
+    await lonca.waitForIdle(lead.id);
+    await page.goto(`${lonca.url}/w/${workspace.id}?token=${lonca.token}`);
+    await page.locator('.composer-bar .model-button').click();
+    const signIns = page.locator('.lock-popover').getByRole('group', { name: 'Sign-in' }).getByRole('button');
+    await expect(signIns).toHaveCount(8);
+    for (const signIn of await signIns.all()) {
+      await signIn.scrollIntoViewIfNeeded();
+      await expect(signIn).toBeInViewport({ ratio: 1 });
+    }
+    await shot(page, 'locked-sideways-eight-sign-ins');
+  });
 });

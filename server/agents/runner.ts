@@ -829,6 +829,8 @@ export interface MessageOptions {
   /** A Lead's job change is accepted with its message, rather than ahead of it. */
   job?: AgentJob;
   receipt?: ToolReceipt;
+  /** Saved in the same write as the message, so that nothing can come between the two. */
+  patch?: Partial<Session>;
 }
 
 /** Releasing a queue also applies to a Stop whose process is still being retired or recovered. */
@@ -878,6 +880,7 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
     }
     // Accept the text and its queue reservation together before acknowledging it or starting a CLI.
     const patch: Partial<Session> = {
+      ...options.patch,
       hasMessages: true,
       title: !session.hasMessages && session.title === 'Untitled' ? titleFrom(text) : session.title,
       queue: [...session.queue, item.id],
@@ -915,14 +918,14 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
 }
 
 /** Releases waiting messages, saving a Lead retry's receipt in the same state write. */
-export async function flushQueue(sessionId: string, receipt?: ToolReceipt): Promise<void> {
+export async function flushQueue(sessionId: string, receipt?: ToolReceipt, patch: Partial<Session> = {}): Promise<void> {
   const session = getSession(sessionId);
   if (!session) throw new HttpError(404, 'No such session');
   if (deletingSessions.has(sessionId)) throw new HttpError(409, 'This conversation is closing.');
   const workspace = getWorkspace(session.workspaceId);
   if (!workspace) throw new HttpError(404, 'No such workspace');
   if (NOT_ACCEPTING.has(workspace.status)) throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
-  releaseQueueHold(session, session.role === 'lead' ? { autonomousTurns: 0 } : {}, receipt);
+  releaseQueueHold(session, { ...patch, ...(session.role === 'lead' ? { autonomousTurns: 0 } : {}) }, receipt);
   if ((workspace.status === 'stopped' || workspace.status === 'ready') && session.queue.length > 0) await startWorkspace(workspace);
   startNextQueued(session);
 }

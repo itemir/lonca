@@ -278,11 +278,11 @@ function continuation(session: Session): string {
   return `Continue where you left off. If you hadn't started, this was the request:\n\n${last?.text ?? ''}`;
 }
 
-/** Works for a usage limit or a failure, which a conversation survives. */
-async function retrySession(session: Session, from: UserItem['from'], id?: string, receipt?: ToolReceipt): Promise<void> {
+/** Works for a usage limit or a failure, which a conversation survives. `patch` is saved with what carries it on. */
+async function retrySession(session: Session, from: UserItem['from'], id?: string, receipt?: ToolReceipt, patch?: Partial<Session>): Promise<void> {
   if (session.status === 'running') throw new HttpError(409, `${nameOf(session)} is already working.`);
-  if (session.queue.length > 0) return flushQueue(session.id, receipt);
-  await sendMessage(session.id, continuation(session), [], { id, from, summary: TRYING_AGAIN, receipt });
+  if (session.queue.length > 0) return flushQueue(session.id, receipt, patch);
+  await sendMessage(session.id, continuation(session), [], { id, from, summary: TRYING_AGAIN, receipt, patch });
 }
 
 async function retryAgent(lead: Session, workspace: Workspace, call: ToolCall): Promise<string> {
@@ -452,14 +452,7 @@ function recordMove(session: Session, to: Profile, by: 'user' | 'lead' | 'lonca'
     ? `Lonca moved this to ${toName}${because}. You chose this in Settings.`
     : `${by === 'lead' ? 'The Lead moved this' : 'Moved'} from ${fromName} to ${toName}${because}.${session.status === 'running' ? ' The turn under way finishes on the one it started on.' : ''}`;
   if (session.hasMessages) notice(session.id, undefined, 'info', text);
-  persistSession(session, {
-    profileId: to.id,
-    // What it was waiting for doesn't apply where it's going, and a Lead mustn't hear it was stopped.
-    ...(by === 'lonca' ? {
-      lastOutcome: undefined, limitResetsAt: undefined, limitProfileId: undefined,
-      ...(session.work ? { work: { ...session.work, unreported: false } } : {}),
-    } : {}),
-  });
+  persistSession(session, { profileId: to.id });
   const workspace = getWorkspace(session.workspaceId);
   if (session.role === 'lead' && workspace) {
     workspace.lead = { agent: session.agent, model: session.model, effort: session.effort, profileId: to.id };
@@ -499,15 +492,14 @@ export async function limitReached(session: Session, from: string, stopped = fal
   if (projectBringsKey(session.agent, getProject(workspace.projectId))) return;
   const to = autoSwitchTarget(state.profiles, system, session.agent, from);
   if (!to) return;
-  const { lastOutcome, limitResetsAt, limitProfileId, work } = session;
   recordMove(session, to, 'lonca');
-  try {
-    await retrySession(session, 'lonca');
-  } catch (error) {
-    // Still stopped by the limit, so it says so, the Lead hears, and trying again carries on where it moved.
-    persistSession(session, { lastOutcome, limitResetsAt, limitProfileId, work });
-    throw error;
-  }
+  // The limit doesn't apply where it's going, and a Lead mustn't hear of one that it carried on
+  // from. That's saved with what carries it on, so a failure or a crash before then leaves it at
+  // its limit, saying so, and carrying on where it moved once it's tried again.
+  await retrySession(session, 'lonca', undefined, undefined, {
+    lastOutcome: undefined, limitResetsAt: undefined, limitProfileId: undefined,
+    ...(session.work ? { work: { ...session.work, unreported: false } } : {}),
+  });
 }
 
 setTeamHooks({

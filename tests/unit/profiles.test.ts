@@ -429,18 +429,21 @@ describe('moving a conversation', () => {
       expect(notices(session.id)).toEqual([]);
     });
 
-    it('stays at its limit when carrying on can’t be saved, so it still says so and the Lead hears', async () => {
+    it('stays at its limit if carrying on can’t be saved, or the server stops first, so it says so and the Lead hears', async () => {
       personal.autoSwitch = true;
       const agent = runner.createSession(workspace, { role: 'agent', agent: 'claude', work: { job: 'analyze' } });
       Object.assign(agent, { hasMessages: true, lastOutcome: 'limit', limitProfileId: 'claude', held: true, work: { job: 'analyze', unreported: true } });
       store.state.profileLimits = { claude: { at: Date.now() } };
       system.describeProfiles();
-      // Only the message that would carry it on fails to save, once.
+      // Only the message that would carry it on fails to save, once. What's saved by then is all
+      // that a crash at that moment would leave.
       const append = fs.appendFileSync;
       let failed = false;
+      let saved: Session | undefined;
       const failing = vi.spyOn(fs, 'appendFileSync').mockImplementation(((...args: Parameters<typeof fs.appendFileSync>) => {
         if (!failed && String(args[1]).includes('Continue where you left off')) {
           failed = true;
+          saved = (JSON.parse(fs.readFileSync(path.join(home, 'state.json'), 'utf8')) as { sessions: Session[] }).sessions.find((entry) => entry.id === agent.id);
           throw new Error('ENOSPC: no space left on device');
         }
         return append(...args);
@@ -451,6 +454,7 @@ describe('moving a conversation', () => {
         failing.mockRestore();
       }
       expect(agent).toMatchObject({ profileId: personal.id, lastOutcome: 'limit', limitProfileId: 'claude', held: true, queue: [], work: { unreported: true } });
+      expect(saved).toMatchObject({ profileId: personal.id, lastOutcome: 'limit', limitProfileId: 'claude', held: true, queue: [], work: { unreported: true } });
     });
 
     it('lets a Lead move its agent only where it may, and says so in the agent’s conversation', async () => {
