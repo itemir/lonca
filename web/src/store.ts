@@ -147,7 +147,6 @@ export const useStore = create<Store>((set, get) => ({
     sandbox: { state: 'checking' },
     agentsChecked: false,
     image: { tag: '', state: 'unknown', log: '' },
-    agents: { claude: { signedIn: false }, codex: { signedIn: false } },
     profiles: {},
   },
   catalog: DEFAULT_CATALOG,
@@ -167,7 +166,7 @@ export const useStore = create<Store>((set, get) => ({
   hydrate(state) {
     // A sign-in carries on through a page reload, so its window comes back with it.
     const inProgress = (Object.values(state.logins) as LoginState[]).find((login) => login.phase !== 'done' && login.phase !== 'failed');
-    set((store) => ({ ...state, profiles: state.profiles ?? [], ready: true, loginProfile: store.loginProfile ?? inProgress?.profileId ?? inProgress?.agent ?? null }));
+    set((store) => ({ ...state, ready: true, loginProfile: store.loginProfile ?? inProgress?.profileId ?? null }));
   },
 
   apply(event) {
@@ -199,9 +198,8 @@ export const useStore = create<Store>((set, get) => ({
       case 'login':
         set((store) => {
           const logins = { ...store.logins };
-          const key = event.profileId ?? event.agent;
-          if (event.login) logins[key] = event.login;
-          else delete logins[key];
+          if (event.login) logins[event.profileId] = event.login;
+          else delete logins[event.profileId];
           return { logins };
         });
         break;

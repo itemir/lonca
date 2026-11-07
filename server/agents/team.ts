@@ -488,16 +488,26 @@ export async function moveToProfile(session: Session, profileId: string, { retry
   return session;
 }
 
-/** A turn reached a usage limit, so the conversation goes on, on a sign-in the user chose for that, if there's one that can. */
-export async function limitReached(session: Session, from: string): Promise<void> {
-  if (session.closedAt || session.userStopped || session.lastOutcome !== 'limit' || profileIdOf(session) !== from) return;
+/**
+ * A turn reached a usage limit, so the conversation goes on, on a sign-in the user chose for that,
+ * if there's one that can. Not once someone pressed Stop, which a limit just before it can't overrule.
+ */
+export async function limitReached(session: Session, from: string, stopped = false): Promise<void> {
+  if (stopped || session.closedAt || session.userStopped || session.lastOutcome !== 'limit' || profileIdOf(session) !== from) return;
   const workspace = getWorkspace(session.workspaceId);
   if (!workspace || ['archived', 'archiving', 'error', 'deleting', 'stopping'].includes(workspace.status)) return;
   if (projectBringsKey(session.agent, getProject(workspace.projectId))) return;
   const to = autoSwitchTarget(state.profiles, system, session.agent, from);
   if (!to) return;
+  const { lastOutcome, limitResetsAt, limitProfileId, work } = session;
   recordMove(session, to, 'lonca');
-  await retrySession(session, 'lonca');
+  try {
+    await retrySession(session, 'lonca');
+  } catch (error) {
+    // Still stopped by the limit, so it says so, the Lead hears, and trying again carries on where it moved.
+    persistSession(session, { lastOutcome, limitResetsAt, limitProfileId, work });
+    throw error;
+  }
 }
 
 setTeamHooks({

@@ -44,7 +44,7 @@ test.beforeAll(async () => {
   await lonca.api('PATCH', `/projects/${project.id}`, {
     settings: { network: 'host', env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}` } },
   });
-  await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-the-first-sign-in-key' });
+  await lonca.api('PUT', '/profiles/claude/key', { key: 'sk-ant-api03-the-first-sign-in-key' });
 });
 
 test.afterAll(async () => {

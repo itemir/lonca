@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, MoreHorizontal, PanelLeft, Plus } from 'lucide-react';
 import { isReady, profileName, profileStatus, profilesOf } from '../../../shared/profiles.ts';
 import type { AgentId, AppSettings, Profile } from '../../../shared/types.ts';
@@ -95,6 +95,11 @@ function SignInCard({ profile, several, isDefault }: { profile: Profile; several
   const blocker = useStore((store) => signInBlocker(store.system));
   const [renaming, setRenaming] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmOptions | null>(null);
+  // A click shows at once, rather than flicking back until the server's answer arrives.
+  const [autoSwitch, setAutoSwitch] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (autoSwitch === Boolean(profile.autoSwitch)) setAutoSwitch(null);
+  }, [autoSwitch, profile.autoSwitch]);
   const provider = catalog[profile.agent].label;
   const name = several ? profileName(profile, catalog) : provider;
   const signedIn = isReady(status);
@@ -141,8 +146,14 @@ function SignInCard({ profile, several, isDefault }: { profile: Profile; several
         <label className="sign-in-switch">
           <input
             type="checkbox"
-            checked={Boolean(profile.autoSwitch)}
-            onChange={(event) => void attempt(() => api.updateProfile(profile.id, { autoSwitch: event.target.checked }))}
+            checked={autoSwitch ?? Boolean(profile.autoSwitch)}
+            onChange={(event) => {
+              const on = event.target.checked;
+              setAutoSwitch(on);
+              void attempt(() => api.updateProfile(profile.id, { autoSwitch: on })).then((saved) => {
+                if (!saved) setAutoSwitch(null);
+              });
+            }}
           />
           <span>
             Move conversations here by themselves when another {provider} sign-in reaches its usage limit

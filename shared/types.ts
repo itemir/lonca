@@ -388,8 +388,6 @@ export interface SystemStatus {
   /** The last sign-in to Docker Sandboxes from Lonca, if there's been one since it started. */
   dockerLogin?: DockerLoginState;
   image: { tag: string; state: 'unknown' | 'building' | 'ready' | 'error'; log: string; error?: string };
-  /** Each provider's first sign-in, or the one it had before there could be several, for pages from before then. */
-  agents: Record<AgentId, AgentStatus>;
   /** Every sign-in's, by its id. */
   profiles: Record<string, ProfileStatus>;
   /** False until sign-in status has been checked once, before which "signed out" means nothing. */
@@ -526,7 +524,7 @@ export type ServerEvent =
   | { type: 'chat.remove'; sessionId: string; seq: number; itemId: string }
   | { type: 'terminal'; terminal: TerminalInfo }
   | { type: 'terminal.removed'; id: string; workspaceId: string }
-  | { type: 'login'; agent: AgentId; profileId: string; login: LoginState | null }
+  | { type: 'login'; profileId: string; login: LoginState | null }
   | { type: 'profiles'; profiles: Profile[] }
   | { type: 'system'; system: SystemStatus; catalog: Catalog }
   | { type: 'settings'; settings: AppSettings; secrets: SecretsStatus };

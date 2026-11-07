@@ -18,12 +18,14 @@ beforeEach(async () => {
   fs.writeFileSync(path.join(root, 'state'), running);
   fs.writeFileSync(path.join(root, 'sbx'), `#!/bin/sh
 echo "$1" >> "$LONCA_TEST_RUNTIME_FILES/calls"
+printf '%s\n' "$*" >> "$LONCA_TEST_RUNTIME_FILES/args"
 case "$1" in
   ls)
     [ ! -e "$LONCA_TEST_RUNTIME_FILES/unavailable" ] || exit 1
     cat "$LONCA_TEST_RUNTIME_FILES/state"
     ;;
   run) printf '%s' '${running}' > "$LONCA_TEST_RUNTIME_FILES/state" ;;
+  secret) [ ! -e "$LONCA_TEST_RUNTIME_FILES/secret-fails" ] || exit 1 ;;
 esac
 `, { mode: 0o700 });
   sandbox = await import('../../server/sandbox.ts');
@@ -55,4 +57,22 @@ it('propagates an unavailable sandbox service without running any commands in it
   fs.writeFileSync(path.join(root, 'unavailable'), '');
   await expect(sandbox.ensureSandbox(spec, { start: false })).rejects.toThrow(/sbx ls/);
   expect(fs.readFileSync(path.join(root, 'calls'), 'utf8')).toBe('ls\n');
+});
+
+it('gives a running sandbox a sign-in added since, and all of them again the next time it’s used if that failed', async () => {
+  const added = { hosts: ['api.anthropic.com'], placeholder: 'sk-ant-oat01-lonca-profile-aaaaaaaaaaaa-placeholder', file: path.join(root, 'claude-aaaaaaaaaaaa') };
+  const withIt = { ...spec, secrets: [...spec.secrets, added] };
+  const registered = () => fs.readFileSync(path.join(root, 'args'), 'utf8').split('\n').filter((line) => line.startsWith('secret ') && line.includes(added.placeholder));
+  await sandbox.ensureSandbox(spec);
+  fs.writeFileSync(path.join(root, 'secret-fails'), '');
+  await expect(sandbox.addSandboxSecret('test', added)).rejects.toThrow();
+  fs.rmSync(path.join(root, 'secret-fails'));
+  fs.writeFileSync(path.join(root, 'args'), '');
+  await sandbox.ensureSandbox(withIt, { start: false });
+  expect(registered()).toHaveLength(1);
+  // Once it has it, nothing gives it again.
+  fs.writeFileSync(path.join(root, 'args'), '');
+  await sandbox.addSandboxSecret('test', added);
+  await sandbox.ensureSandbox(withIt, { start: false });
+  expect(registered()).toHaveLength(1);
 });

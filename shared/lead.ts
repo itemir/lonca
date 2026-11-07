@@ -1,5 +1,5 @@
 import { isReady, profileIdOf, profileStatus, projectBringsKey } from './profiles.ts';
-import type { AgentId, Catalog, Project, Session, SystemStatus } from './types.ts';
+import type { Catalog, Project, Session, SystemStatus } from './types.ts';
 
 export const MAX_AUTONOMOUS_TURNS = 30;
 
@@ -13,15 +13,10 @@ export function staysHeld(session: Session): boolean {
   return Boolean(session.held) && (Boolean(session.userStopped) || session.lastOutcome !== 'stopped');
 }
 
-/**
- * Whether a workspace in this project can run this CLI on this sign-in: a provider's id alone
- * means its first. A project can bring its own key, which sign-in status doesn't know about.
- */
-export function canRun(who: AgentId | Pick<Session, 'agent' | 'profileId'>, system: SystemStatus, project: Pick<Project, 'settings'> | undefined): boolean {
-  const agent = typeof who === 'string' ? who : who.agent;
-  const profileId = typeof who === 'string' ? who : profileIdOf(who);
-  if (!system.agentsChecked || isReady(profileStatus(system, profileId))) return true;
-  return projectBringsKey(agent, project);
+/** Whether a workspace in this project can run this CLI on this sign-in. A project can bring its own key, which sign-in status doesn't know about. */
+export function canRun(who: Pick<Session, 'agent' | 'profileId'>, system: SystemStatus, project: Pick<Project, 'settings'> | undefined): boolean {
+  if (!system.agentsChecked || isReady(profileStatus(system, profileIdOf(who)))) return true;
+  return projectBringsKey(who.agent, project);
 }
 
 /** Why a Lead can't run on its model. These are the only times that model can change. */

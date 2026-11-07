@@ -41,7 +41,7 @@ export interface TeamHooks {
   handover(workspace: Workspace): string | undefined;
   paused(lead: Session, why: string): void;
   /** A turn on this sign-in reached its usage limit, which the conversation may be able to carry on from on another. */
-  limitReached(session: Session, profileId: string): Promise<void>;
+  limitReached(session: Session, profileId: string, stopped: boolean): Promise<void>;
 }
 
 let team: TeamHooks = {
@@ -618,7 +618,7 @@ async function retireRun(run: ActiveRun, extra: () => Partial<Session> = () => (
   const workspace = getWorkspace(run.workspaceId);
   // Before anyone hears about the limit, since the conversation may carry on elsewhere.
   if (session && run.outcome === 'limit' && run.profileId) {
-    await team.limitReached(session, run.profileId).catch((error) => console.error('could not move a conversation at its limit:', errorMessage(error)));
+    await team.limitReached(session, run.profileId, run.stopped).catch((error) => console.error('could not move a conversation at its limit:', errorMessage(error)));
   }
   if (session && workspace?.status === 'ready') {
     refreshDiffStat(workspace).catch(() => {});
@@ -1093,7 +1093,8 @@ async function resumeRun(session: Session): Promise<void> {
       startedAt: session.updatedAt, offset: 0, interrupted: Boolean(session.stopRequested), holdQueue: session.stopRequested?.holdQueue ?? false, launched: true, sawResult: false, outputLimitHit: false, output: null,
       item: item?.type === 'user' ? item : undefined, resumedFrom: session.resumeId,
       replay: { previous, seen: new Set() }, toolCalls: new Set(), toolQueue: Promise.resolve(), limited: false, reportedFailure: false, stopped: Boolean(session.stopRequested),
-      profileId: turnProfile(session.agent, session.activeProfileId ?? profileIdOf(session), getProject(workspace.projectId)),
+      // One that started before there could be several runs on the provider's first.
+      profileId: turnProfile(session.agent, session.activeProfileId ?? session.agent, getProject(workspace.projectId)),
     };
     runs.set(session.id, run);
     // A crash during teardown can leave an agent alive in a workspace now marked error.

@@ -89,17 +89,26 @@ export function updateProfile(profile: Profile, patch: { name?: string; autoSwit
  * which would lose its credentials partway.
  */
 export async function removeProfile(profile: Profile): Promise<void> {
-  if (profilesOf(state.profiles, profile.agent).length < 2) {
-    throw new HttpError(409, `${state.catalog[profile.agent].label} keeps at least one sign-in. Sign out of this one instead.`);
-  }
+  const keepsOne = () => {
+    if (profilesOf(state.profiles, profile.agent).length < 2) {
+      throw new HttpError(409, `${state.catalog[profile.agent].label} keeps at least one sign-in. Sign out of this one instead.`);
+    }
+  };
+  keepsOne();
   // A sign-in under way would save to it afterwards.
   await logins.cancel({ agent: profile.agent, profileId: profile.id });
   if (getProfile(profile.id) !== profile) return;
+  // Another removal could have finished meanwhile.
+  keepsOne();
   const name = profileName(profile, state.catalog);
-  const running = state.sessions.filter((session) => session.status === 'running' && (session.activeProfileId ?? profileIdOf(session)) === profile.id);
+  // A turn that started before there could be several runs on the provider's first.
+  const running = state.sessions.filter((session) => session.status === 'running' && (session.activeProfileId ?? session.agent) === profile.id);
   if (running.length > 0) {
     throw new HttpError(409, `${running.length === 1 ? 'A conversation is' : `${running.length} conversations are`} running on ${name}. Remove it once ${running.length === 1 ? 'it has' : 'they have'} finished, or stop ${running.length === 1 ? 'it' : 'them'} first.`);
   }
+  // Its credentials go first, so that nothing interrupted leaves them where nothing shows they are.
+  if (profile.agent === 'claude') setClaudeCredential(profile.id, undefined);
+  else forgetCodexLogin(profile.id);
   state.profiles = state.profiles.filter((entry) => entry !== profile);
   const fallback = defaultProfile(state.profiles, profile.agent)!;
   const fallbackName = profileName(fallback, state.catalog);
@@ -112,8 +121,6 @@ export async function removeProfile(profile: Profile): Promise<void> {
     workspace.lead = { ...workspace.lead!, profileId: fallback.id };
     publishWorkspace(workspace);
   }
-  if (profile.agent === 'claude') setClaudeCredential(profile.id, undefined);
-  else forgetCodexLogin(profile.id);
   clearProfileLimit(profile.id);
   publish({ type: 'settings', settings: state.settings, secrets: secretsStatus() });
   publishProfiles();

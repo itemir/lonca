@@ -23,7 +23,7 @@ beforeAll(async () => {
   await lonca.api('PATCH', `/projects/${project.id}`, {
     settings: { network: 'host', filesToCopy: ['.env'], env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`, ANTHROPIC_API_KEY: 'sk-ant-api03-recovery-not-a-real-key' } },
   });
-  await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-recovery-not-a-real-key' });
+  await lonca.api('PUT', '/profiles/claude/key', { key: 'sk-ant-api03-recovery-not-a-real-key' });
   const made = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
   workspace = await lonca.waitForWorkspace(made.workspace.id);
   first = made.session;

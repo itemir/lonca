@@ -162,7 +162,6 @@ export function setClaudeCredential(profileId: string, value: string | undefined
   if (value) claudeTokens[profileId] = value;
   else delete claudeTokens[profileId];
   updateSecrets({ claudeTokens });
-  if (!value) setBoundaryValue(profileId, undefined);
 }
 
 /** A sign-in's id, or GitHub's. Anything else could name a file outside the directory. */
@@ -192,10 +191,20 @@ export function boundaryValue(name: BoundaryName): string | undefined {
   }
 }
 
+function boundaryNames(): string[] {
+  try {
+    return fs.readdirSync(paths.boundary);
+  } catch {
+    return [];
+  }
+}
+
+/** What the proxy reads follows what's saved, so a file left by a sign-out that was cut short goes too. */
 function shareSecretsWithProxy(): void {
   setBoundaryValue('claude', secrets.claudeToken);
-  for (const [id, value] of Object.entries(secrets.claudeTokens ?? {})) {
-    if (PROFILE_ID.test(id) && id.startsWith('claude-')) setBoundaryValue(id, value);
+  const tokens = secrets.claudeTokens ?? {};
+  for (const id of new Set([...Object.keys(tokens), ...boundaryNames()])) {
+    if (PROFILE_ID.test(id) && id.startsWith('claude-')) setBoundaryValue(id, tokens[id]);
   }
   setBoundaryValue('github', secrets.githubToken);
 }

@@ -445,10 +445,10 @@ function LoginFlow({ profileId, agent }: { profileId: string; agent: AgentId }) 
     setCodeError(null);
     setOutputOpen(false);
     api.startLogin(profileId, how).then(
-      (state) => applyEvent({ type: 'login', agent, profileId, login: state }),
+      (state) => applyEvent({ type: 'login', profileId, login: state }),
       (failure: Error) => setStartFailure(failure.message),
     ).finally(() => setStarting(false));
-  }, [agent, profileId, applyEvent]);
+  }, [profileId, applyEvent]);
 
   useEffect(() => {
     if (route === 'account' && !started.current && !login) start(phone && !isClaude ? 'device' : 'browser');

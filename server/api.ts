@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import express, { type NextFunction, type Request, type Response, Router } from 'express';
 import { z } from 'zod';
 import { PROFILE_ID, profileIdOf } from '../shared/profiles.ts';
-import type { AgentId, AppState, LeadChoice, Profile, Project, Session, Workspace } from '../shared/types.ts';
+import type { AppState, LeadChoice, Profile, Project, Session, Workspace } from '../shared/types.ts';
 import { playbookFor, resetPlaybook, savePlaybook } from './agents/playbook.ts';
 import {
   cancelQueued, chooseProfile, createLead, createSession, deleteSession, flushQueue, interruptSession, publishSession, reportWorkspaceStopped, sendMessage,
@@ -22,7 +22,7 @@ import {
 import { dockerLogins, logins } from './logins.ts';
 import { flushState, getProject, getSession, getWorkspace, isClaudeCredential, saveState, secretsStatus, setClaudeCredential, state, updateSecrets } from './store.ts';
 import {
-  checkClaudeCredential, checkCodexKey, checkSandboxes, clearAgentRejected, clearProfileLimit, getProfile, legacyProfile, rebuildImage, refreshAgents,
+  checkClaudeCredential, checkCodexKey, checkSandboxes, clearAgentRejected, clearProfileLimit, getProfile, rebuildImage, refreshAgents,
   saveCodexApiKey, signOutCodex, system,
 } from './system.ts';
 import {
@@ -61,20 +61,9 @@ function sessionParam(req: Request): Session {
   return session;
 }
 
-function agentParam(req: Request): AgentId {
-  return parse(z.enum(['claude', 'codex']), req.params.agent);
-}
-
 function profileParam(req: Request): Profile {
   const profile = PROFILE_ID.test(String(req.params.profile)) ? getProfile(String(req.params.profile)) : undefined;
   if (!profile) throw new HttpError(404, 'That sign-in was removed.');
-  return profile;
-}
-
-/** The routes from before there could be several sign-ins are about each provider's first. */
-function legacyParam(req: Request): Profile {
-  const profile = legacyProfile(agentParam(req));
-  if (!profile) throw new HttpError(404, 'No such sign-in');
   return profile;
 }
 
@@ -551,13 +540,6 @@ export function createApi(me: AppState['me']): Router {
     await refreshAgents();
   }
 
-  api.put('/secrets/claude', express.json(), async (req, res) => {
-    const { token } = parse(z.object({ token: z.string() }), req.body);
-    const profile = legacyProfile('claude');
-    if (!profile) throw new HttpError(404, 'No such sign-in');
-    res.json(await saveClaudeKey(profile, token));
-  });
-
   api.put('/secrets/github', express.json(), (req, res) => {
     const { token } = parse(z.object({ token: z.string() }), req.body);
     updateSecrets({ githubToken: stripSpace(token) });
@@ -594,45 +576,35 @@ export function createApi(me: AppState['me']): Router {
     res.status(204).end();
   });
 
-  // Each of these has an older form by provider, which means its first sign-in.
-  for (const [route, which] of [['/profiles/:profile', profileParam], ['/agents/:agent', legacyParam]] as const) {
-    api.post(`${route}/login`, express.json(), async (req, res) => {
-      const { method } = parse(z.object({ method: z.enum(['browser', 'device']).optional() }), req.body ?? {});
-      res.status(201).json(await logins.start(loginTarget(which(req)), method));
-    });
+  api.post('/profiles/:profile/login', express.json(), async (req, res) => {
+    const { method } = parse(z.object({ method: z.enum(['browser', 'device']).optional() }), req.body ?? {});
+    res.status(201).json(await logins.start(loginTarget(profileParam(req)), method));
+  });
 
-    api.delete(`${route}/login`, async (req, res) => {
-      await logins.cancel(loginTarget(which(req)));
-      res.status(204).end();
-    });
+  api.delete('/profiles/:profile/login', async (req, res) => {
+    await logins.cancel(loginTarget(profileParam(req)));
+    res.status(204).end();
+  });
 
-    api.post(`${route}/login/code`, express.json(), async (req, res) => {
-      const { code } = parse(z.object({ code: z.string() }), req.body);
-      await logins.submitCode(loginTarget(which(req)), code);
-      res.status(204).end();
-    });
+  api.post('/profiles/:profile/login/code', express.json(), async (req, res) => {
+    const { code } = parse(z.object({ code: z.string() }), req.body);
+    await logins.submitCode(loginTarget(profileParam(req)), code);
+    res.status(204).end();
+  });
 
-    api.get(`${route}/login/output`, (req, res) => {
-      res.type('text/plain').send(logins.output(loginTarget(which(req))));
-    });
+  api.get('/profiles/:profile/login/output', (req, res) => {
+    res.type('text/plain').send(logins.output(loginTarget(profileParam(req))));
+  });
 
-    api.post(`${route}/logout`, async (req, res) => {
-      await signOut(which(req));
-      res.status(204).end();
-    });
-  }
+  api.post('/profiles/:profile/logout', async (req, res) => {
+    await signOut(profileParam(req));
+    res.status(204).end();
+  });
 
   api.put('/profiles/:profile/key', express.json(), async (req, res) => {
     const profile = profileParam(req);
     const { key } = parse(z.object({ key: z.string() }), req.body);
     res.json(profile.agent === 'claude' ? await saveClaudeKey(profile, key) : await saveCodexKey(profile, key));
-  });
-
-  api.put('/agents/codex/api-key', express.json(), async (req, res) => {
-    const { key } = parse(z.object({ key: z.string() }), req.body);
-    const profile = legacyProfile('codex');
-    if (!profile) throw new HttpError(404, 'No such sign-in');
-    res.json(await saveCodexKey(profile, key));
   });
 
   api.post('/agents/refresh', async (_req, res) => {

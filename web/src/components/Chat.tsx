@@ -153,23 +153,27 @@ function AuthNotice({ item, sessionId }: { item: NoticeItem; sessionId: string }
   const signInBlocked = useStore((store) => signInBlocker(store.system) !== null);
   const setLoginProfile = useStore((store) => store.setLoginProfile);
   if (!session) return null;
-  // The sign-in the turn ran on, which can have been moved from since.
-  const profileId = item.profileId && profiles.some((profile) => profile.id === item.profileId) ? item.profileId : profileIdOf(session);
+  // The sign-in the turn ran on, which can have been moved from since. One that's been removed has
+  // nothing left to sign in to, and the conversation went to another, which sending again uses.
+  const ranOn = item.profileId ?? profileIdOf(session);
+  const removed = !profiles.some((profile) => profile.id === ranOn);
+  const profileId = removed ? profileIdOf(session) : ranOn;
   const status = profileStatus(system, profileId);
-  const name = hasSeveral(profiles, session.agent) ? profileLabel(profiles, catalog, profileId, session.agent) : catalog[session.agent].label;
+  const name = hasSeveral(profiles, session.agent) ? profileLabel(profiles, catalog, ranOn, session.agent) : catalog[session.agent].label;
   const ready = isReady(status);
   const lastSent = items?.findLast((entry): entry is UserItem => entry.type === 'user' && !entry.queued);
   const canRetry = ready && session.status === 'idle' && lastSent !== undefined && item.ts >= lastSent.ts;
-  const text = ready
+  const info = ready || removed;
+  const text = info
     ? `This didn’t go through because ${name} wasn’t signed in.`
     : status.rejected
       ? `${name} stopped accepting this sign-in.`
       : `${name} isn’t signed in yet.`;
   return (
-    <div className={`notice ${ready ? 'notice-info' : 'notice-error'}`} role={ready ? undefined : 'alert'} title={item.text}>
-      {ready ? <Info size={15} /> : <AlertTriangle size={15} />}
+    <div className={`notice ${info ? 'notice-info' : 'notice-error'}`} role={info ? undefined : 'alert'} title={item.text}>
+      {info ? <Info size={15} /> : <AlertTriangle size={15} />}
       <span className="notice-text">{text}</span>
-      {!ready && !signInBlocked && (
+      {!info && !signInBlocked && (
         <button type="button" className="button button-small" onClick={() => setLoginProfile(profileId)}>
           {status.rejected ? 'Sign in again' : 'Sign in'}
         </button>

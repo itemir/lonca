@@ -29,12 +29,9 @@ export function defaultProfile(profiles: Profile[], agent: AgentId): Profile | u
 
 const UNKNOWN: ProfileStatus = { signedIn: false };
 
-/**
- * A sign-in's status, which for one that's been removed, or that this page hasn't heard of yet, is
- * signed out. A server from before there were several only says how each provider is signed in.
- */
-export function profileStatus(system: Pick<SystemStatus, 'agents'> & Partial<Pick<SystemStatus, 'profiles'>>, id: string): ProfileStatus {
-  return system.profiles?.[id] ?? (system.profiles ? undefined : system.agents?.[id as AgentId]) ?? UNKNOWN;
+/** A sign-in's status, which for one that's been removed, or that this page hasn't heard of yet, is signed out. */
+export function profileStatus(system: Pick<SystemStatus, 'profiles'>, id: string): ProfileStatus {
+  return system.profiles[id] ?? UNKNOWN;
 }
 
 export function isReady(status: AgentStatus | undefined): boolean {
@@ -88,13 +85,13 @@ export function hasSeveral(profiles: Profile[], agent: AgentId): boolean {
  * Where a conversation that reached a usage limit can move by itself: a sign-in of the same
  * provider that the user chose for this, that's signed in and isn't at a limit itself.
  */
-export function autoSwitchTarget(profiles: Profile[], system: Pick<SystemStatus, 'agents' | 'profiles'>, agent: AgentId, from: string, now = Date.now()): Profile | undefined {
+export function autoSwitchTarget(profiles: Profile[], system: Pick<SystemStatus, 'profiles'>, agent: AgentId, from: string, now = Date.now()): Profile | undefined {
   return profilesOf(profiles, agent).find((profile) => profile.id !== from && profile.autoSwitch
     && isReady(profileStatus(system, profile.id)) && !isLimited(profileStatus(system, profile.id), now));
 }
 
 /** The other signed-in sign-ins a conversation stopped by a limit could carry on with, in order. */
-export function continueOptions(profiles: Profile[], system: Pick<SystemStatus, 'agents' | 'profiles'>, agent: AgentId, from: string, now = Date.now()): { available: Profile[]; limited: Profile[] } {
+export function continueOptions(profiles: Profile[], system: Pick<SystemStatus, 'profiles'>, agent: AgentId, from: string, now = Date.now()): { available: Profile[]; limited: Profile[] } {
   const others = profilesOf(profiles, agent).filter((profile) => profile.id !== from && isReady(profileStatus(system, profile.id)));
   return {
     available: others.filter((profile) => !isLimited(profileStatus(system, profile.id), now)),

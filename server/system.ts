@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { AGENTS, PROFILE_ID, defaultProfile, limitEnds } from '../shared/profiles.ts';
+import { PROFILE_ID, limitEnds } from '../shared/profiles.ts';
 import type { AgentId, AgentStatus, Catalog, DockerLoginState, LoginMethod, ModelOption, Profile, ProfileStatus, SystemStatus } from '../shared/types.ts';
 import { LONCA_HOME, PREFIX, paths } from './config.ts';
 import { publish } from './events.ts';
@@ -14,7 +14,6 @@ const LOG_LIMIT = 20000;
 export const system: SystemStatus = {
   sandbox: { state: 'checking' },
   image: { tag: templateTag(), state: 'unknown', log: '' },
-  agents: { claude: { signedIn: false }, codex: { signedIn: false } },
   profiles: {},
   agentsChecked: false,
 };
@@ -25,11 +24,6 @@ export function publishSystem(): void {
 
 export function getProfile(id: string): Profile | undefined {
   return state.profiles.find((profile) => profile.id === id);
-}
-
-/** What the routes from before there could be several sign-ins mean: the first one, or failing that, the default. */
-export function legacyProfile(agent: AgentId): Profile | undefined {
-  return getProfile(agent) ?? defaultProfile(state.profiles, agent);
 }
 
 let checkingSandboxes: Promise<void> | null = null;
@@ -480,14 +474,6 @@ function describeProfile(profile: Profile): ProfileStatus {
   return { signedIn, ...(signedIn ? describeCodexSignIn(login) : {}), rejected: signedIn ? previous?.rejected : undefined, ...limitFields };
 }
 
-function summarize(): void {
-  for (const agent of AGENTS) {
-    const profile = legacyProfile(agent);
-    const status = profile ? system.profiles[profile.id] : undefined;
-    system.agents[agent] = status ? { signedIn: status.signedIn, summary: status.summary, usesKey: status.usesKey, rejected: status.rejected } : { signedIn: false };
-  }
-}
-
 /** Every sign-in's status from what's saved, without asking anything that takes a while. */
 export function describeProfiles(): void {
   // A limit that's over has nothing more to say.
@@ -500,7 +486,6 @@ export function describeProfiles(): void {
     }
   }
   system.profiles = Object.fromEntries(state.profiles.map((profile) => [profile.id, describeProfile(profile)]));
-  summarize();
 }
 
 /** What's saved here decides this. The CLIs' own status commands only read the same things. */
@@ -538,14 +523,12 @@ export function markAgentRejected(profileId: string): void {
   const status = system.profiles[profileId];
   if (!status || status.rejected || !status.signedIn) return;
   system.profiles[profileId] = { ...status, rejected: true };
-  summarize();
   publishSystem();
 }
 
 export function clearAgentRejected(profileId: string): void {
   const status = system.profiles[profileId];
   if (status) system.profiles[profileId] = { ...status, rejected: undefined };
-  summarize();
 }
 
 /** A turn on this sign-in reached its usage limit. Saved, so that a restart doesn't move conversations straight back to it. */

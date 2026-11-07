@@ -90,7 +90,7 @@ export const logins = new LoginManager({
     await refreshAgents();
     return true;
   },
-  publish: ({ agent, profileId }, login) => publish({ type: 'login', agent, profileId, login }),
+  publish: ({ profileId }, login) => publish({ type: 'login', profileId, login }),
 });
 
 export const dockerLogins = new DockerLoginManager({

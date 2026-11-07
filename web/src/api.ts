@@ -42,7 +42,7 @@ export const api = {
     request<Project>('PATCH', `/projects/${id}`, patch),
   removeProject: (id: string) => request<void>('DELETE', `/projects/${id}`),
   branches: (id: string) => request<string[]>('GET', `/projects/${id}/branches`),
-  createWorkspace: (projectId: string, options: { baseBranch?: string; agent?: AgentId; model?: string; effort?: string; prompt?: string } = {}) =>
+  createWorkspace: (projectId: string, options: { baseBranch?: string; agent?: AgentId; model?: string; effort?: string; profileId?: string; prompt?: string } = {}) =>
     request<{ workspace: Workspace; session: Session }>('POST', `/projects/${projectId}/workspaces`, options),
 
   renameWorkspace: (id: string, title: string) => request<Workspace>('PATCH', `/workspaces/${id}`, { title }),

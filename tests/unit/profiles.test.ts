@@ -108,8 +108,6 @@ describe('what each sign-in gets', () => {
     system.describeProfiles();
     expect(system.system.profiles[personal.id]).toMatchObject({ signedIn: true, usesKey: false });
     expect(system.system.profiles.codex).toMatchObject({ signedIn: true, usesKey: true });
-    // The summary pages from before there could be several read is the first one's.
-    expect(system.system.agents.codex).toMatchObject({ signedIn: true, usesKey: true });
     system.signOutCodex(personal.id);
     expect(fs.existsSync(boundaryFile(personal.id))).toBe(false);
     expect(fs.readFileSync(boundaryFile('codex'), 'utf8')).toBe('sk-the-first-ones-key');
@@ -139,6 +137,35 @@ describe('what each sign-in gets', () => {
     expect(notices(session.id)).toEqual(['Moved from Claude – personal to Claude – work because Claude – personal was removed.']);
     // The last one goes by signing out.
     await expect(profiles.removeProfile(store.state.profiles[0])).rejects.toThrow(/keeps at least one sign-in/);
+  });
+
+  it('keeps one when two are removed at once', async () => {
+    const personal = profiles.createProfile('claude', 'personal', 'work');
+    const results = await Promise.allSettled([profiles.removeProfile(store.state.profiles[0]), profiles.removeProfile(personal)]);
+    expect(results.map((result) => result.status)).toEqual(['fulfilled', 'rejected']);
+    expect(store.state.profiles.filter((profile) => profile.agent === 'claude').map((profile) => profile.id)).toEqual([personal.id]);
+  });
+
+  it('won’t remove the first while a turn from before there could be several runs on it', async () => {
+    const personal = profiles.createProfile('claude', 'personal', 'work');
+    const workspace = { id: 'w', projectId: 'project', name: 'prague', sandboxName: 'vm', status: 'creating', steps: [] } as unknown as Workspace;
+    store.state.workspaces.push(workspace);
+    const session = runner.createSession(workspace, { agent: 'claude' });
+    // Saved as running with no note of which, then moved, which only counts from its next turn.
+    Object.assign(session, { status: 'running', profileId: personal.id, activeProfileId: undefined });
+    await expect(profiles.removeProfile(store.state.profiles[0])).rejects.toThrow(/A conversation is running on Claude – work/);
+  });
+
+  it('drops what the proxy reads for a Claude sign-in once its token has gone, even after a sign-out cut short', async () => {
+    const personal = profiles.createProfile('claude', 'personal', 'work');
+    store.setClaudeCredential(personal.id, 'sk-ant-api03-signed-out');
+    expect(fs.existsSync(boundaryFile(personal.id))).toBe(true);
+    // As if signing out had saved the secrets and stopped before the proxy's file went.
+    fs.writeFileSync(path.join(home, 'secrets.json'), '{}');
+    store.flushState();
+    vi.resetModules();
+    store = await import('../../server/store.ts');
+    expect(fs.existsSync(boundaryFile(personal.id))).toBe(false);
   });
 });
 
@@ -207,7 +234,7 @@ describe('the environment of a turn', () => {
 describe('where a conversation can go at a limit', () => {
   const profile = (id: string, agent: 'claude' | 'codex', autoSwitch?: boolean): Profile => ({ id, agent, name: id, createdAt: 0, autoSwitch });
   const list = [profile('claude', 'claude'), profile('claude-aaaaaaaaaaaa', 'claude', true), profile('claude-bbbbbbbbbbbb', 'claude', true), profile('codex', 'codex', true)];
-  const status = (statuses: SystemStatus['profiles']) => ({ agents: {}, profiles: statuses, agentsChecked: true }) as unknown as SystemStatus;
+  const status = (statuses: SystemStatus['profiles']) => ({ profiles: statuses, agentsChecked: true }) as unknown as SystemStatus;
   const ready = { signedIn: true };
 
   it('only moves to one the user chose, that’s signed in, of the same provider, and not at a limit itself', () => {
@@ -355,6 +382,38 @@ describe('moving a conversation', () => {
       await team.limitReached(session, 'claude');
       expect(session.profileId).toBe('claude');
       expect(notices(session.id)).toEqual([]);
+    });
+
+    it('stays put once someone pressed Stop, even if the limit came just before', async () => {
+      personal.autoSwitch = true;
+      atLimit();
+      await team.limitReached(session, 'claude', true);
+      expect(session).toMatchObject({ profileId: 'claude', lastOutcome: 'limit', held: true });
+      expect(notices(session.id)).toEqual([]);
+    });
+
+    it('stays at its limit when carrying on can’t be saved, so it still says so and the Lead hears', async () => {
+      personal.autoSwitch = true;
+      const agent = runner.createSession(workspace, { role: 'agent', agent: 'claude', work: { job: 'analyze' } });
+      Object.assign(agent, { hasMessages: true, lastOutcome: 'limit', limitProfileId: 'claude', held: true, work: { job: 'analyze', unreported: true } });
+      store.state.profileLimits = { claude: { at: Date.now() } };
+      system.describeProfiles();
+      // Only the message that would carry it on fails to save, once.
+      const append = fs.appendFileSync;
+      let failed = false;
+      const failing = vi.spyOn(fs, 'appendFileSync').mockImplementation(((...args: Parameters<typeof fs.appendFileSync>) => {
+        if (!failed && String(args[1]).includes('Continue where you left off')) {
+          failed = true;
+          throw new Error('ENOSPC: no space left on device');
+        }
+        return append(...args);
+      }) as typeof fs.appendFileSync);
+      try {
+        await expect(team.limitReached(agent, 'claude')).rejects.toThrow(/could not be saved/);
+      } finally {
+        failing.mockRestore();
+      }
+      expect(agent).toMatchObject({ profileId: personal.id, lastOutcome: 'limit', limitProfileId: 'claude', held: true, queue: [], work: { unreported: true } });
     });
 
     it('lets a Lead move its agent only where it may, and says so in the agent’s conversation', async () => {
