@@ -175,7 +175,7 @@ export function Sidebar() {
       </nav>
       <div className="sidebar-scroll">
         <div className="sidebar-section">
-          <span>My workspaces</span>
+          <span>My projects</span>
           <IconButton label="Add a project" onClick={() => setAddProjectOpen(true)}><Plus size={15} /></IconButton>
         </div>
         {projects.length === 0 && (
