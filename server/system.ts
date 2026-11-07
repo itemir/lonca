@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { AgentId, AgentStatus, Catalog, DockerLoginState, LoginMethod, ModelOption, SystemStatus } from '../shared/types.ts';
+import { PROFILE_ID, limitEnds } from '../shared/profiles.ts';
+import type { AgentId, AgentStatus, Catalog, DockerLoginState, LoginMethod, ModelOption, Profile, ProfileStatus, SystemStatus } from '../shared/types.ts';
 import { LONCA_HOME, PREFIX, paths } from './config.ts';
 import { publish } from './events.ts';
 import { SandboxError, type TemplateImage, buildTemplate, cleanUpTemplateBuild, detectSandboxes, ensureSandbox, exec, imageNamed, isSandboxRunning, listTemplates, ownTemplateImages, removableImages, removeSandbox, removeTemplateImage, templateLoaded, templateTag } from './sandbox.ts';
-import { getSecrets, saveState, setBoundaryValue, state, writeAtomic } from './store.ts';
+import { claudeCredential, saveState, setBoundaryValue, state, writeAtomic } from './store.ts';
 import { KeyedQueue, errorMessage } from './util.ts';
 
 const LOG_LIMIT = 20000;
@@ -13,12 +14,16 @@ const LOG_LIMIT = 20000;
 export const system: SystemStatus = {
   sandbox: { state: 'checking' },
   image: { tag: templateTag(), state: 'unknown', log: '' },
-  agents: { claude: { signedIn: false }, codex: { signedIn: false } },
+  profiles: {},
   agentsChecked: false,
 };
 
-function publishSystem(): void {
+export function publishSystem(): void {
   publish({ type: 'system', system, catalog: state.catalog });
+}
+
+export function getProfile(id: string): Profile | undefined {
+  return state.profiles.find((profile) => profile.id === id);
 }
 
 let checkingSandboxes: Promise<void> | null = null;
@@ -247,16 +252,16 @@ function withoutIncidentalKey(authJson: string): string {
 
 // Only this server writes the login. A CLI that needs it gets a copy, so that nothing it does
 // meanwhile, or leaves behind, can undo signing out or replace something newer.
-function saveCodexLogin(authJson: string): void {
-  fs.mkdirSync(path.dirname(hostCodexLogin()), { recursive: true, mode: 0o700 });
-  writeAtomic(hostCodexLogin(), withoutIncidentalKey(authJson), 0o600);
-  shareCodexCredentialWithProxy();
+function saveCodexLogin(authJson: string, profileId = 'codex'): void {
+  fs.mkdirSync(path.dirname(hostCodexLogin(profileId)), { recursive: true, mode: 0o700 });
+  writeAtomic(hostCodexLogin(profileId), withoutIncidentalKey(authJson), 0o600);
+  shareCodexCredentialWithProxy(profileId);
 }
 
 /** After `codex login` has finished. A file that isn't a whole login isn't taken for one. */
-export function adoptCodexLogin(authJson: string): boolean {
+export function adoptCodexLogin(authJson: string, profileId = 'codex'): boolean {
   if (!codexCredential(authJson)) return false;
-  saveCodexLogin(authJson);
+  saveCodexLogin(authJson, profileId);
   return true;
 }
 
@@ -292,11 +297,17 @@ async function checkAgents(): Promise<void> {
   }
 }
 
-const hostCodexLogin = () => path.join(paths.helperCredentials, 'codex', 'auth.json');
+/** Each Codex sign-in's login is in a directory named after it. The first one's is where it always was. */
+function codexLoginDir(profileId: string): string {
+  if (!PROFILE_ID.test(profileId) || !profileId.startsWith('codex')) throw new Error('That isn’t a Codex sign-in.');
+  return path.join(paths.helperCredentials, profileId);
+}
 
-function readCodexLogin(): string {
+const hostCodexLogin = (profileId = 'codex') => path.join(codexLoginDir(profileId), 'auth.json');
+
+function readCodexLogin(profileId = 'codex'): string {
   try {
-    return fs.readFileSync(hostCodexLogin(), 'utf8');
+    return fs.readFileSync(hostCodexLogin(profileId), 'utf8');
   } catch {
     return '';
   }
@@ -326,9 +337,11 @@ function tokenExpiry(token: string): number | undefined {
   }
 }
 
-function shareCodexCredentialWithProxy(): void {
-  setBoundaryValue('codex', codexCredential(readCodexLogin())?.value);
+function shareCodexCredentialWithProxy(profileId = 'codex'): void {
+  setBoundaryValue(profileId, codexCredential(readCodexLogin(profileId))?.value);
 }
+
+const codexProfiles = () => state.profiles.filter((profile) => profile.agent === 'codex');
 
 const MAX_LOGIN_BYTES = 65536;
 
@@ -393,6 +406,9 @@ export function moveCodexLogin(): void {
   const login = readCodexLogin();
   if (codexCredential(login) && withoutIncidentalKey(login) !== login) saveCodexLogin(login);
   shareCodexCredentialWithProxy();
+  for (const profile of codexProfiles()) {
+    if (profile.id !== 'codex') shareCodexCredentialWithProxy(profile.id);
+  }
 }
 
 // A sign-in lasts about ten days. A CLI inside a workspace can't renew one it never had, so one in
@@ -428,8 +444,8 @@ with tempfile.TemporaryDirectory() as home:
         sys.stdout.write(file.read())
 `;
 
-async function renewCodexLogin(): Promise<void> {
-  const current = readCodexLogin();
+async function renewCodexLogin(profileId = 'codex'): Promise<void> {
+  const current = readCodexLogin(profileId);
   const login = codexCredential(current);
   if (!login?.expiresAt || login.expiresAt - Date.now() > RENEW_WITHIN_MS || system.sandbox.state !== 'ready') return;
   try {
@@ -437,31 +453,48 @@ async function renewCodexLogin(): Promise<void> {
     const renewed = result.stdout.toString('utf8');
     const after = codexCredential(renewed);
     if (result.code !== 0 || !after) throw new Error(result.stderr.toString('utf8').trim());
-    // Signing out or in while this ran counts for more.
-    if (readCodexLogin() === current) saveCodexLogin(renewed);
+    // Signing out or in while this ran counts for more, and so does removing the sign-in.
+    if (readCodexLogin(profileId) === current && getProfile(profileId)) saveCodexLogin(renewed, profileId);
     if (after.expiresAt === login.expiresAt) throw new Error('it still runs out when it did');
   } catch (error) {
-    console.error('could not renew the Codex sign-in:', errorMessage(error));
+    console.error(`could not renew the Codex sign-in ${profileId}:`, errorMessage(error));
   }
+}
+
+function describeProfile(profile: Profile): ProfileStatus {
+  const previous = system.profiles[profile.id];
+  const limit = state.profileLimits?.[profile.id];
+  const limitFields = limit ? { limitedAt: limit.at, limitResetsAt: limit.resetsAt } : {};
+  if (profile.agent === 'claude') {
+    const token = claudeCredential(profile.id);
+    return { signedIn: Boolean(token), ...describeClaudeSignIn(token), rejected: token ? previous?.rejected : undefined, ...limitFields };
+  }
+  const login = readCodexLogin(profile.id);
+  const signedIn = codexCredential(login) !== null;
+  return { signedIn, ...(signedIn ? describeCodexSignIn(login) : {}), rejected: signedIn ? previous?.rejected : undefined, ...limitFields };
+}
+
+/** Every sign-in's status from what's saved, without asking anything that takes a while. */
+export function describeProfiles(): void {
+  // A limit that's over has nothing more to say.
+  const now = Date.now();
+  for (const [id, limit] of Object.entries(state.profileLimits ?? {})) {
+    if (!getProfile(id) || (limitEnds({ signedIn: true, limitedAt: limit.at, limitResetsAt: limit.resetsAt }) ?? 0) < now) {
+      const { [id]: _over, ...rest } = state.profileLimits!;
+      state.profileLimits = rest;
+      saveState();
+    }
+  }
+  system.profiles = Object.fromEntries(state.profiles.map((profile) => [profile.id, describeProfile(profile)]));
 }
 
 /** What's saved here decides this. The CLIs' own status commands only read the same things. */
 async function readAgentStatus(): Promise<void> {
-  await renewCodexLogin();
-  shareCodexCredentialWithProxy();
-  const token = getSecrets().claudeToken;
-  system.agents.claude = {
-    signedIn: Boolean(token),
-    ...describeClaudeSignIn(token),
-    rejected: token ? system.agents.claude.rejected : undefined,
-  };
-  const login = readCodexLogin();
-  const signedIn = codexCredential(login) !== null;
-  system.agents.codex = {
-    signedIn,
-    ...(signedIn ? describeCodexSignIn(login) : {}),
-    rejected: signedIn ? system.agents.codex.rejected : undefined,
-  };
+  for (const profile of codexProfiles()) {
+    await renewCodexLogin(profile.id);
+    shareCodexCredentialWithProxy(profile.id);
+  }
+  describeProfiles();
 }
 
 let checking: Promise<void> | null = null;
@@ -485,15 +518,42 @@ export function refreshAgents(): Promise<void> {
   return checkingAgain;
 }
 
-/** A turn failed because the agent's service refused its credentials, whatever the CLI said about them. */
-export function markAgentRejected(agent: AgentId): void {
-  if (system.agents[agent].rejected || !system.agents[agent].signedIn) return;
-  system.agents[agent] = { ...system.agents[agent], rejected: true };
+/** A turn failed because the agent's service refused this sign-in's credentials, whatever the CLI said about them. */
+export function markAgentRejected(profileId: string): void {
+  const status = system.profiles[profileId];
+  if (!status || status.rejected || !status.signedIn) return;
+  system.profiles[profileId] = { ...status, rejected: true };
   publishSystem();
 }
 
-export function clearAgentRejected(agent: AgentId): void {
-  system.agents[agent] = { ...system.agents[agent], rejected: undefined };
+export function clearAgentRejected(profileId: string): void {
+  const status = system.profiles[profileId];
+  if (status) system.profiles[profileId] = { ...status, rejected: undefined };
+}
+
+/** A turn on this sign-in reached its usage limit. Saved, so that a restart doesn't move conversations straight back to it. */
+export function markProfileLimited(profileId: string, resetsAt?: number): void {
+  if (!getProfile(profileId)) return;
+  state.profileLimits = { ...state.profileLimits, [profileId]: { at: Date.now(), ...(resetsAt ? { resetsAt } : {}) } };
+  saveState();
+  const status = system.profiles[profileId] ?? { signedIn: false };
+  system.profiles[profileId] = { ...status, limitedAt: Date.now(), limitResetsAt: resetsAt };
+  publishSystem();
+}
+
+/**
+ * A turn on it worked, or it's a different sign-in now, so whatever limit it had is over. A turn
+ * that began before the limit was reached says nothing about it, so one from `since` then leaves it.
+ */
+export function clearProfileLimit(profileId: string, since?: number): void {
+  const limits = state.profileLimits;
+  if (!limits?.[profileId] || (since !== undefined && since < limits[profileId].at)) return;
+  const { [profileId]: _over, ...rest } = limits;
+  state.profileLimits = rest;
+  saveState();
+  const status = system.profiles[profileId];
+  if (status) system.profiles[profileId] = { ...status, limitedAt: undefined, limitResetsAt: undefined };
+  publishSystem();
 }
 
 export type CredentialCheck = 'accepted' | 'refused' | 'unknown';
@@ -574,11 +634,17 @@ export function agentLoginCommand(agent: AgentId, method: LoginMethod): string[]
   return method === 'device' ? ['codex', 'login', '--device-auth'] : ['codex', 'login'];
 }
 
-export function signOutCodex(): void {
-  fs.rmSync(hostCodexLogin(), { force: true });
-  shareCodexCredentialWithProxy();
+export function signOutCodex(profileId = 'codex'): void {
+  fs.rmSync(hostCodexLogin(profileId), { force: true });
+  shareCodexCredentialWithProxy(profileId);
 }
 
-export function saveCodexApiKey(key: string): void {
-  saveCodexLogin(JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: key }));
+/** For a sign-in that's been removed, which leaves nothing behind. */
+export function forgetCodexLogin(profileId: string): void {
+  fs.rmSync(codexLoginDir(profileId), { recursive: true, force: true });
+  setBoundaryValue(profileId, undefined);
+}
+
+export function saveCodexApiKey(key: string, profileId = 'codex'): void {
+  saveCodexLogin(JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: key }), profileId);
 }

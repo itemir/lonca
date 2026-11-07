@@ -21,6 +21,8 @@ export interface TurnContext {
   attachments: Attachment[];
   /** How the CLI starts the Lead's tools, for a Lead. */
   tools?: { command: string; args: string[] };
+  /** Settings for this process alone, such as where its sign-in is used. */
+  config?: string[];
 }
 
 export interface AgentAdapter {

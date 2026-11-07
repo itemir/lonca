@@ -2,18 +2,22 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import type { Project, Session, Workspace, WorkspaceOperation } from '../../shared/types.ts';
+import type { Profile, Project, Session, Workspace, WorkspaceOperation } from '../../shared/types.ts';
 import { archiveWorkspace, deleteWorkspace, markInterruptedWork, retryWorkspace, runningSandbox, setSetupScriptStarter } from '../../server/workspaces.ts';
 import { RuntimeStoppedError } from '../../server/util.ts';
 
 const { state, flushState, execText, ensureSandbox, stopSandbox } = vi.hoisted(() => ({
-  state: { projects: [] as Project[], workspaces: [] as Workspace[], sessions: [] as Session[] },
+  state: {
+    projects: [] as Project[], workspaces: [] as Workspace[], sessions: [] as Session[],
+    profiles: [{ id: 'claude', agent: 'claude', name: '' }, { id: 'codex', agent: 'codex', name: '' }] as Profile[],
+  },
   flushState: vi.fn(), execText: vi.fn(async () => ''), ensureSandbox: vi.fn(async () => 'box'), stopSandbox: vi.fn(async () => {}),
 }));
 
 vi.mock('../../server/store.ts', () => ({ state, flushState, saveState: vi.fn(), deleteTranscript: vi.fn(),
   getProject: (id: string) => state.projects.find((entry) => entry.id === id),
   getWorkspace: (id: string) => state.workspaces.find((entry) => entry.id === id), getSecrets: () => ({}), boundaryValue: () => undefined,
+  claudeCredential: () => undefined,
 }));
 vi.mock('../../server/system.ts', () => ({ system: { sandbox: { state: 'ready' } },
   ensureSandboxImage: vi.fn(), ensureCustomTemplate: vi.fn(), checkSandboxes: vi.fn(),

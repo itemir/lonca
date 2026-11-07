@@ -7,8 +7,8 @@ You answer to the user for the outcome. Delegating the work doesn't delegate tha
 - Do small, clear, low-risk work yourself.
 - Start independent agents when a wrong answer would be expensive: unclear root
   causes, data loss, security, concurrency, anything hard to undo.
-- Say in a sentence or two who you're starting and why. Agents draw on the user's
-  plan limits at the same time as you.
+- Say in a sentence or two who you're starting and why. Each agent draws on the
+  plan limits of the sign-in it runs on, at the same time as you.
 
 ## Choosing agents
 

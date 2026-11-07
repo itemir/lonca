@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { ArrowUp, Paperclip, Plus, Square, X } from 'lucide-react';
 import { create } from 'zustand';
 import { canRun } from '../../../shared/lead.ts';
+import { hasSeveral, profileIdOf, profileLabel, profileStatus } from '../../../shared/profiles.ts';
 import type { Attachment, Session, Workspace } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { isTouch } from '../hooks.ts';
@@ -25,9 +26,11 @@ const updateDraft = (sessionId: string, update: (draft: Draft) => Draft) => {
 
 export function Composer({ session, workspace }: { session: Session; workspace: Workspace }) {
   const catalog = useStore((store) => store.catalog);
-  const agentStatus = useStore((store) => store.system.agents[session.agent]);
-  const cantRun = useStore((store) => !canRun(session.agent, store.system, store.projects.find((entry) => entry.id === workspace.projectId)));
-  const setLoginAgent = useStore((store) => store.setLoginAgent);
+  const profileId = profileIdOf(session);
+  const agentStatus = useStore((store) => profileStatus(store.system, profileId));
+  const cantRun = useStore((store) => !canRun(session, store.system, store.projects.find((entry) => entry.id === workspace.projectId)));
+  const signInName = useStore((store) => (hasSeveral(store.profiles, session.agent) ? profileLabel(store.profiles, store.catalog, profileId, session.agent) : null));
+  const setLoginProfile = useStore((store) => store.setLoginProfile);
   // A sign-in error at the end of the chat already says this, right above.
   const justAsked = useStore((store) => {
     const items = store.transcripts[session.id]?.items;
@@ -100,6 +103,11 @@ export function Composer({ session, workspace }: { session: Session; workspace: 
   };
 
   const changeModel = (choice: ModelChoice) => {
+    // Once it's started, another sign-in is a move, which the conversation records.
+    if (choice.agent === session.agent && choice.profileId && choice.profileId !== profileId && session.hasMessages) {
+      void attempt(() => api.moveSession(session.id, choice.profileId!));
+      return;
+    }
     void attempt(() => api.updateSession(session.id, choice));
   };
 
@@ -122,8 +130,8 @@ export function Composer({ session, workspace }: { session: Session; workspace: 
       )}
       {cantRun && !justAsked && (
         <div className="composer-hint">
-          {agentStatus.rejected ? `${agentLabel} stopped accepting this sign-in.` : `${agentLabel} isn’t signed in yet.`}
-          <button type="button" className="link-button" onClick={() => setLoginAgent(session.agent)}>
+          {agentStatus.rejected ? `${signInName ?? agentLabel} stopped accepting this sign-in.` : `${signInName ?? agentLabel} isn’t signed in yet.`}
+          <button type="button" className="link-button" onClick={() => setLoginProfile(profileId)}>
             {agentStatus.rejected ? 'Sign in again' : 'Sign in'}
           </button>
         </div>
@@ -177,7 +185,7 @@ export function Composer({ session, workspace }: { session: Session; workspace: 
           {locked ? <LockedModel session={session} /> : (
             <ModelPicker
               catalog={catalog}
-              value={{ agent: session.agent, model: session.model, effort: session.effort }}
+              value={{ agent: session.agent, model: session.model, effort: session.effort, profileId }}
               lockAgent={session.hasMessages}
               onChange={changeModel}
             />
