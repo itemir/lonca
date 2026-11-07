@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { canRun } from '../../shared/lead.ts';
+import { canRun, isWorking } from '../../shared/lead.ts';
 import { UNKNOWN_LIMIT_MS, autoSwitchTarget, continueOptions, isLimited, leadDefaultFor, leadMayUse, profileIdOf } from '../../shared/profiles.ts';
 import type { ChatItem, NoticeItem, Profile, Project, Session, SystemStatus, UserItem, Workspace } from '../../shared/types.ts';
 import type { ToolCall } from '../../server/agents/process.ts';
@@ -427,6 +427,20 @@ describe('moving a conversation', () => {
       await team.limitReached(session, 'claude', true);
       expect(session).toMatchObject({ profileId: 'claude', lastOutcome: 'limit', held: true });
       expect(notices(session.id)).toEqual([]);
+    });
+
+    it('holds its continuation when Stop arrives while that waits for the workspace', async () => {
+      personal.autoSwitch = true;
+      atLimit();
+      await team.limitReached(session, 'claude');
+      expect(queued()).toHaveLength(1);
+      expect(isWorking(session)).toBe(true);
+      // What the Stop route does, which finds no turn running yet.
+      team.holdWhenStopped(session);
+      await runner.interruptSession(session.id);
+      expect(session).toMatchObject({ held: true, userStopped: true });
+      expect(queued()).toHaveLength(1);
+      expect(isWorking(session)).toBe(false);
     });
 
     it('stays at its limit if carrying on can’t be saved, or the server stops first, so it says so and the Lead hears', async () => {

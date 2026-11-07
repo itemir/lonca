@@ -460,7 +460,7 @@ export function createApi(me: AppState['me']): Router {
 
   api.post('/sessions/:id/interrupt', async (req, res) => {
     const session = getSession(String(req.params.id));
-    // Neither a wake nor the Lead can restart what the user has stopped.
+    // Neither a wake, the Lead nor a move at a usage limit can restart what the user has stopped.
     if (session) holdWhenStopped(session);
     await interruptSession(String(req.params.id));
     res.status(204).end();

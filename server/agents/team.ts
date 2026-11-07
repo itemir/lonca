@@ -513,9 +513,13 @@ setTeamHooks({
   limitReached,
 });
 
-/** Stopped by the user means stopped until the user says otherwise, whatever a Lead or a wake wants. */
+/**
+ * Stopped by the user means stopped until the user says otherwise, whatever a Lead, a wake or a move
+ * to another sign-in wants. That includes what's queued but hasn't started, such as a continuation
+ * waiting for its workspace when Stop arrives.
+ */
 export function holdWhenStopped(session: Session): void {
-  if (!session.role || session.userStopped) return;
+  if (session.userStopped) return;
   session.held = true;
   session.userStopped = true;
   publishSession(session);
