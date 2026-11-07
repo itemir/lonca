@@ -60,6 +60,7 @@ export const api = {
     request<void>('POST', `/workspaces/${id}/${action}`),
   /** Archives without asking, unless the server finds something the user should be asked about first. */
   archiveUnasked: (id: string) => request<{ ask: true; agentWorking: boolean } | undefined>('POST', `/workspaces/${id}/archive`, { asked: false }),
+  closePort: (id: string, port: number) => request<void>('DELETE', `/workspaces/${id}/ports/${port}`),
 
   listFiles: (id: string, path: string) => request<FileEntry[]>('GET', `/workspaces/${id}/files?${query({ path })}`),
   readFile: (id: string, path: string) => request<FileContent>('GET', `/workspaces/${id}/file?${query({ path })}`),

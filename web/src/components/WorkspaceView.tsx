@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
-  AlertCircle, Archive, ArchiveRestore, Box, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Copy, Crown, Diff, File as FileIcon, Folder, GitBranch, Globe, Info, Layers, MoreHorizontal, PanelLeft,
-  PanelRight, Pause, Pencil, Play, Plus, RotateCcw, Settings as SettingsIcon, Trash2, Users, X,
+  AlertCircle, Archive, ArchiveRestore, ArrowRightLeft, Box, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Copy, Crown, Diff, File as FileIcon, Folder, GitBranch, Globe, Info, Layers, MoreHorizontal,
+  PanelLeft, PanelRight, Pause, Pencil, Play, Plus, RotateCcw, Settings as SettingsIcon, Trash2, Users, X,
 } from 'lucide-react';
 import { profileIdOf } from '../../../shared/profiles.ts';
-import type { Project, Session, Workspace, WorkspaceStep } from '../../../shared/types.ts';
+import type { PortForward, Project, Session, Workspace, WorkspaceStep } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { basename, effortLabel } from '../format.ts';
 import { useIsPhone } from '../hooks.ts';
@@ -24,6 +24,15 @@ import { CloseLeadDialog, NoLead, SessionBanner, StatusGlyph, TabsSheet, TeamAct
 import { Avatar, ConfirmDialog, type ConfirmOptions, IconButton, Menu, Modal, Spinner } from './ui.tsx';
 
 const portUrl = (workspace: Workspace) => `http://localhost:${workspace.port}`;
+const forwardUrl = (forward: PortForward) => `http://localhost:${forward.hostPort}`;
+const forwardLabel = (forward: PortForward) => `localhost:${forward.hostPort} → ${forward.port}`;
+
+/** A stopped VM forwards nothing, even if a record of one is left until it starts again. */
+const liveForwards = (workspace: Workspace) => (workspace.status === 'ready' ? workspace.forwards ?? [] : []);
+
+function closeForward(workspace: Workspace, forward: PortForward): void {
+  void attempt(() => api.closePort(workspace.id, forward.port));
+}
 
 function copyPath(workspace: Workspace): void {
   void navigator.clipboard.writeText(workspace.path);
@@ -90,6 +99,19 @@ function WorkspaceIntro({ workspace, project, session, hasLead }: { workspace: W
         {workspace.status === 'ready' && (
           <StepRow step={undefined} icon={<Globe size={16} />}>
             A server listening on <code>0.0.0.0</code> opens at <a href={portUrl(workspace)} target="_blank" rel="noreferrer">localhost:{workspace.port} ↗</a>. That port is in <code>$LONCA_PORT</code>, and the next nine are published too.
+          </StepRow>
+        )}
+        {liveForwards(workspace).length > 0 && (
+          <StepRow step={undefined} icon={<ArrowRightLeft size={16} />}>
+            Forwarded by the Lead:{' '}
+            {liveForwards(workspace).map((forward) => (
+              <span key={forward.port} className="forward">
+                <a href={forwardUrl(forward)} target="_blank" rel="noreferrer">{forwardLabel(forward)} ↗</a>
+                <button type="button" className="forward-close" aria-label={`Stop forwarding ${forwardLabel(forward)}`} title="Stop forwarding" onClick={() => closeForward(workspace, forward)}>
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
           </StepRow>
         )}
         {session.role === 'lead' && !session.hasMessages && (
@@ -262,6 +284,10 @@ function WorkspaceHeader({ workspace, project, earlierLeads, onReadLead, phone }
           { label: 'Open in Cursor', icon: <Code2 size={14} />, onSelect: () => openInEditor('Cursor', 'cursor') },
           { label: 'Copy path', icon: <Copy size={14} />, onSelect: () => copyPath(workspace) },
           { label: `Open localhost:${workspace.port}`, icon: <Globe size={14} />, disabled: !running, onSelect: () => window.open(portUrl(workspace), '_blank', 'noopener,noreferrer') },
+          ...liveForwards(workspace).flatMap((forward) => [
+            { label: `Open ${forwardLabel(forward)}`, icon: <ArrowRightLeft size={14} />, onSelect: () => window.open(forwardUrl(forward), '_blank', 'noopener,noreferrer') },
+            { label: `Stop forwarding ${forwardLabel(forward)}`, icon: <X size={14} />, onSelect: () => closeForward(workspace, forward) },
+          ]),
         ]}
       />
       <IconButton className="panel-toggle" label={rightOpen ? 'Hide the side panel' : note ? `Show the side panel. ${note.text}` : 'Show the side panel'} onClick={toggleRight}>
