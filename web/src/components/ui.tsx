@@ -1,4 +1,4 @@
-import { Component, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { Component, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { useOutsideClick } from '../hooks.ts';
@@ -195,6 +195,36 @@ export class ErrorBoundary extends Component<{ children: ReactNode; compact?: bo
   }
 }
 
+// The browser turns each spinner itself, like a GIF, so it keeps turning while the page is busy.
+// Every spinner's animation counts from the start of the page's clock rather than from when it
+// appeared, so all of them show the same angle, and one that remounts doesn't start over at zero.
+function alignSpin(element: Element) {
+  for (const animation of element.getAnimations()) animation.startTime = 0;
+}
+
 export function Spinner({ size = 14 }: { size?: number }) {
-  return <span className="spinner" style={{ width: size, height: size }} role="img" aria-label="Working" />;
+  const ring = useRef<SVGSVGElement>(null);
+  // Before paint, so a new spinner appears at the shared angle rather than at zero for a frame.
+  // The browser makes a new animation when a hidden spinner is shown again or reduced motion is
+  // turned off, hence onAnimationStart too, which comes a frame late.
+  useLayoutEffect(() => alignSpin(ring.current!), []);
+  // One unit is one pixel at every size, so the 1.5px stroke needs no scaling and the arc is a
+  // quarter of the ring at every size.
+  const centre = size / 2;
+  const radius = centre - 0.75;
+  return (
+    <svg
+      ref={ring}
+      className="spinner"
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      role="img"
+      aria-label="Working"
+      onAnimationStart={(event) => alignSpin(event.currentTarget)}
+    >
+      <circle className="spinner-track" cx={centre} cy={centre} r={radius} />
+      <circle className="spinner-arc" cx={centre} cy={centre} r={radius} pathLength="100" strokeDasharray="25 75" />
+    </svg>
+  );
 }

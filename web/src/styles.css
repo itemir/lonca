@@ -58,7 +58,6 @@ code { font-family: var(--mono); font-size: 0.93em; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition: none !important; }
-  .spinner { animation: none; }
 }
 
 .boot {
@@ -128,16 +127,36 @@ code { font-family: var(--mono); font-size: 0.93em; }
   .icon-button-danger:hover:not(:disabled) { background: var(--error-bg); color: var(--error); }
 }
 
+/* Spinner in ui.tsx lines every spinner's animation up with the others. */
 .spinner {
   display: inline-block;
   flex: none;
-  border: 1.5px solid var(--line-strong);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+  overflow: visible;
+  animation: spin 0.9s linear infinite;
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* After the rule above, so it wins. A spinner that still animated would jump at random here. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation: none; }
+}
+
+.spinner circle {
+  fill: none;
+  stroke-width: 1.5;
+}
+
+.spinner-track { stroke: var(--line-strong); }
+
+/* The arc starts at twelve o'clock. */
+.spinner-arc {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+  rotate: -90deg;
+}
 
 .avatar {
   flex: none;
@@ -835,7 +854,7 @@ a.crumb:hover { color: var(--text); }
   font-size: 13px;
 }
 
-.workspace-banner > span:not(.spinner) { flex: 1; overflow-wrap: anywhere; }
+.workspace-banner > span { flex: 1; overflow-wrap: anywhere; }
 .workspace-banner.banner-error { background: var(--error-bg); color: var(--error); }
 
 .workspace-content {
