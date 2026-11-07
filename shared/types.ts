@@ -23,7 +23,6 @@ export interface Profile {
   name: string;
   /** Conversations at a usage limit elsewhere can move here by themselves. Off unless the user turns it on. */
   autoSwitch?: boolean;
-  createdAt: number;
 }
 
 /** The model and thinking level a workspace's Lead runs on. */

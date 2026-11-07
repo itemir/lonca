@@ -541,10 +541,14 @@ export function markProfileLimited(profileId: string, resetsAt?: number): void {
   publishSystem();
 }
 
-/** A turn on it worked, or it's a different sign-in now, so whatever limit it had is over. */
-export function clearProfileLimit(profileId: string): void {
-  if (!state.profileLimits?.[profileId]) return;
-  const { [profileId]: _over, ...rest } = state.profileLimits;
+/**
+ * A turn on it worked, or it's a different sign-in now, so whatever limit it had is over. A turn
+ * that began before the limit was reached says nothing about it, so one from `since` then leaves it.
+ */
+export function clearProfileLimit(profileId: string, since?: number): void {
+  const limits = state.profileLimits;
+  if (!limits?.[profileId] || (since !== undefined && since < limits[profileId].at)) return;
+  const { [profileId]: _over, ...rest } = limits;
   state.profileLimits = rest;
   saveState();
   const status = system.profiles[profileId];

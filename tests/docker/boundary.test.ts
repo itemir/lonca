@@ -155,7 +155,8 @@ describe('another sign-in', () => {
     const before = mock.requests.length;
     await lonca.api('POST', `/sessions/${conversation.id}/messages`, { text: 'Hello from the other sign-in' });
     await lonca.waitForIdle(conversation.id);
-    const sent = mock.requests.slice(before).map((request) => request.auth);
+    // What the model was asked with. Claude also says hello, with no credential at all.
+    const sent = mock.requests.slice(before).filter((request) => request.path.endsWith('/messages')).map((request) => request.auth);
     expect(sent.length).toBeGreaterThan(0);
     for (const auth of sent) expect(auth).toContain(placeholder());
     expect(readableInVm()).not.toContain(SECOND);

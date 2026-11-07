@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { defaultProfile, profileIdOf, profileName, profilesOf } from '../shared/profiles.ts';
+import { profileIdOf, profileName, profilesOf } from '../shared/profiles.ts';
 import type { AgentId, Profile } from '../shared/types.ts';
 import { notice, persistSession } from './agents/runner.ts';
 import { profileSecret } from './boundary.ts';
@@ -51,7 +51,7 @@ export function createProfile(agent: AgentId, name: string, firstName?: string):
     existing[0].name = first;
   }
   checkName(agent, clean);
-  const profile: Profile = { id: `${agent}-${crypto.randomBytes(6).toString('hex')}`, agent, name: clean, createdAt: Date.now() };
+  const profile: Profile = { id: `${agent}-${crypto.randomBytes(6).toString('hex')}`, agent, name: clean };
   state.profiles.push(profile);
   publishProfiles();
   statusChanged();
@@ -106,11 +106,11 @@ export async function removeProfile(profile: Profile): Promise<void> {
   if (running.length > 0) {
     throw new HttpError(409, `${running.length === 1 ? 'A conversation is' : `${running.length} conversations are`} running on ${name}. Remove it once ${running.length === 1 ? 'it has' : 'they have'} finished, or stop ${running.length === 1 ? 'it' : 'them'} first.`);
   }
-  // Its credentials go first, so that nothing interrupted leaves them where nothing shows they are.
+  // Its credentials go first, then what was on it, and the sign-in last, so that removing it
+  // again finishes anything that was cut short.
   if (profile.agent === 'claude') setClaudeCredential(profile.id, undefined);
   else forgetCodexLogin(profile.id);
-  state.profiles = state.profiles.filter((entry) => entry !== profile);
-  const fallback = defaultProfile(state.profiles, profile.agent)!;
+  const fallback = profilesOf(state.profiles, profile.agent).find((entry) => entry !== profile)!;
   const fallbackName = profileName(fallback, state.catalog);
   for (const session of state.sessions.filter((entry) => entry.agent === profile.agent && !entry.closedAt && profileIdOf(entry) === profile.id)) {
     if (session.hasMessages) notice(session.id, undefined, 'info', `Moved from ${name} to ${fallbackName} because ${name} was removed.`);
@@ -121,6 +121,7 @@ export async function removeProfile(profile: Profile): Promise<void> {
     workspace.lead = { ...workspace.lead!, profileId: fallback.id };
     publishWorkspace(workspace);
   }
+  state.profiles = state.profiles.filter((entry) => entry !== profile);
   clearProfileLimit(profile.id);
   publish({ type: 'settings', settings: state.settings, secrets: secretsStatus() });
   publishProfiles();

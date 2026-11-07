@@ -1319,7 +1319,8 @@ a.crumb:hover { color: var(--text); }
   overflow-y: auto;
 }
 
-.model-columns { display: flex; }
+/* The models scroll, so a sign-in section under them stays in sight. */
+.model-columns { display: flex; min-height: 0; overflow-y: auto; }
 
 .popover-up { bottom: calc(100% + 6px); }
 .popover-down { top: calc(100% + 6px); }
@@ -1334,7 +1335,7 @@ a.crumb:hover { color: var(--text); }
 
 /* Which of a provider's sign-ins, only shown where it has more than one. */
 .model-sign-in { color: var(--text-3); max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.model-sign-ins { margin-top: 4px; padding-top: 2px; border-top: 1px solid var(--line-strong); }
+.model-sign-ins { flex: none; margin-top: 4px; padding-top: 2px; border-top: 1px solid var(--line-strong); }
 .menu-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .menu-note { margin-left: auto; padding-left: 12px; color: var(--text-3); font-size: 12px; }
 .lock-popover p { margin: 0; }

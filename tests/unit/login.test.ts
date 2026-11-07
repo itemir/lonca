@@ -195,6 +195,9 @@ class FakeProcess implements LoginProcess {
 }
 
 const TIMINGS = { ...LOGIN_TIMINGS, settledMs: 10, echoMs: 10 };
+// Each provider's first sign-in, whose id is the provider's.
+const CLAUDE = { agent: 'claude', profileId: 'claude' } as const;
+const CODEX = { agent: 'codex', profileId: 'codex' } as const;
 
 function setup(overrides: Partial<LoginDriver> = {}, timings = TIMINGS) {
   const processes: FakeProcess[] = [];
@@ -237,7 +240,7 @@ function promptFrames(name: string): Buffer {
 describe('the Claude sign-in', () => {
   it('goes from link to saved token, typing the code as a paste and then Return', async () => {
     const { manager, processes, published, saved } = setup();
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     expect(manager.states().claude?.phase).toBe('starting');
     const process = processes[0];
     process.emit(promptFrames('claude-success'));
@@ -247,7 +250,7 @@ describe('the Claude sign-in', () => {
     expect(waiting.url).toBeUndefined();
     const state = new URL(waiting.pasteUrl!).searchParams.get('state');
 
-    const submitted = manager.submitCode('claude', `abc#${state}`);
+    const submitted = manager.submitCode(CLAUDE, `abc#${state}`);
     expect(manager.states().claude?.phase).toBe('submitting');
     await submitted;
     expect(process.written).toEqual([`\x1b[200~abc#${state}\x1b[201~`, '\r']);
@@ -259,15 +262,15 @@ describe('the Claude sign-in', () => {
     expect(manager.states().claude?.phase).toBe('done');
     expect(saved).toEqual([FAKE_TOKEN]);
     expect(JSON.stringify(published)).not.toContain('sk-ant-oat');
-    expect(manager.output('claude')).not.toContain('sk-ant-oat');
+    expect(manager.output(CLAUDE)).not.toContain('sk-ant-oat');
   });
 
   it('saves the token even if the CLI exits before the screen has settled', async () => {
     const { manager, processes, saved } = setup({}, { ...TIMINGS, settledMs: 60000 });
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-success'));
     await tick();
-    await manager.submitCode('claude', 'abc');
+    await manager.submitCode(CLAUDE, 'abc');
     processes[0].emit(recording('claude-success'));
     processes[0].exit(0);
     await tick();
@@ -277,10 +280,10 @@ describe('the Claude sign-in', () => {
 
   it('reports a refused code and stops the CLI, which would otherwise wait forever', async () => {
     const { manager, processes, published } = setup();
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-rejected'));
     await tick();
-    await manager.submitCode('claude', 'wrong');
+    await manager.submitCode(CLAUDE, 'wrong');
     processes[0].emit(recording('claude-rejected'));
     await tick();
     const failed = manager.states().claude!;
@@ -292,10 +295,10 @@ describe('the Claude sign-in', () => {
 
   it('shows what the CLI said when it’s stuck on something other than the code', async () => {
     const { manager, processes } = setup();
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-success'));
     await tick();
-    await manager.submitCode('claude', 'abc');
+    await manager.submitCode(CLAUDE, 'abc');
     processes[0].emit('\r\nCouldn’t verify your organization’s settings (a network proxy answered instead of Anthropic).\r\n\r\nPress Enter to retry.\r\n');
     await tick();
     const failed = manager.states().claude!;
@@ -306,51 +309,51 @@ describe('the Claude sign-in', () => {
 
   it('gives up when nothing comes back after a code', async () => {
     const { manager, processes } = setup({}, { ...TIMINGS, codeResultMs: 20 });
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-success'));
     await tick();
-    await manager.submitCode('claude', 'abc');
+    await manager.submitCode(CLAUDE, 'abc');
     await tick(50);
     expect(manager.states().claude).toMatchObject({ phase: 'failed', failure: 'rejected' });
   });
 
   it('turns away codes it shouldn’t pass on, and stays ready for the right one', async () => {
     const { manager, processes } = setup();
-    await expect(manager.submitCode('claude', 'abc')).rejects.toThrow(/ended/);
-    await manager.start('claude');
-    await expect(manager.submitCode('claude', 'abc')).rejects.toThrow(/isn’t waiting/);
+    await expect(manager.submitCode(CLAUDE, 'abc')).rejects.toThrow(/ended/);
+    await manager.start(CLAUDE);
+    await expect(manager.submitCode(CLAUDE, 'abc')).rejects.toThrow(/isn’t waiting/);
     processes[0].emit(promptFrames('claude-success'));
     await tick();
-    await expect(manager.submitCode('claude', 'abc#not-this-sign-in')).rejects.toThrow(/earlier sign-in/);
-    await expect(manager.submitCode('claude', 'sk-ant-api03-abc')).rejects.toThrow(/a key/);
-    await expect(manager.submitCode('claude', 'abc\x1b[201~\rrm -rf /')).rejects.toThrow(/doesn’t look/);
-    await expect(manager.submitCode('claude', '   ')).rejects.toThrow(/doesn’t look/);
+    await expect(manager.submitCode(CLAUDE, 'abc#not-this-sign-in')).rejects.toThrow(/earlier sign-in/);
+    await expect(manager.submitCode(CLAUDE, 'sk-ant-api03-abc')).rejects.toThrow(/a key/);
+    await expect(manager.submitCode(CLAUDE, 'abc\x1b[201~\rrm -rf /')).rejects.toThrow(/doesn’t look/);
+    await expect(manager.submitCode(CLAUDE, '   ')).rejects.toThrow(/doesn’t look/);
     expect(processes[0].written).toEqual([]);
     expect(manager.states().claude?.phase).toBe('waiting');
   });
 
   it('fails clearly when the CLI stops, shows no link, or can’t start', async () => {
     const stopped = setup();
-    await stopped.manager.start('claude');
+    await stopped.manager.start(CLAUDE);
     stopped.processes[0].exit(1);
     await tick();
     expect(stopped.manager.states().claude).toMatchObject({ phase: 'failed', failure: 'stopped' });
 
     const noLink = setup({}, { ...TIMINGS, noLinkMs: 20 });
-    await noLink.manager.start('claude');
+    await noLink.manager.start(CLAUDE);
     noLink.processes[0].emit('something unexpected');
     await tick(50);
     expect(noLink.manager.states().claude).toMatchObject({ phase: 'failed', failure: 'no-link', output: 'something unexpected' });
     expect(noLink.processes[0].killed).toBe(true);
 
     const broken = setup({ spawn: async () => { throw new Error('no helper'); } });
-    await broken.manager.start('claude');
+    await broken.manager.start(CLAUDE);
     expect(broken.manager.states().claude).toMatchObject({ phase: 'failed', failure: 'unavailable', message: 'no helper' });
   });
 
   it('expires a sign-in left open', async () => {
     const { manager, processes } = setup({}, { ...TIMINGS, expiresMs: 20 });
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-success'));
     await tick(50);
     expect(manager.states().claude).toMatchObject({ phase: 'failed', failure: 'expired' });
@@ -359,10 +362,10 @@ describe('the Claude sign-in', () => {
 
   it('reports a token it couldn’t save', async () => {
     const { manager, processes } = setup({ saveClaudeToken: async () => { throw new Error('disk full'); } });
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-success'));
     await tick();
-    await manager.submitCode('claude', 'abc');
+    await manager.submitCode(CLAUDE, 'abc');
     processes[0].emit(recording('claude-success'));
     processes[0].exit(0);
     await tick();
@@ -376,7 +379,7 @@ describe('the Codex sign-in with a one-time code', () => {
   it('shows the code, then finishes by itself once approved', async () => {
     const finish = vi.fn(async () => true);
     const { manager, processes } = setup({ finishCodexLogin: finish });
-    await manager.start('codex', 'device');
+    await manager.start(CODEX, 'device');
     processes[0].emit(recording('codex-success').subarray(0, recording('codex-success').indexOf(Buffer.from('Continue only'))));
     await tick();
     expect(manager.states().codex).toMatchObject({ phase: 'waiting', code: 'FAKE-7CODE', url: 'http://platform.claude.com:8080/codex/device' });
@@ -392,7 +395,7 @@ describe('the Codex sign-in with a one-time code', () => {
     const finish = vi.fn(async () => true);
     let read = (_login: string) => {};
     const { manager, processes } = setup({ finishCodexLogin: finish });
-    await manager.start('codex', 'device');
+    await manager.start(CODEX, 'device');
     processes[0].savedLogin = () => new Promise((resolve) => {
       read = resolve;
     });
@@ -400,7 +403,7 @@ describe('the Codex sign-in with a one-time code', () => {
     processes[0].exit(0);
     await tick();
     expect(manager.states().codex?.phase).toBe('saving');
-    await manager.cancel('codex');
+    await manager.cancel(CODEX);
     read('a login');
     await tick();
     expect(finish).not.toHaveBeenCalled();
@@ -409,7 +412,7 @@ describe('the Codex sign-in with a one-time code', () => {
 
   it('doesn’t call it done if the login didn’t take', async () => {
     const { manager, processes } = setup({ finishCodexLogin: async () => false });
-    await manager.start('codex', 'device');
+    await manager.start(CODEX, 'device');
     processes[0].emit(recording('codex-success'));
     processes[0].exit(0);
     await tick();
@@ -418,7 +421,7 @@ describe('the Codex sign-in with a one-time code', () => {
 
   it('says why when device sign-in is off, and leaves nothing behind', async () => {
     const { manager, processes } = setup();
-    await manager.start('codex', 'device');
+    await manager.start(CODEX, 'device');
     processes[0].emit(recording('codex-disabled'));
     processes[0].exit(1);
     await tick();
@@ -447,7 +450,7 @@ function portOf(link: string): number {
 describe('coming back from the sign-in page', () => {
   it('Claude: goes from the browser’s return to a saved token with nothing typed', async () => {
     const { manager, processes, saved, published, ports } = setup();
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     const process = processes[0];
     process.emit(promptFrames('claude-redirect-success'));
     await tick();
@@ -482,7 +485,7 @@ describe('coming back from the sign-in page', () => {
 
   it('Claude: tells the browser when the CLI refused the sign-in, and stops listening', async () => {
     const { manager, processes, ports } = setup();
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-redirect-rejected'));
     await tick();
     const { url } = manager.states().claude!;
@@ -496,7 +499,7 @@ describe('coming back from the sign-in page', () => {
 
   it('turns away anything but the sign-in page, which is the only thing that knows the state', async () => {
     const { manager, processes, ports } = setup();
-    await manager.start('codex');
+    await manager.start(CODEX);
     processes[0].emit(codexPrompt('codex-redirect-success'));
     await tick();
     const { url } = manager.states().codex!;
@@ -517,7 +520,7 @@ describe('coming back from the sign-in page', () => {
 
   it('passes on one return, however many times the browser asks', async () => {
     const { manager, processes, ports } = setup();
-    await manager.start('codex');
+    await manager.start(CODEX);
     processes[0].emit(codexPrompt('codex-redirect-success'));
     await tick();
     const { url } = manager.states().codex!;
@@ -533,7 +536,7 @@ describe('coming back from the sign-in page', () => {
   it('Codex: finishes when the CLI exits, having shared its login, and never publishes the answer', async () => {
     const finish = vi.fn(async () => true);
     const { manager, processes, methods, published, ports } = setup({ finishCodexLogin: finish });
-    await manager.start('codex');
+    await manager.start(CODEX);
     expect(methods).toEqual(['browser']);
     processes[0].emit(codexPrompt('codex-redirect-success'));
     await tick();
@@ -560,7 +563,7 @@ describe('coming back from the sign-in page', () => {
 
   it('Codex: doesn’t take a printed link until it has all of it, wherever the output was cut', async () => {
     const { manager, processes, ports } = setup();
-    await manager.start('codex');
+    await manager.start(CODEX);
     // Without its hyperlink, which arrives whole, so that only the printed one can be cut.
     const printed = Buffer.from(codexPrompt('codex-redirect-success').toString('latin1').replace(/\x1b\]8;;[^\x07]*\x07/g, ''), 'latin1');
     const cut = printed.indexOf(Buffer.from('state=')) + 'state='.length + 8;
@@ -585,7 +588,7 @@ describe('coming back from the sign-in page', () => {
         release = () => resolve(() => {});
       }),
     });
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-redirect-success'));
     await tick();
     expect(manager.states().claude?.phase).toBe('starting');
@@ -603,7 +606,7 @@ describe('coming back from the sign-in page', () => {
         saved = () => resolve(true);
       }),
     });
-    await manager.start('codex');
+    await manager.start(CODEX);
     processes[0].deliver = () => new Promise((_resolve, reject) => {
       refuse = reject;
     });
@@ -629,15 +632,15 @@ describe('coming back from the sign-in page', () => {
         checked = resolve;
       }),
     });
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-success'));
     await tick();
-    await manager.submitCode('claude', 'abc');
+    await manager.submitCode(CLAUDE, 'abc');
     processes[0].emit(recording('claude-success'));
     processes[0].exit(0);
     await tick();
     expect(manager.states().claude?.phase).toBe('saving');
-    await manager.cancel('claude');
+    await manager.cancel(CLAUDE);
     checked();
     await tick();
     expect(saved).toEqual([]);
@@ -650,10 +653,10 @@ describe('coming back from the sign-in page', () => {
         saved = resolve;
       }),
     }, { ...TIMINGS, expiresMs: 300 });
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-success'));
     await tick();
-    await manager.submitCode('claude', 'abc');
+    await manager.submitCode(CLAUDE, 'abc');
     processes[0].emit(recording('claude-success'));
     processes[0].exit(0);
     await tick();
@@ -661,7 +664,7 @@ describe('coming back from the sign-in page', () => {
     await tick(320);
     expect(manager.states().claude).toMatchObject({ phase: 'failed', failure: 'expired' });
 
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     expect(manager.states().claude?.phase).toBe('starting');
     saved();
     await tick();
@@ -671,17 +674,17 @@ describe('coming back from the sign-in page', () => {
 
   it('remembers which way it’s signing in, for the page to pick up after a reload', async () => {
     const { manager } = setup();
-    await manager.start('codex', 'device');
+    await manager.start(CODEX, 'device');
     expect(manager.states().codex?.method).toBe('device');
-    await manager.cancel('codex');
-    await manager.start('codex');
+    await manager.cancel(CODEX);
+    await manager.start(CODEX);
     expect(manager.states().codex?.method).toBe('browser');
   });
 
   it('Codex: tells a page that said no from a sign-in the service refused', async () => {
     for (const [name, failure] of [['codex-redirect-denied', 'denied'], ['codex-redirect-rejected', 'rejected']] as const) {
       const { manager, processes, ports } = setup();
-      await manager.start('codex');
+      await manager.start(CODEX);
       processes[0].emit(codexPrompt(name));
       await tick();
       const { url } = manager.states().codex!;
@@ -698,14 +701,14 @@ describe('coming back from the sign-in page', () => {
 
   it('Claude: still works by pasting a code if the port is taken', async () => {
     const { manager, processes, saved } = setup({ listen: async () => { throw new Error('EADDRINUSE'); } });
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-redirect-success'));
     await tick();
     const waiting = manager.states().claude!;
     expect(waiting.phase).toBe('waiting');
     expect(waiting.url).toBeUndefined();
     expect(waiting.pasteUrl).toBeTruthy();
-    await manager.submitCode('claude', `abc#${new URL(waiting.pasteUrl!).searchParams.get('state')}`);
+    await manager.submitCode(CLAUDE, `abc#${new URL(waiting.pasteUrl!).searchParams.get('state')}`);
     processes[0].emit(recording('claude-redirect-success'));
     processes[0].exit(0);
     await tick();
@@ -715,32 +718,32 @@ describe('coming back from the sign-in page', () => {
 
   it('Claude: won’t take a code until it’s got to its prompt, some seconds after the page that comes back', async () => {
     const { manager, processes } = setup();
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     const frames = promptFrames('claude-redirect-success');
     processes[0].emit(frames.subarray(0, frames.indexOf(Buffer.from('Browser'))));
     await tick();
     expect(manager.states().claude).toMatchObject({ phase: 'waiting', url: expect.any(String) });
     expect(manager.states().claude?.pasteUrl).toBeUndefined();
-    await expect(manager.submitCode('claude', 'abc')).rejects.toThrow(/isn’t waiting/);
+    await expect(manager.submitCode(CLAUDE, 'abc')).rejects.toThrow(/isn’t waiting/);
     expect(processes[0].written).toEqual([]);
   });
 
   it('Codex: has nothing to paste a code into', async () => {
     const { manager, processes } = setup();
-    await manager.start('codex');
+    await manager.start(CODEX);
     processes[0].emit(codexPrompt('codex-redirect-success'));
     await tick();
-    await expect(manager.submitCode('codex', 'abc')).rejects.toThrow(/isn’t waiting/);
+    await expect(manager.submitCode(CODEX, 'abc')).rejects.toThrow(/isn’t waiting/);
     expect(processes[0].written).toEqual([]);
   });
 
   it('Claude: a code pasted while the page could still come back works too', async () => {
     const { manager, processes, saved, ports } = setup();
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-redirect-success'));
     await tick();
     const { pasteUrl, url } = manager.states().claude!;
-    await manager.submitCode('claude', `abc#${new URL(pasteUrl!).searchParams.get('state')}`);
+    await manager.submitCode(CLAUDE, `abc#${new URL(pasteUrl!).searchParams.get('state')}`);
     expect(processes[0].written[0]).toContain('abc#');
     // The browser turning up after all doesn't hand the CLI a second answer.
     const late = ports.get(portOf(url!))!(returning(url!));
@@ -755,13 +758,13 @@ describe('coming back from the sign-in page', () => {
   it('Codex: says the port is taken, and the one-time code doesn’t need it', async () => {
     const listen = vi.fn(async () => { throw new Error('EADDRINUSE'); });
     const { manager, processes, methods } = setup({ listen });
-    await manager.start('codex');
+    await manager.start(CODEX);
     processes[0].emit(codexPrompt('codex-redirect-success'));
     await tick();
     expect(manager.states().codex).toMatchObject({ phase: 'failed', failure: 'port-busy', message: '1455' });
     expect(processes[0].killed).toBe(true);
 
-    await manager.start('codex', 'device');
+    await manager.start(CODEX, 'device');
     expect(methods).toEqual(['browser', 'device']);
     processes[1].emit(recording('codex-success'));
     await tick();
@@ -771,19 +774,19 @@ describe('coming back from the sign-in page', () => {
 
   it('moves over to the one-time code, stopping the CLI and the port, and joins it after that', async () => {
     const { manager, processes, methods, ports, published } = setup();
-    await manager.start('codex');
+    await manager.start(CODEX);
     processes[0].emit(codexPrompt('codex-redirect-success'));
     await tick();
     expect(ports.size).toBe(1);
 
-    await manager.start('codex', 'device');
+    await manager.start(CODEX, 'device');
     expect(methods).toEqual(['browser', 'device']);
     expect(processes[0].killed).toBe(true);
     expect(ports.size).toBe(0);
     expect(manager.states().codex?.phase).toBe('starting');
     expect(published).not.toContain(null);
 
-    await manager.start('codex', 'device');
+    await manager.start(CODEX, 'device');
     expect(processes).toHaveLength(2);
 
     // The first CLI has gone. It doesn't get to end the sign-in that replaced it.
@@ -794,13 +797,13 @@ describe('coming back from the sign-in page', () => {
 
   it('answers a browser that’s still waiting when the sign-in is cancelled, and frees the port', async () => {
     const { manager, processes, ports } = setup();
-    await manager.start('codex');
+    await manager.start(CODEX);
     processes[0].emit(codexPrompt('codex-redirect-success'));
     await tick();
     const { url } = manager.states().codex!;
     const outcome = ports.get(1455)!(returning(url!));
     await tick();
-    await manager.cancel('codex');
+    await manager.cancel(CODEX);
     expect(await outcome).toBe('failed');
     expect(ports.size).toBe(0);
   });
@@ -813,10 +816,10 @@ describe('coming back from the sign-in page', () => {
         release = () => resolve(stop);
       }),
     });
-    await manager.start('codex');
+    await manager.start(CODEX);
     processes[0].emit(codexPrompt('codex-redirect-success'));
     await tick();
-    await manager.cancel('codex');
+    await manager.cancel(CODEX);
     release();
     await tick();
     expect(stop).toHaveBeenCalledOnce();
@@ -824,7 +827,7 @@ describe('coming back from the sign-in page', () => {
 
   it('fails clearly if the return can’t be passed to the CLI, or the CLI never says anything', async () => {
     const stuck = setup();
-    await stuck.manager.start('codex');
+    await stuck.manager.start(CODEX);
     stuck.processes[0].deliver = async () => { throw new Error('docker went away'); };
     stuck.processes[0].emit(codexPrompt('codex-redirect-success'));
     await tick();
@@ -833,7 +836,7 @@ describe('coming back from the sign-in page', () => {
     expect(stuck.manager.states().codex).toMatchObject({ phase: 'failed', failure: 'stopped', message: 'docker went away' });
 
     const silent = setup({}, { ...TIMINGS, codeResultMs: 20 });
-    await silent.manager.start('codex');
+    await silent.manager.start(CODEX);
     silent.processes[0].emit(codexPrompt('codex-redirect-success'));
     await tick();
     const ignored = silent.ports.get(1455)!(returning(silent.manager.states().codex!.url!));
@@ -923,22 +926,22 @@ describe('the port a browser comes back to', () => {
 describe('starting and stopping a sign-in', () => {
   it('joins one already under way, and replaces one that’s finished', async () => {
     const { manager, processes } = setup();
-    await Promise.all([manager.start('claude'), manager.start('claude')]);
+    await Promise.all([manager.start(CLAUDE), manager.start(CLAUDE)]);
     expect(processes).toHaveLength(1);
     processes[0].exit(1);
     await tick();
     expect(manager.states().claude?.phase).toBe('failed');
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     expect(processes).toHaveLength(2);
     expect(manager.states().claude?.phase).toBe('starting');
   });
 
   it('cancels cleanly, and stops anything that arrives afterwards from mattering', async () => {
     const { manager, processes, published, saved } = setup();
-    await manager.start('claude');
+    await manager.start(CLAUDE);
     processes[0].emit(promptFrames('claude-success'));
     await tick();
-    await manager.cancel('claude');
+    await manager.cancel(CLAUDE);
     expect(processes[0].killed).toBe(true);
     expect(manager.states().claude).toBeUndefined();
     expect(published.at(-1)).toBeNull();
@@ -956,9 +959,9 @@ describe('starting and stopping a sign-in', () => {
         release = () => resolve(process);
       }),
     });
-    const starting = manager.start('claude');
+    const starting = manager.start(CLAUDE);
     await tick();
-    await manager.cancel('claude');
+    await manager.cancel(CLAUDE);
     release();
     expect(await starting).toBeNull();
     expect(process.killed).toBe(true);
@@ -972,7 +975,7 @@ describe('starting and stopping a sign-in', () => {
         release = () => resolve(process);
       }),
     }, { ...TIMINGS, noLinkMs: 20, expiresMs: 60 });
-    const starting = slow.manager.start('claude');
+    const starting = slow.manager.start(CLAUDE);
     await tick(40);
     expect(slow.manager.states().claude?.phase).toBe('starting');
     await tick(40);
@@ -1011,7 +1014,7 @@ describe('starting and stopping a sign-in', () => {
 
   it('tells a page that’s out of step that nothing is under way', async () => {
     const { manager, published } = setup();
-    await manager.cancel('claude');
+    await manager.cancel(CLAUDE);
     expect(published).toEqual([null]);
   });
 });

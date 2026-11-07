@@ -108,6 +108,8 @@ test('chooses a sign-in with the model, and runs on it', async ({ page }) => {
   await expect(picker).toContainText('work');
   await picker.click();
   const signIns = page.getByRole('group', { name: 'Sign-in' });
+  // In sight without scrolling past every model.
+  await expect(signIns).toBeInViewport({ ratio: 1 });
   await expect(signIns.getByRole('button')).toHaveText([/work/, /personal\s*API key/]);
   await shot(page, 'picker-two-sign-ins');
   await signIns.getByRole('button', { name: /personal/ }).click();

@@ -45,8 +45,8 @@ afterEach(() => {
 describe('what each sign-in gets', () => {
   it('starts with one per provider, which keeps what there was before there could be several', () => {
     expect(store.state.profiles).toEqual([
-      { id: 'claude', agent: 'claude', name: '', createdAt: 0 },
-      { id: 'codex', agent: 'codex', name: '', createdAt: 0 },
+      { id: 'claude', agent: 'claude', name: '' },
+      { id: 'codex', agent: 'codex', name: '' },
     ]);
     expect(boundary.placeholderFor({ id: 'claude', agent: 'claude' })).toBe('sk-ant-oat01-lonca-placeholder');
     expect(boundary.placeholderFor({ id: 'codex', agent: 'codex' })).toBe('oai-oat01-lonca-placeholder');
@@ -146,6 +146,43 @@ describe('what each sign-in gets', () => {
     expect(store.state.profiles.filter((profile) => profile.agent === 'claude').map((profile) => profile.id)).toEqual([personal.id]);
   });
 
+  it('can be removed again to finish a removal that was cut short', async () => {
+    const personal = profiles.createProfile('claude', 'personal', 'work');
+    store.setClaudeCredential(personal.id, 'sk-ant-api03-going');
+    const workspace = { id: 'w', projectId: 'project', name: 'prague', sandboxName: 'vm', status: 'creating', steps: [] } as unknown as Workspace;
+    store.state.workspaces.push(workspace);
+    const [first, second] = [0, 1].map(() => Object.assign(runner.createSession(workspace, { agent: 'claude', profileId: personal.id }), { hasMessages: true }));
+    // Saving the second one's move fails, once.
+    const append = fs.appendFileSync;
+    let failed = false;
+    const failing = vi.spyOn(fs, 'appendFileSync').mockImplementation(((...args: Parameters<typeof fs.appendFileSync>) => {
+      if (!failed && String(args[0]).includes(second.id)) {
+        failed = true;
+        throw new Error('ENOSPC: no space left on device');
+      }
+      return append(...args);
+    }) as typeof fs.appendFileSync);
+    try {
+      await expect(profiles.removeProfile(personal)).rejects.toThrow(/no space/);
+    } finally {
+      failing.mockRestore();
+    }
+    // Still there to remove, with nothing left to sign in with.
+    expect(system.getProfile(personal.id)).toBe(personal);
+    expect(store.claudeCredential(personal.id)).toBeUndefined();
+    await profiles.removeProfile(personal);
+    expect(system.getProfile(personal.id)).toBeUndefined();
+    expect([first.profileId, second.profileId]).toEqual(['claude', 'claude']);
+  });
+
+  it('keeps a limit through a turn that began before it was reached, and ended well', () => {
+    store.state.profileLimits = { claude: { at: 2000 } };
+    system.clearProfileLimit('claude', 1000);
+    expect(store.state.profileLimits.claude).toEqual({ at: 2000 });
+    system.clearProfileLimit('claude', 3000);
+    expect(store.state.profileLimits.claude).toBeUndefined();
+  });
+
   it('won’t remove the first while a turn from before there could be several runs on it', async () => {
     const personal = profiles.createProfile('claude', 'personal', 'work');
     const workspace = { id: 'w', projectId: 'project', name: 'prague', sandboxName: 'vm', status: 'creating', steps: [] } as unknown as Workspace;
@@ -232,7 +269,7 @@ describe('the environment of a turn', () => {
 });
 
 describe('where a conversation can go at a limit', () => {
-  const profile = (id: string, agent: 'claude' | 'codex', autoSwitch?: boolean): Profile => ({ id, agent, name: id, createdAt: 0, autoSwitch });
+  const profile = (id: string, agent: 'claude' | 'codex', autoSwitch?: boolean): Profile => ({ id, agent, name: id, autoSwitch });
   const list = [profile('claude', 'claude'), profile('claude-aaaaaaaaaaaa', 'claude', true), profile('claude-bbbbbbbbbbbb', 'claude', true), profile('codex', 'codex', true)];
   const status = (statuses: SystemStatus['profiles']) => ({ profiles: statuses, agentsChecked: true }) as unknown as SystemStatus;
   const ready = { signedIn: true };

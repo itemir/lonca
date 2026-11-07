@@ -5,7 +5,7 @@ import { applyCodexSetup, setUpCodex } from '../../server/workspaces.ts';
 const { state, execs } = vi.hoisted(() => ({
   state: {
     settings: { branchPrefix: 'test' }, projects: [] as Project[], workspaces: [] as Workspace[],
-    profiles: [{ id: 'claude', agent: 'claude', name: '', createdAt: 0 }, { id: 'codex', agent: 'codex', name: '', createdAt: 0 }] as Profile[],
+    profiles: [{ id: 'claude', agent: 'claude', name: '' }, { id: 'codex', agent: 'codex', name: '' }] as Profile[],
   },
   execs: [] as { stdin: string; done: () => void }[],
 }));

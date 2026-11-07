@@ -35,8 +35,8 @@ export interface Secrets {
 /** Before there could be several, each provider had one sign-in, which keeps the provider's id. */
 function firstProfiles(): Profile[] {
   return [
-    { id: 'claude', agent: 'claude', name: '', createdAt: 0 },
-    { id: 'codex', agent: 'codex', name: '', createdAt: 0 },
+    { id: 'claude', agent: 'claude', name: '' },
+    { id: 'codex', agent: 'codex', name: '' },
   ];
 }
 

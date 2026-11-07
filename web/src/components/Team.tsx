@@ -210,6 +210,14 @@ function LimitBanner({ session, who, onSwitchModel }: { session: Session; who: s
   // A project's own key goes in place of any sign-in, so another wouldn't help.
   const several = hasSeveral(profiles, session.agent) && !projectBringsKey(session.agent, project);
   const { available, limited } = several ? continueOptions(profiles, system, session.agent, limitId) : { available: [], limited: [] };
+  // Another sign-in's limit ending changes what's offered, with nothing else to say so.
+  const [, rerender] = useState(0);
+  const nextEnd = Math.min(...limited.map((profile) => limitEnds(profileStatus(system, profile.id)) ?? Infinity));
+  useEffect(() => {
+    if (!Number.isFinite(nextEnd)) return;
+    const timer = setTimeout(() => rerender((value) => value + 1), Math.max(0, nextEnd - Date.now()) + 1000);
+    return () => clearTimeout(timer);
+  }, [nextEnd]);
   const limitName = profileLabel(profiles, catalog, limitId, session.agent);
   const moved = several && profileIdOf(session) !== limitId;
   const continueOn = (profileId: string) => void attempt(() => api.moveSession(session.id, profileId, true));

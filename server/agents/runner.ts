@@ -575,7 +575,7 @@ async function finishRun(run: ActiveRun, { code, stderr }: { code: number | null
   }
   run.outcome = run.limited ? 'limit' : run.stopped ? 'stopped' : failed || run.interrupted || run.reportedFailure ? 'failed' : 'completed';
   if (run.profileId && run.outcome === 'limit') markProfileLimited(run.profileId, run.limitResetsAt);
-  if (run.profileId && run.outcome === 'completed') clearProfileLimit(run.profileId);
+  if (run.profileId && run.outcome === 'completed') clearProfileLimit(run.profileId, run.startedAt);
   await checkFilesUntouched(run, session);
   await retireRun(run);
 }

@@ -31,13 +31,11 @@ export interface LoginProcess {
 /** How a sign-in went, for the browser that came back from it. Null means it isn't that browser. */
 export type ReturnOutcome = 'done' | 'failed' | null;
 
-/** Which of a provider's sign-ins this is for. A provider's id alone means its first. */
+/** Which of a provider's sign-ins this is for. */
 export interface LoginTarget {
   agent: AgentId;
   profileId: string;
 }
-
-const targetOf = (target: AgentId | LoginTarget): LoginTarget => (typeof target === 'string' ? { agent: target, profileId: target } : target);
 
 export interface LoginDriver {
   spawn(agent: AgentId, method: LoginMethod): Promise<LoginProcess>;
@@ -362,7 +360,7 @@ class LoginSession {
   }
 }
 
-/** Keyed by sign-in, and a provider's id alone means its first one. */
+/** Keyed by sign-in. */
 export class LoginManager {
   private sessions = new Map<string, LoginSession>();
   private driver: LoginDriver;
@@ -383,8 +381,7 @@ export class LoginManager {
    * provider's sign-ins is replaced too, since they come back to the same port.
    * Reports null if it was cancelled while starting, which can take a while.
    */
-  async start(to: AgentId | LoginTarget, method: LoginMethod = 'browser'): Promise<LoginState | null> {
-    const target = targetOf(to);
+  async start(target: LoginTarget, method: LoginMethod = 'browser'): Promise<LoginState | null> {
     const current = this.sessions.get(target.profileId);
     if (current && !current.finished && current.state.method === method) return current.state;
     const others = [...this.sessions].filter(([id, other]) => id !== target.profileId && other.state.agent === target.agent && !other.finished);
@@ -400,14 +397,14 @@ export class LoginManager {
     return this.sessions.get(target.profileId)?.state ?? null;
   }
 
-  async submitCode(to: AgentId | LoginTarget, code: string): Promise<void> {
-    const session = this.sessions.get(targetOf(to).profileId);
+  async submitCode(target: LoginTarget, code: string): Promise<void> {
+    const session = this.sessions.get(target.profileId);
     if (!session) throw new HttpError(409, 'This sign-in has ended. Start again to get a new code.');
     await session.submitCode(code);
   }
 
-  output(to: AgentId | LoginTarget): string {
-    return this.sessions.get(targetOf(to).profileId)?.output() ?? '';
+  output(target: LoginTarget): string {
+    return this.sessions.get(target.profileId)?.output() ?? '';
   }
 
   /** Whether one of this provider's sign-ins is under way, which the helper's leftovers mustn't be cleared from under. */
@@ -415,8 +412,7 @@ export class LoginManager {
     return [...this.sessions.values()].some((session) => session.state.agent === agent && !session.finished);
   }
 
-  async cancel(to: AgentId | LoginTarget): Promise<void> {
-    const target = targetOf(to);
+  async cancel(target: LoginTarget): Promise<void> {
     const session = this.sessions.get(target.profileId);
     this.sessions.delete(target.profileId);
     // Always said, so a page out of step with the server gets back in step.

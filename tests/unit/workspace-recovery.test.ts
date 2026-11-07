@@ -9,7 +9,7 @@ import { RuntimeStoppedError } from '../../server/util.ts';
 const { state, flushState, execText, ensureSandbox, stopSandbox } = vi.hoisted(() => ({
   state: {
     projects: [] as Project[], workspaces: [] as Workspace[], sessions: [] as Session[],
-    profiles: [{ id: 'claude', agent: 'claude', name: '', createdAt: 0 }, { id: 'codex', agent: 'codex', name: '', createdAt: 0 }] as Profile[],
+    profiles: [{ id: 'claude', agent: 'claude', name: '' }, { id: 'codex', agent: 'codex', name: '' }] as Profile[],
   },
   flushState: vi.fn(), execText: vi.fn(async () => ''), ensureSandbox: vi.fn(async () => 'box'), stopSandbox: vi.fn(async () => {}),
 }));
