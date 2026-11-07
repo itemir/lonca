@@ -1319,8 +1319,9 @@ a.crumb:hover { color: var(--text); }
   overflow-y: auto;
 }
 
-/* The models scroll, so a sign-in section under them stays in sight. */
-.model-columns { display: flex; min-height: 0; overflow-y: auto; }
+/* The models scroll, so a sign-in section under them stays in sight. A few rows of them always
+   show, so on a short screen a long list of sign-ins scrolls the popover rather than hiding them. */
+.model-columns { display: flex; min-height: 7rem; overflow-y: auto; }
 
 .popover-up { bottom: calc(100% + 6px); }
 .popover-down { top: calc(100% + 6px); }

@@ -188,3 +188,20 @@ test('moves a conversation at its limit by itself to a sign-in chosen for that, 
     mock.limitedAuth.delete(FIRST_PLACEHOLDER);
   }
 });
+
+test.describe('on a phone held sideways', () => {
+  test.use({ viewport: { width: 844, height: 375 }, hasTouch: true, isMobile: true });
+
+  test('keeps models in reach when there are many sign-ins to choose from', async ({ page }) => {
+    for (const name of ['third', 'fourth', 'fifth']) await lonca.api('POST', '/profiles', { agent: 'claude', name });
+    const { workspace } = await newWorkspace();
+    await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, { agent: 'claude', model: 'claude-sonnet-5-5', effort: 'low' });
+    await page.goto(`${lonca.url}/w/${workspace.id}?token=${lonca.token}`);
+    await page.getByRole('tab').filter({ hasText: 'Untitled' }).getByRole('button').first().click();
+    await page.locator('.composer-bar .model-button').click();
+    await expect(page.getByRole('group', { name: 'Sign-in' }).getByRole('button')).toHaveCount(5);
+    // Not squeezed out by the sign-ins under them.
+    await expect(page.locator('.model-popover').getByRole('button', { name: 'Opus 5.5' })).toBeInViewport();
+    await shot(page, 'picker-sideways-five-sign-ins');
+  });
+});

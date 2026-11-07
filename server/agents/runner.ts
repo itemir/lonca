@@ -575,7 +575,8 @@ async function finishRun(run: ActiveRun, { code, stderr }: { code: number | null
   }
   run.outcome = run.limited ? 'limit' : run.stopped ? 'stopped' : failed || run.interrupted || run.reportedFailure ? 'failed' : 'completed';
   if (run.profileId && run.outcome === 'limit') markProfileLimited(run.profileId, run.limitResetsAt);
-  if (run.profileId && run.outcome === 'completed') clearProfileLimit(run.profileId, run.startedAt);
+  // A turn picked up after a restart can't say when it began, so it leaves a limit for one that can.
+  if (run.profileId && run.outcome === 'completed' && !run.replay) clearProfileLimit(run.profileId, run.startedAt);
   await checkFilesUntouched(run, session);
   await retireRun(run);
 }
