@@ -86,6 +86,11 @@ run_sandbox() {
     echo "error: cannot create sandbox: image \"$template\" is not cached locally and pull_policy=never" >&2
     exit 1
   fi
+  # Like the real one, it gives a template a second name when a VM is first made from it, which
+  # keeps the image after the template's own name has gone.
+  if [ "$template" != "$base" ]; then
+    docker tag "$template" "sandbox-kit-assembled:$(docker inspect --format '{{.Id}}' "$template" | cksum | cut -d' ' -f1)"
+  fi
   # The real one plants a placeholder for its proxy to replace, whether or not it holds any secrets.
   echo "run $name template=$template deny=${denied[*]-} ${options[*]-}" >> "$state/calls.log"
   docker run -d --init --name "$name" --hostname "${name:0:63}" --label "dev.lonca.instance=$prefix" --label "$marker" \
@@ -219,7 +224,12 @@ case "$command" in
         fi
         printf '['
         separator=''
-        while read -r line; do printf '%s{"tag":"%s"}' "$separator" "$line"; separator=','; done < <(templates)
+        while IFS=$'\t' read -r id repository tag; do
+          # Saved over with no VM made from it, it has no name left, which for the real one means it's gone.
+          [ "$repository" != '<none>' ] || continue
+          printf '%s{"id":"%s","repository":"docker.io/library/%s","tag":"%s"}' "$separator" "$id" "$repository" "$tag"
+          separator=','
+        done < <(docker images --filter "label=$template_marker" --format '{{.ID}}	{{.Repository}}	{{.Tag}}')
         printf ']\n'
         ;;
       save)
@@ -228,13 +238,27 @@ case "$command" in
           echo 'error: stdin is not a terminal; run this command in a terminal to answer the prompt' >&2
           exit 1
         fi
+        # Like the real one, it needs the image the VM was made from, under the name that VM gave it.
+        made_from=$(docker inspect --format '{{.Image}}' "$2" 2>/dev/null)
+        if [ "$made_from" != "$(docker inspect --format '{{.Id}}' "$base")" ] \
+          && ! docker images --no-trunc --filter 'reference=sandbox-kit-assembled:*' --format '{{.ID}}' | grep -qxF "$made_from"; then
+          echo "error: save template: getting base image of $2: not found" >&2
+          exit 1
+        fi
         docker commit --change "LABEL ${template_marker%%=*}=1" "$2" "$3" >/dev/null || exit 1
         echo "Saved template $3"
         ;;
       rm)
         shift
         [ "${1:-}" = --force ] && shift
-        docker rmi --force "$1" >/dev/null 2>&1 || true
+        if [ $# -ne 1 ]; then
+          echo "error: sbx: 'sbx template rm' requires 1 argument" >&2
+          exit 1
+        fi
+        if ! docker rmi --force "$1" >/dev/null 2>&1; then
+          echo "error: cannot remove template \"$1\": no image \"$1\"" >&2
+          exit 1
+        fi
         ;;
       *) echo "error: unknown template command" >&2; exit 1 ;;
     esac

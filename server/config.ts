@@ -20,6 +20,8 @@ export const DEV_MODE = process.env.LONCA_DEV === '1';
 /** Keeps a second instance, such as a test run, from touching this one's sandboxes. */
 export const INSTANCE = process.env.LONCA_INSTANCE ?? '';
 export const PREFIX = INSTANCE ? `lonca-${INSTANCE}` : 'lonca';
+/** Or its templates, which Lonca removes once it's done with them. Second instances share one, since a build takes minutes. */
+export const TEMPLATE_NAME = INSTANCE ? 'lonca-instance-sandbox' : 'lonca-sandbox';
 
 
 export const FIRST_WORKSPACE_PORT = Number(process.env.LONCA_FIRST_PORT ?? 20000);

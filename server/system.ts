@@ -1,11 +1,12 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { AgentId, AgentStatus, Catalog, DockerLoginState, LoginMethod, ModelOption, SystemStatus } from '../shared/types.ts';
-import { PREFIX, paths } from './config.ts';
+import { LONCA_HOME, PREFIX, paths } from './config.ts';
 import { publish } from './events.ts';
-import { SandboxError, buildTemplate, cleanUpTemplateBuild, detectSandboxes, ensureSandbox, exec, isSandboxRunning, removeSandbox, templateLoaded, templateTag } from './sandbox.ts';
+import { SandboxError, type TemplateImage, buildTemplate, cleanUpTemplateBuild, detectSandboxes, ensureSandbox, exec, imageNamed, isSandboxRunning, listTemplates, ownTemplateImages, removableImages, removeSandbox, removeTemplateImage, templateLoaded, templateTag } from './sandbox.ts';
 import { getSecrets, saveState, setBoundaryValue, state, writeAtomic } from './store.ts';
-import { errorMessage } from './util.ts';
+import { KeyedQueue, errorMessage } from './util.ts';
 
 const LOG_LIMIT = 20000;
 
@@ -53,6 +54,28 @@ export async function checkSandboxes(options: { fresh?: boolean } = {}): Promise
   return checkingSandboxes;
 }
 
+// A virtual machine that fills its own disk only runs out of room, but once this computer's disk
+// is full, theirs turn read-only. Agents' downloads can take a few gigabytes a minute.
+const LOW_DISK_BYTES = 20e9;
+
+function freeBytes(dir: string): number {
+  try {
+    const stats = fs.statfsSync(dir);
+    return stats.bavail * stats.bsize;
+  } catch {
+    return Infinity;
+  }
+}
+
+/** Docker Sandboxes keeps virtual machines' disks under the home directory, and worktrees are in Lonca's. */
+export function checkDisk(): void {
+  const free = Math.min(freeBytes(os.homedir()), freeBytes(LONCA_HOME));
+  const lowDisk = free < LOW_DISK_BYTES ? { freeGb: Math.floor(free / 1e9) } : undefined;
+  if (lowDisk?.freeGb === system.lowDisk?.freeGb) return;
+  system.lowDisk = lowDisk;
+  publishSystem();
+}
+
 export function setDockerLogin(login: DockerLoginState | null): void {
   system.dockerLogin = login ?? undefined;
   publishSystem();
@@ -86,6 +109,44 @@ function imageFailed(error: unknown): void {
 
 let building: Promise<string> | null = null;
 let oldBuildCleared: Promise<void> | null = null;
+const templateRemovals = new KeyedQueue();
+let oldTemplatesChecked = false;
+
+/**
+ * Frees images Lonca has finished with, except the current template, any a project has chosen, and
+ * any a workspace's VM was made from. That VM would keep working without its image, but couldn't
+ * be saved as a template. Nothing waits for this.
+ */
+function removeImages(candidates: (images: TemplateImage[]) => string[]): void {
+  const failed = (error: unknown) => console.error('could not remove an old template:', errorMessage(error));
+  templateRemovals.run('images', async () => {
+    const images = await listTemplates();
+    const current = imageNamed(images, templateTag());
+    if (!current) return;
+    const keep = new Set([
+      current,
+      ...state.projects.map((project) => imageNamed(images, project.settings.image)),
+      ...state.workspaces.map((workspace) => workspace.templateImage),
+    ]);
+    for (const id of removableImages(images, candidates(images), keep)) await removeTemplateImage(id).catch(failed);
+  }).catch(failed);
+}
+
+/** Templates this server has no use for, from before it started. */
+function removeOldTemplatesOnce(): void {
+  if (oldTemplatesChecked) return;
+  oldTemplatesChecked = true;
+  removeImages(ownTemplateImages);
+}
+
+/** For when a VM has gone that may have been the last made from this image, or a template replaced it. */
+export function releaseTemplateImage(id: string): void {
+  removeImages(() => [id]);
+}
+
+export async function templateImageOf(template: string): Promise<string | undefined> {
+  return imageNamed(await listTemplates(), template);
+}
 
 /** Every entry point waits for startup cleanup before any build can own the builder. */
 function clearOldBuild(): Promise<void> {
@@ -102,10 +163,12 @@ function runBuild(options: { fresh?: boolean }): Promise<string> {
     imageBuilding();
     try {
       await clearOldBuild();
-      await buildTemplate(tag, options, imageLog());
+      const replaced = await buildTemplate(tag, options, imageLog());
       imageReady();
       // The helper moves to the new template the next time it's needed.
       await removeSandbox(HELPER);
+      if (replaced) releaseTemplateImage(replaced);
+      removeOldTemplatesOnce();
       state.catalogTemplate = undefined;
       void refreshCodexCatalog();
       return tag;
@@ -128,6 +191,7 @@ export async function ensureSandboxImage(): Promise<string> {
   if (building) return building;
   if (loaded) {
     if (system.image.state !== 'ready') imageReady();
+    removeOldTemplatesOnce();
     return tag;
   }
   return runBuild({});

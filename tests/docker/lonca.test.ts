@@ -6,7 +6,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ChangeSet, ChatItem, FileContent, FileEntry, LoginState, Project, Session, TextItem, ToolItem, Workspace } from '../../shared/types.ts';
 import { BLOCKED_DESTINATIONS, SANDBOX_BOOT, templateTag } from '../../server/sandbox.ts';
-import { FAKE_SANDBOX, FAKE_SBX, FAKE_SBX_DIR, Lonca, REAL_SANDBOX, docker, sandboxExec, sandboxExecAsync, git, installFakeSignIn, makeFixtureRepo, removeFakeSignIn, removeSandbox, sandboxRunning, sandboxSshKeys, sbx, setFakeSignIn, sleep, until, asRoot } from '../support/harness.ts';
+import { FAKE_SANDBOX, FAKE_SBX, FAKE_SBX_DIR, Lonca, REAL_SANDBOX, docker, sandboxExec, sandboxExecAsync, git, installFakeSignIn, makeFixtureRepo, removeFakeSignIn, removeSandbox, removeTemplate, sandboxRunning, sandboxSshKeys, sbx, setFakeSignIn, sleep, until, asRoot } from '../support/harness.ts';
 import { type MockLlm, startMockLlm } from '../support/mock-llm.ts';
 
 const lonca = new Lonca({ port: 47181, instance: 'dockertest', firstWorkspacePort: 46100 });
@@ -24,7 +24,7 @@ beforeAll(async () => {
   mock = await startMockLlm();
   fixture = makeFixtureRepo();
   // Start cold, as a new user does: the template has to build while workspaces are requested.
-  if (FAKE_SANDBOX) sbx('template', 'rm', '--force', templateTag());
+  if (FAKE_SANDBOX) removeTemplate(templateTag().replace('lonca-sandbox', 'lonca-instance-sandbox'));
   await lonca.start();
 });
 
@@ -180,6 +180,19 @@ describe('isolation', () => {
     expect(sandboxExec(name, 'id -un').output).toBe('agent');
     expect(sandboxExec(name, 'sudo -n id -u').output).toBe('0');
   });
+
+  it.runIf(REAL_SANDBOX)('has Docker’s disk give back what’s deleted from it, after a restart too', async () => {
+    const mounted = (name: string) => sandboxExec(name, "grep ' /var/lib/docker ' /proc/mounts").output;
+    const { workspace } = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
+    await lonca.waitForWorkspace(workspace.id);
+    expect(mounted(workspace.sandboxName)).toMatch(/\bdiscard\b/);
+    await lonca.api('POST', `/workspaces/${workspace.id}/stop`);
+    await lonca.waitForWorkspace(workspace.id, 'stopped');
+    await lonca.api('POST', `/workspaces/${workspace.id}/start`);
+    await lonca.waitForWorkspace(workspace.id);
+    expect(mounted(workspace.sandboxName)).toMatch(/\bdiscard\b/);
+    await lonca.api('DELETE', `/workspaces/${workspace.id}`);
+  }, 300000);
 
   it.runIf(REAL_SANDBOX)('has a kernel of its own', () => {
     const bootId = (name: string) => sandboxExec(name, 'cat /proc/sys/kernel/random/boot_id').output;
@@ -1514,7 +1527,7 @@ describe('project settings', () => {
     expect(sandboxExec(workspace.sandboxName, 'id -un').output).toBe('agent');
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
     await lonca.api('PATCH', `/projects/${project.id}`, { settings: { image: '' } });
-    sbx('template', 'rm', '--force', custom);
+    removeTemplate(custom);
   });
 
   it('says so when a project’s template isn’t there, rather than leaving it to Docker', async () => {

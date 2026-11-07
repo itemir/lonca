@@ -130,7 +130,11 @@ function SandboxStatusChip() {
   const system = useStore((store) => store.system);
   let text = 'VMs ready';
   let state = 'ok';
-  if (system.sandbox.state === 'checking') {
+  // First, because a full disk can be what's stopping everything else.
+  if (system.lowDisk) {
+    text = 'Disk almost full';
+    state = 'error';
+  } else if (system.sandbox.state === 'checking') {
     text = 'Checking for VMs';
     state = 'busy';
   } else if (system.sandbox.state !== 'ready') {

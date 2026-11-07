@@ -84,6 +84,7 @@ function SignOutWarning() {
 
 function IsolationCard() {
   const sandbox = useStore((store) => store.system.sandbox);
+  const lowDisk = useStore((store) => store.system.lowDisk);
   // A sign-in carries on through a page reload, so its window comes back with it.
   const [signingIn, setSigningIn] = useState(() => {
     const phase = useStore.getState().system.dockerLogin?.phase;
@@ -128,6 +129,11 @@ function IsolationCard() {
           </button>
         )}
       </div>
+      {lowDisk && (
+        <p className="field-help field-warning">
+          {lowDisk.freeGb < 1 ? 'Less than 1 GB is' : `Only ${lowDisk.freeGb} GB is`} left on this computer’s disk. If it fills up, virtual machines’ disks can turn read-only and agents fail in confusing ways. Archive workspaces you aren’t using to get space back.
+        </p>
+      )}
       {sandbox.state === 'not-installed' && (sandbox.install
         ? <><p className="field-help">To install it, run this in a terminal, then check again:</p><pre className="isolation-command">{sandbox.install}</pre></>
         : <p className="field-help"><a href={SANDBOX_DOCS} target="_blank" rel="noreferrer">Install Docker Sandboxes</a>, then check again.</p>)}

@@ -339,6 +339,7 @@ code { font-family: var(--mono); font-size: 0.93em; }
 
 .field-label { font-size: 13px; color: var(--text-2); }
 .field-help { display: block; font-size: 12.5px; line-height: 1.45; color: var(--text-3); }
+.field-warning { color: var(--error); }
 .field-help code { color: var(--text-2); }
 .field-row { display: flex; gap: 12px; }
 .form-error { margin-top: 10px; color: var(--error); font-size: 13px; }
