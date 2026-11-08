@@ -925,7 +925,8 @@ export async function flushQueue(sessionId: string, receipt?: ToolReceipt, patch
   const workspace = getWorkspace(session.workspaceId);
   if (!workspace) throw new HttpError(404, 'No such workspace');
   if (NOT_ACCEPTING.has(workspace.status)) throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
-  releaseQueueHold(session, { ...patch, ...(session.role === 'lead' ? { autonomousTurns: 0 } : {}) }, receipt);
+  // Releasing it is someone going on, so a Lead's turns without the user count from nothing, unless the patch says otherwise.
+  releaseQueueHold(session, { ...(session.role === 'lead' ? { autonomousTurns: 0 } : {}), ...patch }, receipt);
   if ((workspace.status === 'stopped' || workspace.status === 'ready') && session.queue.length > 0) await startWorkspace(workspace);
   startNextQueued(session);
 }

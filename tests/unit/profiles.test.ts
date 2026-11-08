@@ -443,6 +443,19 @@ describe('moving a conversation', () => {
       expect(isWorking(session)).toBe(false);
     });
 
+    it('keeps a Lead’s count of turns without the user, so its pause still comes', async () => {
+      personal.autoSwitch = true;
+      const lead = runner.createLead(workspace);
+      // An agent's report waiting for it, from before the limit.
+      store.appendTranscript(lead.id, [{ id: 'update', ts: 1, type: 'user', text: 'Update from Lonca.', from: 'lonca', queued: true } as ChatItem]);
+      store.flushTranscript(lead.id);
+      Object.assign(lead, { hasMessages: true, lastOutcome: 'limit', limitProfileId: 'claude', held: true, autonomousTurns: 29, queue: ['update'] });
+      store.state.profileLimits = { claude: { at: Date.now() } };
+      system.describeProfiles();
+      await team.limitReached(lead, 'claude');
+      expect(lead).toMatchObject({ profileId: personal.id, held: false, autonomousTurns: 29, queue: ['update'] });
+    });
+
     it('stays at its limit if carrying on can’t be saved, or the server stops first, so it says so and the Lead hears', async () => {
       personal.autoSwitch = true;
       const agent = runner.createSession(workspace, { role: 'agent', agent: 'claude', work: { job: 'analyze' } });

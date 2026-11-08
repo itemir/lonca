@@ -499,6 +499,8 @@ export async function limitReached(session: Session, from: string, stopped = fal
   await retrySession(session, 'lonca', undefined, undefined, {
     lastOutcome: undefined, limitResetsAt: undefined, limitProfileId: undefined,
     ...(session.work ? { work: { ...session.work, unreported: false } } : {}),
+    // Nobody asked for this, so a Lead's turns without the user go on counting towards its pause.
+    ...(session.role === 'lead' ? { autonomousTurns: session.autonomousTurns } : {}),
   });
 }
 
