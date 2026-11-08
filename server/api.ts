@@ -2,10 +2,14 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import express, { type NextFunction, type Request, type Response, Router } from 'express';
 import { z } from 'zod';
-import type { AgentId, AppState, Project, Session, Workspace } from '../shared/types.ts';
+import { PROFILE_ID, profileIdOf } from '../shared/profiles.ts';
+import type { AppState, LeadChoice, Profile, Project, Session, Workspace } from '../shared/types.ts';
 import { playbookFor, resetPlaybook, savePlaybook } from './agents/playbook.ts';
-import { cancelQueued, createLead, createSession, deleteSession, flushQueue, interruptSession, publishSession, reportWorkspaceStopped, sendMessage } from './agents/runner.ts';
-import { checkButtonCanStart, closeWorkspaceLead, holdWhenStopped, markRead, stopAgents, switchLead, tryAgain, warnOfOtherWriter } from './agents/team.ts';
+import {
+  cancelQueued, chooseProfile, createLead, createSession, deleteSession, flushQueue, interruptSession, publishSession, reportWorkspaceStopped, sendMessage,
+} from './agents/runner.ts';
+import { checkButtonCanStart, closeWorkspaceLead, holdWhenStopped, markRead, moveToProfile, stopAgents, switchLead, tryAgain, warnOfOtherWriter } from './agents/team.ts';
+import { createProfile, removeProfile, updateProfile } from './profiles.ts';
 import { projectCodexKey } from './boundary.ts';
 import { execText, sbxLogout } from './sandbox.ts';
 import {
@@ -16,9 +20,10 @@ import {
   addProjectFromPath, addProjectFromUrl, listBranches, projectLifecycle, publishProject, removeProject,
 } from './projects.ts';
 import { dockerLogins, logins } from './logins.ts';
-import { flushState, getProject, getSession, getWorkspace, isClaudeCredential, saveState, secretsStatus, state, updateSecrets } from './store.ts';
+import { flushState, getProject, getSession, getWorkspace, isClaudeCredential, saveState, secretsStatus, setClaudeCredential, state, updateSecrets } from './store.ts';
 import {
-  checkClaudeCredential, checkCodexKey, checkSandboxes, clearAgentRejected, rebuildImage, refreshAgents, saveCodexApiKey, signOutCodex, system,
+  checkClaudeCredential, checkCodexKey, checkSandboxes, clearAgentRejected, clearProfileLimit, getProfile, rebuildImage, refreshAgents,
+  saveCodexApiKey, signOutCodex, system,
 } from './system.ts';
 import {
   closeTerminal, closeTerminalWindow, createShell, listTerminals, restartShell, runSetupScript, stopSetupScript,
@@ -56,8 +61,17 @@ function sessionParam(req: Request): Session {
   return session;
 }
 
-function agentParam(req: Request): AgentId {
-  return parse(z.enum(['claude', 'codex']), req.params.agent);
+function profileParam(req: Request): Profile {
+  const profile = PROFILE_ID.test(String(req.params.profile)) ? getProfile(String(req.params.profile)) : undefined;
+  if (!profile) throw new HttpError(404, 'That sign-in was removed.');
+  return profile;
+}
+
+const loginTarget = (profile: Profile) => ({ agent: profile.agent, profileId: profile.id });
+
+/** A sign-in that isn't the provider's, or is gone, goes to the provider's default. */
+function withProfile(choice: LeadChoice): LeadChoice {
+  return { ...choice, profileId: chooseProfile(choice.agent, choice.profileId) };
 }
 
 const attachmentSchema = z.object({
@@ -81,7 +95,7 @@ const projectSettingsSchema = z.object({
   env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'Environment variable names may only use letters, digits and underscores'), z.string()),
 }).partial();
 
-const leadChoiceSchema = z.object({ agent: z.enum(['claude', 'codex']), model: z.string().min(1), effort: z.string().min(1) });
+const leadChoiceSchema = z.object({ agent: z.enum(['claude', 'codex']), model: z.string().min(1), effort: z.string().min(1), profileId: z.string().optional() });
 
 const appSettingsSchema = z.object({
   branchPrefix: z.string().regex(/^[\w./-]*$/, 'Branch prefixes may only use letters, digits, dots, dashes and slashes'),
@@ -117,6 +131,7 @@ export function snapshot(me: AppState['me']): AppState {
     workspaces: state.workspaces,
     sessions: state.sessions,
     terminals: listTerminals(),
+    profiles: state.profiles,
     logins: logins.states(),
     system,
     catalog: state.catalog,
@@ -186,10 +201,11 @@ export function createApi(me: AppState['me']): Router {
       agent: z.enum(['claude', 'codex']).optional(),
       model: z.string().optional(),
       effort: z.string().optional(),
+      profileId: z.string().optional(),
       prompt: z.string().optional(),
     }), req.body ?? {});
     const created = await createWorkspace(project, { baseBranch: body.baseBranch }, (workspace) =>
-      createLead(workspace, { agent: body.agent, model: body.model, effort: body.effort }),
+      createLead(workspace, { agent: body.agent, model: body.model, effort: body.effort, profileId: body.profileId }),
     );
     if (body.prompt?.trim()) await sendMessage(created.session.id, body.prompt, []);
     res.status(201).json({ workspace: created.workspace, session: getSession(created.session.id) });
@@ -290,6 +306,7 @@ export function createApi(me: AppState['me']): Router {
       agent: z.enum(['claude', 'codex']).optional(),
       model: z.string().optional(),
       effort: z.string().optional(),
+      profileId: z.string().optional(),
     }), req.body ?? {});
     res.status(201).json(createSession(workspace, body));
   });
@@ -358,13 +375,16 @@ export function createApi(me: AppState['me']): Router {
       agent: z.enum(['claude', 'codex']).optional(),
       model: z.string().optional(),
       effort: z.string().optional(),
+      profileId: z.string().optional(),
     }), req.body);
-    const changesModel = Boolean(body.model || body.effort || body.agent);
+    const changesModel = Boolean(body.model || body.effort || body.agent || body.profileId);
     const workspace = getWorkspace(session.workspaceId);
     if (session.closedAt) throw new HttpError(409, 'This Lead was closed. Its conversation can still be read.');
     if (session.role === 'lead' && body.title) throw new HttpError(409, 'The Lead’s tab keeps its name.');
     if (session.role === 'lead' && changesModel && workspace?.leadLockedAt) throw new HttpError(409, 'The Lead stays on this model for this workspace. For another model, start a new workspace.');
     if (session.role === 'agent' && changesModel) throw new HttpError(409, 'The Lead chose this agent’s model.');
+    // Once it's started, that's a move, which the conversation records.
+    if (body.profileId && body.profileId !== profileIdOf(session) && session.hasMessages) throw new HttpError(409, 'This conversation has started. Move it to another sign-in instead.');
     if (body.agent && body.agent !== session.agent) {
       // Each CLI keeps its own history, so a conversation can't change agents midway.
       if (session.hasMessages) throw new HttpError(409, 'This conversation has started. Open a new tab to use a different agent.');
@@ -374,9 +394,10 @@ export function createApi(me: AppState['me']): Router {
     if (body.title) session.title = body.title;
     if (body.model) session.model = body.model;
     if (body.effort) session.effort = body.effort;
+    if (changesModel) session.profileId = chooseProfile(session.agent, body.profileId ?? profileIdOf(session));
     if (session.role === 'lead' && changesModel && workspace) {
       // A pick for one workspace leaves the default alone.
-      workspace.lead = { agent: session.agent, model: session.model, effort: session.effort };
+      workspace.lead = { agent: session.agent, model: session.model, effort: session.effort, profileId: session.profileId };
       publishWorkspace(workspace);
     } else if (changesModel) {
       state.settings.defaultAgent = session.agent;
@@ -413,6 +434,12 @@ export function createApi(me: AppState['me']): Router {
     res.status(204).end();
   });
 
+  // Not a change of model, so a Lead's lock doesn't apply. A turn under way finishes where it is.
+  api.post('/sessions/:id/profile', express.json(), async (req, res) => {
+    const body = parse(z.object({ profileId: z.string(), retry: z.boolean().default(false) }), req.body);
+    res.json(await moveToProfile(sessionParam(req), body.profileId, { retry: body.retry }));
+  });
+
   api.post('/sessions/:id/messages', express.json({ limit: '5mb' }), async (req, res) => {
     const body = parse(z.object({ text: z.string().min(1), attachments: z.array(attachmentSchema).default([]) }), req.body);
     const item = await sendMessage(String(req.params.id), body.text, body.attachments);
@@ -433,7 +460,7 @@ export function createApi(me: AppState['me']): Router {
 
   api.post('/sessions/:id/interrupt', async (req, res) => {
     const session = getSession(String(req.params.id));
-    // Neither a wake nor the Lead can restart what the user has stopped.
+    // Neither a wake, the Lead nor a move at a usage limit can restart what the user has stopped.
     if (session) holdWhenStopped(session);
     await interruptSession(String(req.params.id));
     res.status(204).end();
@@ -442,7 +469,8 @@ export function createApi(me: AppState['me']): Router {
   // Settings
 
   api.patch('/settings', express.json(), (req, res) => {
-    state.settings = { ...state.settings, ...parse(appSettingsSchema, req.body) };
+    const patch = parse(appSettingsSchema, req.body);
+    state.settings = { ...state.settings, ...patch, ...(patch.leadDefault ? { leadDefault: withProfile(patch.leadDefault) } : {}) };
     publishSettings();
     res.json(state.settings);
   });
@@ -464,19 +492,53 @@ export function createApi(me: AppState['me']): Router {
     res.json(playbookFor(owner));
   });
 
-  api.put('/secrets/claude', express.json(), async (req, res) => {
-    const { token } = parse(z.object({ token: z.string() }), req.body);
+  async function saveClaudeKey(profile: Profile, token: string): Promise<{ verified: boolean }> {
     const credential = stripSpace(token);
     if (!isClaudeCredential(credential)) throw new HttpError(400, 'That isn’t a key. Keys and tokens start with sk-ant-.');
     const check = await checkClaudeCredential(credential);
     if (check === 'refused') throw new HttpError(400, 'Claude didn’t accept this key.');
-    await logins.cancel('claude');
-    updateSecrets({ claudeToken: credential });
-    clearAgentRejected('claude');
+    await logins.cancel(loginTarget(profile));
+    if (getProfile(profile.id) !== profile) throw new HttpError(404, 'That sign-in was removed.');
+    setClaudeCredential(profile.id, credential);
+    signedInAgain(profile);
     publishSettings();
     await refreshAgents();
-    res.json({ verified: check === 'accepted' });
-  });
+    return { verified: check === 'accepted' };
+  }
+
+  async function saveCodexKey(profile: Profile, raw: string): Promise<{ verified: boolean }> {
+    const key = stripSpace(raw);
+    if (!/^sk-[\w-]{20,}$/.test(key)) throw new HttpError(400, 'That isn’t an API key. Keys start with sk-.');
+    const check = await checkCodexKey(key);
+    if (check === 'refused') throw new HttpError(400, 'OpenAI didn’t accept this key.');
+    await logins.cancel(loginTarget(profile));
+    if (getProfile(profile.id) !== profile) throw new HttpError(404, 'That sign-in was removed.');
+    saveCodexApiKey(key, profile.id);
+    applyCodexSetupEverywhere();
+    signedInAgain(profile);
+    await refreshAgents();
+    return { verified: check === 'accepted' };
+  }
+
+  /** It could be another account now, so what was known about the last one doesn't hold. */
+  function signedInAgain(profile: Profile): void {
+    clearAgentRejected(profile.id);
+    clearProfileLimit(profile.id);
+  }
+
+  async function signOut(profile: Profile): Promise<void> {
+    // Finishing one that's under way would sign back in.
+    await logins.cancel(loginTarget(profile));
+    if (profile.agent === 'codex') {
+      signOutCodex(profile.id);
+      applyCodexSetupEverywhere();
+    } else {
+      setClaudeCredential(profile.id, undefined);
+      publishSettings();
+    }
+    signedInAgain(profile);
+    await refreshAgents();
+  }
 
   api.put('/secrets/github', express.json(), (req, res) => {
     const { token } = parse(z.object({ token: z.string() }), req.body);
@@ -497,53 +559,52 @@ export function createApi(me: AppState['me']): Router {
     res.status(204).end();
   });
 
-  api.post('/agents/:agent/login', express.json(), async (req, res) => {
+  // Sign-ins. Each provider can have several, and each signs in and out on its own.
+
+  api.post('/profiles', express.json(), (req, res) => {
+    const body = parse(z.object({ agent: z.enum(['claude', 'codex']), name: z.string(), firstName: z.string().optional() }), req.body);
+    res.status(201).json(createProfile(body.agent, body.name, body.firstName));
+  });
+
+  api.patch('/profiles/:profile', express.json(), (req, res) => {
+    const body = parse(z.object({ name: z.string().optional(), autoSwitch: z.boolean().optional(), makeDefault: z.literal(true).optional() }), req.body);
+    res.json(updateProfile(profileParam(req), body));
+  });
+
+  api.delete('/profiles/:profile', async (req, res) => {
+    await removeProfile(profileParam(req));
+    res.status(204).end();
+  });
+
+  api.post('/profiles/:profile/login', express.json(), async (req, res) => {
     const { method } = parse(z.object({ method: z.enum(['browser', 'device']).optional() }), req.body ?? {});
-    res.status(201).json(await logins.start(agentParam(req), method));
+    res.status(201).json(await logins.start(loginTarget(profileParam(req)), method));
   });
 
-  api.delete('/agents/:agent/login', async (req, res) => {
-    await logins.cancel(agentParam(req));
+  api.delete('/profiles/:profile/login', async (req, res) => {
+    await logins.cancel(loginTarget(profileParam(req)));
     res.status(204).end();
   });
 
-  api.post('/agents/:agent/login/code', express.json(), async (req, res) => {
+  api.post('/profiles/:profile/login/code', express.json(), async (req, res) => {
     const { code } = parse(z.object({ code: z.string() }), req.body);
-    await logins.submitCode(agentParam(req), code);
+    await logins.submitCode(loginTarget(profileParam(req)), code);
     res.status(204).end();
   });
 
-  api.get('/agents/:agent/login/output', (req, res) => {
-    res.type('text/plain').send(logins.output(agentParam(req)));
+  api.get('/profiles/:profile/login/output', (req, res) => {
+    res.type('text/plain').send(logins.output(loginTarget(profileParam(req))));
   });
 
-  api.put('/agents/codex/api-key', express.json(), async (req, res) => {
-    const key = stripSpace(parse(z.object({ key: z.string() }), req.body).key);
-    if (!/^sk-[\w-]{20,}$/.test(key)) throw new HttpError(400, 'That isn’t an API key. Keys start with sk-.');
-    const check = await checkCodexKey(key);
-    if (check === 'refused') throw new HttpError(400, 'OpenAI didn’t accept this key.');
-    await logins.cancel('codex');
-    saveCodexApiKey(key);
-    applyCodexSetupEverywhere();
-    clearAgentRejected('codex');
-    await refreshAgents();
-    res.json({ verified: check === 'accepted' });
-  });
-
-  api.post('/agents/:agent/logout', async (req, res) => {
-    const agent = agentParam(req);
-    // Finishing one that's under way would sign back in.
-    await logins.cancel(agent);
-    if (agent === 'codex') {
-      signOutCodex();
-      applyCodexSetupEverywhere();
-    } else {
-      updateSecrets({ claudeToken: '' });
-      publishSettings();
-    }
-    clearAgentRejected(agent);
-    await refreshAgents();
+  api.post('/profiles/:profile/logout', async (req, res) => {
+    await signOut(profileParam(req));
     res.status(204).end();
+  });
+
+  api.put('/profiles/:profile/key', express.json(), async (req, res) => {
+    const profile = profileParam(req);
+    const { key } = parse(z.object({ key: z.string() }), req.body);
+    res.json(profile.agent === 'claude' ? await saveClaudeKey(profile, key) : await saveCodexKey(profile, key));
   });
 
   api.post('/agents/refresh', async (_req, res) => {

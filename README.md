@@ -32,7 +32,7 @@ To reopen Lonca later, run `npm start` again. The link it prints contains an acc
 
 - **Projects and workspaces.** Add as many repositories as you like, and open as many workspaces in each as you need. Each one gets a city name, a branch such as `you/amman` from `origin/main`, and a virtual machine of its own.
 - **A Lead in every workspace.** The first tab is an agent that answers for the outcome. It does the work itself or starts other agents, on any model, in tabs of their own, and compares and cross-checks what they find.
-- **Claude and Codex.** Open several conversations in one workspace, each with its own agent, model and effort level. Conversations keep going if you close the browser or restart Lonca, and you can queue follow-ups while an agent works.
+- **Claude and Codex.** Open several conversations in one workspace, each with its own agent, model and effort level, and sign-in if you have several. Conversations keep going if you close the browser or restart Lonca, and you can queue follow-ups while an agent works.
 - **Changes and checks.** Browse and search files, read a diff of everything on the branch, and follow a pull request's checks. Create PR asks the agent to commit, push and open one.
 - **Terminals.** Each workspace has real shells inside it, and a Setup tab if your project has a setup script. A shell's prompt names its project and the last part of its branch, as in `lonca@lonca-malmo` for `itemir/malmo` in the lonca project, and follows the branch if you switch. A shell can move to a separate browser window, which you can place, minimize or make full screen like any other. Closing that window brings the terminal back to the panel, still running. If your browser blocks the window, allow pop-ups for Lonca. Run scripts left running by an older version appear as Recovered run script terminals; closing one stops its processes.
 
@@ -43,6 +43,7 @@ Every new workspace opens on a tab called **Lead**. Tell it the outcome you want
 A workspace has one Lead at a time. Close it and you can start another, which is told about the agents already there. The closed one's conversation stays readable from the workspace's **⋯** menu.
 
 - **Its model.** The default is in Settings. You can change it for a workspace until you send the Lead its first message. After that it stays, including for a new Lead. The one exception is when the model can't run, because it's reached a usage limit, gone away or been signed out: a banner offers to move the Lead, and the move is recorded in the conversation. Moving to another provider starts a new Lead, because the CLIs can't read each other's conversations.
+- **Its sign-in.** Where a provider has [several sign-ins](#several-sign-ins), the Lead's can change at any time, from its model's lock or the limit banner, because the conversation goes with it. Its agents start on its own sign-in, or for another provider on that one's default, and stay on the one they started on until they're moved, even if the Lead moves. Its tools only let it choose others where you've allowed conversations to move there by themselves, and `team_status` tells it which those are and which are at their limit. Nothing else stops it: every virtual machine has every sign-in's placeholder, so anything running in one could use any of them.
 - **Agents.** They share the workspace's files and branch, so everyone sees the same changes. What each one is told and what it reports go only to the Lead and you, and they have no way to reach each other. One at a time may change files. The others are told not to, and if files change during their turn, the Lead and you hear about it. While one is changing files, **Try now** and **Send now** won't start another. A message you type to another goes ahead, with a warning. Settings says how many can work at once. The Lead does the pushing. Agents are told to leave it to the Lead, but nothing stops them.
 - **Waiting.** A Lead waiting for agents isn't running, so it uses nothing. It gets a new turn when they've all finished, or as soon as one fails or hits a limit. After 30 turns without a word from you, it pauses until you let it continue.
 - **Stopping.** Stop on the Lead stops its turn. **Stop the agents**, or Stop in an agent's tab, stops them until you say otherwise, and the Lead can't restart an agent you stopped.
@@ -98,9 +99,25 @@ The sign-in pages send your browser to a port on `localhost`, as they do for the
 
 None of these ever enter a workspace. Docker Sandboxes' proxy, on your computer, adds them to requests as they leave a virtual machine, and all that's inside is a placeholder. Claude's goes only to `api.anthropic.com`, Codex's only to `chatgpt.com` and `api.openai.com`, and GitHub's only to GitHub's own hosts. Signing in or out takes effect straight away, in workspaces that are already running, though a terminal opened before you first signed in to Claude needs reopening. In a virtual machine, a connected GitHub account is used for GitHub even if the project sets its own `GH_TOKEN`.
 
-On your computer, the Claude and GitHub tokens are in `~/.lonca/secrets.json`, Codex's login is in `~/.lonca/helper-credentials`, and `~/.lonca/boundary` holds what the proxy reads. All are readable only by you and none is mounted into a virtual machine. Lonca renews Codex's login before it runs out.
+On your computer, the Claude and GitHub tokens are in `~/.lonca/secrets.json`, each Codex login is in `~/.lonca/helper-credentials`, and `~/.lonca/boundary` holds what the proxy reads. All are readable only by you and none is mounted into a virtual machine. Lonca renews Codex's logins before they run out.
 
-A project can use a key of its own by setting `CODEX_API_KEY` or `OPENAI_API_KEY` in its environment variables. That one isn't kept out: it goes into the project's virtual machines as it is, where anything in them can read it. Changing or removing it updates the ones running, though a program that already read it keeps what it read.
+On a phone, signing in starts with a code to paste for Claude and a one-time code for Codex, since a phone is rarely the computer the sign-in page comes back to.
+
+A project can use a key of its own by setting `CODEX_API_KEY` or `OPENAI_API_KEY` in its environment variables. That one isn't kept out: it goes into the project's virtual machines as it is, where anything in them can read it. Changing or removing it updates the ones running, though a program that already read it keeps what it read. It's used in place of any sign-in, so its limits are its own, and moving a conversation to another sign-in doesn't change what it runs on.
+
+### Several sign-ins
+
+A provider can have more than one sign-in, such as a work and a personal Claude account, each a subscription or an API key. Add one in Settings with **Add another Claude sign-in**, which asks you to name both, so you can tell them apart. With one per provider, nothing else about signing in changes.
+
+A conversation runs on one sign-in at a time, shown beside its model. It can move to another of the same provider at any time, from the model picker, and keep its conversation, because it's the same CLI with another credential. A turn that's running finishes on the sign-in it started on. Moving to another provider still means a new conversation, because the CLIs can't read each other's.
+
+The first sign-in of each provider is its default, for terminals and for anything that doesn't choose. **Make default** in a sign-in's **⋯** menu changes it. Removing a sign-in deletes its credentials and moves conversations on it to the default, which each says. It can't be removed while one is running on it.
+
+When a conversation reaches a usage limit, its banner says which sign-in's it was and offers to **Continue on** another that's signed in, with the conversation so far. The move is recorded in the conversation. One that reached its limit isn't offered again until the limit ends, or for an hour if the service didn't say when. To have Lonca do this without you, turn on **Move conversations here by themselves** for the sign-ins it may move to. It's off for every sign-in until you turn it on, since an API key is billed per token. Turning it off stops conversations moving there, and those already on it stay until you move them. It only happens at a usage limit, never because a service refused a sign-in or after you've pressed Stop, and it's recorded in the conversation as well. You're only told about a limit when there's nowhere left to move.
+
+Every sign-in has a placeholder and a file of its own, and every virtual machine has them all, so which one a process uses depends only on the placeholder it's given. A sign-in you add reaches workspaces that are already running.
+
+Claude signs in with whichever account your browser is using on claude.ai. To add a different account, switch accounts there first, or open the sign-in page in a private window. Each provider's terms decide how its accounts may be used, including limits. Lonca doesn't check them for you.
 
 ## How isolation works
 
@@ -135,7 +152,7 @@ Agents run with their own permission prompts turned off, since the workspace is 
 
 - Codex replies appear when each message is complete, rather than word by word.
 - Lonca doesn't yet check that a Lead's changes were reviewed before it opens a pull request. The playbook asks for it, and the Lead's report is its own account.
-- Nothing resumes by itself when a usage limit ends. Use **Try now**, or tell the Lead to carry on.
+- Nothing resumes by itself when a usage limit ends. Use **Try now**, **Continue on** another sign-in, or tell the Lead to carry on.
 - Agents share one checkout, so two running tests at once can collide over build output or ports. The playbook tells the Lead to stagger them.
 - `sudo apt-get install` works in a workspace, but only lasts until the workspace is rebuilt. To keep system packages, install them in a workspace and save its virtual machine as a template, using the name shown when the workspace opened. Then enter the template's tag as the project's custom template, and rebuild workspaces to move them onto it:
 
@@ -144,7 +161,7 @@ Agents run with their own permission prompts turned off, since the workspace is 
   sbx template save <virtual machine> my-template:1
   ```
 
-- Sign-in tokens reach the proxy through `sbx secret set-custom`, which Docker marks as experimental, because its built-in Anthropic and OpenAI services can't take one for a single sandbox. A future version of Docker Sandboxes could change it.
+- Sign-in tokens reach the proxy through `sbx secret set-custom`, which Docker marks as experimental, because its built-in Anthropic and OpenAI services can't take one for a single sandbox. A future version of Docker Sandboxes could change it. A removed sign-in's placeholder stays registered on virtual machines until they're rebuilt, with nothing behind it.
 - Local repositories with no remote can't be pushed from a workspace. Their commits stay on the branch in `~/.lonca/projects/<project>/repo.git`, and you can fetch them from there.
 - Lonca is for one person on one computer. To use it from elsewhere, forward its port over SSH instead of exposing it.
 
@@ -236,6 +253,7 @@ Recovery tests cover operations and their failure boundaries together:
 | A Lead's tool calls made while the server was down or repeated after a crash, agents that finish while it's down, usage limits, stopped agents and Leads, closing a Lead with agents running | `tests/docker/lead.test.ts`, `tests/e2e/lead.spec.ts` |
 | Signing Docker Sandboxes in and out: reading what `sbx login` prints, cancelling, time limits, the warning before signing out, and workspaces stopped by it | `tests/unit/docker-login.test.ts`, `tests/e2e/docker-signin.spec.ts`, `tests/docker/lonca.test.ts` |
 | Credentials staying out of every process and file in a workspace; what the proxy is told, per sandbox; renewing Codex's sign-in; moving the login from where older workspaces can see it | `tests/docker/boundary.test.ts`, `tests/unit/boundary.test.ts` |
+| Several sign-ins: each one's placeholder, file and environment, one added while workspaces run, which one a turn runs on, moving a conversation by hand and by itself at a limit, Stop and failed saves around that, removing two at once, and what a Lead may choose | `tests/unit/profiles.test.ts`, `tests/unit/sandbox-runtime.test.ts`, `tests/docker/boundary.test.ts`, `tests/e2e/profiles.spec.ts` |
 
 The outage tests cut their own server off from the stand-in for `sbx`, leaving its sandboxes running. They need that stand-in, so they're skipped in `test:sandbox`.
 

@@ -124,10 +124,10 @@ it('opens a terminal even when Codex can’t be set up', async () => {
 
 it('updates a running workspace when a global API key is saved', async () => {
   expect(config()).toContain(chatgpt);
-  await lonca.api('PUT', '/agents/codex/api-key', { key: globalKey });
+  await lonca.api('PUT', '/profiles/codex/key', { key: globalKey });
   expect(fs.readFileSync(path.join(lonca.home, 'boundary', 'codex'), 'utf8')).toBe(globalKey);
   await until('the API key endpoint', () => !config().includes(chatgpt));
-  expect((await state()).system.agents.codex.signedIn).toBe(true);
+  expect((await state()).system.profiles.codex.signedIn).toBe(true);
 });
 
 it('doesn’t hold up signing out while a workspace is busy', async () => {
@@ -137,9 +137,9 @@ it('doesn’t hold up signing out while a workspace is busy', async () => {
   try {
     await until('the new workspace to be busy', () => fs.existsSync(flag('checkout-entered')));
     const started = Date.now();
-    await lonca.api('POST', '/agents/codex/logout');
+    await lonca.api('POST', '/profiles/codex/logout');
     expect(Date.now() - started).toBeLessThan(5000);
-    expect((await state()).system.agents.codex.signedIn).toBe(false);
+    expect((await state()).system.profiles.codex.signedIn).toBe(false);
   } finally {
     fs.rmSync(flag('hold-checkout'), { force: true });
     await lonca.waitForWorkspace(created.workspace.id);
@@ -148,9 +148,9 @@ it('doesn’t hold up signing out while a workspace is busy', async () => {
 });
 
 it('moves a running workspace to ChatGPT’s address on signing out, unless a project has its own key', async () => {
-  await lonca.api('PUT', '/agents/codex/api-key', { key: globalKey });
+  await lonca.api('PUT', '/profiles/codex/key', { key: globalKey });
   await until('the API key endpoint', () => !config().includes(chatgpt));
-  await lonca.api('POST', '/agents/codex/logout');
+  await lonca.api('POST', '/profiles/codex/logout');
   await until('the ChatGPT endpoint', () => config().includes(chatgpt));
   await lonca.api('PATCH', `/projects/${project.id}`, { settings: { env: { OPENAI_API_KEY: 'sk-project-override' } } });
   // Project settings deliberately update running VMs in the background.
@@ -162,7 +162,7 @@ it('moves a running workspace to ChatGPT’s address on signing out, unless a pr
 
 it('keeps stopped workspaces stopped and applies the current endpoint on their next boot', async () => {
   await lonca.api('POST', `/workspaces/${workspace.id}/stop`);
-  await lonca.api('PUT', '/agents/codex/api-key', { key: globalKey });
+  await lonca.api('PUT', '/profiles/codex/key', { key: globalKey });
   expect((await lonca.workspace(workspace.id)).status).toBe('stopped');
   expect(sandboxRunning(workspace.sandboxName)).toBe(false);
   await lonca.api('POST', `/workspaces/${workspace.id}/start`);

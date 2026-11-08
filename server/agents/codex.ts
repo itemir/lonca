@@ -170,7 +170,7 @@ export function createCodexParser(runId: string): AgentParser {
 }
 
 export const codexAdapter: AgentAdapter = {
-  command({ session, systemPrompt, attachments, tools }) {
+  command({ session, systemPrompt, attachments, tools, config }) {
     const images = attachments.filter((file) => file.mime.startsWith('image/')).flatMap((file) => ['-i', file.path]);
     const options = [
       ...images,
@@ -183,6 +183,8 @@ export const codexAdapter: AgentAdapter = {
       '-c', `developer_instructions=${JSON.stringify(systemPrompt)}`,
       // A Lead's agents have to be ones the user can see, so its CLI's own kind are off.
       ...(tools ? ['-c', `mcp_servers.lonca.command=${JSON.stringify(tools.command)}`, '-c', `mcp_servers.lonca.args=${JSON.stringify(tools.args)}`, '-c', 'features.multi_agent=false'] : []),
+      // A VM can have sign-ins of both kinds, which are used at different addresses.
+      ...(config ?? []),
     ];
     return session.resumeId
       ? ['codex', 'exec', 'resume', session.resumeId, ...options, '-']

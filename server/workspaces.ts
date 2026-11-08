@@ -8,7 +8,7 @@ import { FIRST_WORKSPACE_PORT, PORTS_PER_WORKSPACE, PREFIX, paths } from './conf
 import { publish } from './events.ts';
 import { pickWorkspaceName } from './names.ts';
 import { projectLifecycle, refreshFromLocalRepo } from './projects.ts';
-import { ensureSandbox, exec, execText, isSandboxRunning, removeSandbox, sandboxState, stopSandbox } from './sandbox.ts';
+import { type ProxySecret, addSandboxSecret, ensureSandbox, exec, execText, isSandboxRunning, removeSandbox, sandboxState, stopSandbox } from './sandbox.ts';
 import { deleteTranscript, flushState, getProject, getSecrets, getWorkspace, saveState, state } from './store.ts';
 import { checkSandboxes, ensureCustomTemplate, ensureSandboxImage, releaseTemplateImage, system, templateImageOf } from './system.ts';
 import { HttpError, KeyedQueue, RuntimeStoppedError, errorMessage, newId, removeTree } from './util.ts';
@@ -155,6 +155,13 @@ export async function applyCodexSetup(project: Project): Promise<void> {
  */
 export function applyCodexSetupEverywhere(): void {
   for (const project of state.projects) void applyCodexSetup(project);
+}
+
+/** A new sign-in has to reach workspaces that are already running, for their agents to use it. */
+export async function addProxySecretEverywhere(secret: ProxySecret): Promise<void> {
+  await Promise.all(state.workspaces.map((workspace) => addSandboxSecret(workspace.sandboxName, secret).catch((error) => {
+    console.error(`could not give ${workspace.name} a new sign-in:`, errorMessage(error));
+  })));
 }
 
 /** Observes a workspace's sandbox without waking it for reads or automatic terminals. */

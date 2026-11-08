@@ -1,6 +1,6 @@
 import type {
-  AgentId, Attachment, ChangeSet, Checks, DockerLoginState, FileContent, FileEntry, LeadChoice, LoginMethod, LoginState, Playbook, Project, ProjectSettings, SearchHit, Session,
-  SessionSnapshot, TerminalInfo, UserItem, Workspace, AppState, AppSettings,
+  AgentId, Attachment, ChangeSet, Checks, DockerLoginState, FileContent, FileEntry, LeadChoice, LoginMethod, LoginState, Playbook, Profile, Project, ProjectSettings,
+  SearchHit, Session, SessionSnapshot, TerminalInfo, UserItem, Workspace, AppState, AppSettings,
 } from '../../shared/types.ts';
 import { accessToken } from './auth.ts';
 
@@ -42,7 +42,7 @@ export const api = {
     request<Project>('PATCH', `/projects/${id}`, patch),
   removeProject: (id: string) => request<void>('DELETE', `/projects/${id}`),
   branches: (id: string) => request<string[]>('GET', `/projects/${id}/branches`),
-  createWorkspace: (projectId: string, options: { baseBranch?: string; agent?: AgentId; model?: string; effort?: string; prompt?: string } = {}) =>
+  createWorkspace: (projectId: string, options: { baseBranch?: string; agent?: AgentId; model?: string; effort?: string; profileId?: string; prompt?: string } = {}) =>
     request<{ workspace: Workspace; session: Session }>('POST', `/projects/${projectId}/workspaces`, options),
 
   renameWorkspace: (id: string, title: string) => request<Workspace>('PATCH', `/workspaces/${id}`, { title }),
@@ -77,7 +77,7 @@ export const api = {
   runSetupScript: (workspaceId: string) => request<TerminalInfo>('POST', `/workspaces/${workspaceId}/scripts/setup`),
   stopSetupScript: (workspaceId: string) => request<void>('DELETE', `/workspaces/${workspaceId}/scripts/setup`),
 
-  createSession: (workspaceId: string, options: { agent?: AgentId; model?: string; effort?: string } = {}) =>
+  createSession: (workspaceId: string, options: { agent?: AgentId; model?: string; effort?: string; profileId?: string } = {}) =>
     request<Session>('POST', `/workspaces/${workspaceId}/sessions`, options),
   createLead: (workspaceId: string) => request<Session>('POST', `/workspaces/${workspaceId}/lead`),
   switchLead: (workspaceId: string, choice: LeadChoice) => request<Session>('POST', `/workspaces/${workspaceId}/lead/switch`, choice),
@@ -89,8 +89,10 @@ export const api = {
   savePlaybook: (content: string, project?: string) => request<Playbook>('PUT', '/playbook', { content, project }),
   resetPlaybook: (project?: string) => request<Playbook>('DELETE', `/playbook?${query({ project: project ?? '' })}`),
   session: (id: string) => request<SessionSnapshot>('GET', `/sessions/${id}`),
-  updateSession: (id: string, patch: { title?: string; agent?: AgentId; model?: string; effort?: string }) =>
+  updateSession: (id: string, patch: { title?: string; agent?: AgentId; model?: string; effort?: string; profileId?: string }) =>
     request<Session>('PATCH', `/sessions/${id}`, patch),
+  /** Moves a conversation to another of its provider's sign-ins. With `retry`, one that stopped carries on there. */
+  moveSession: (id: string, profileId: string, retry = false) => request<Session>('POST', `/sessions/${id}/profile`, { profileId, retry }),
   deleteSession: (id: string) => request<void>('DELETE', `/sessions/${id}`),
   sendMessage: (id: string, text: string, attachments: Attachment[]) =>
     request<UserItem>('POST', `/sessions/${id}/messages`, { text, attachments }),
@@ -99,15 +101,17 @@ export const api = {
   interrupt: (id: string) => request<void>('POST', `/sessions/${id}/interrupt`),
 
   updateSettings: (patch: Partial<AppSettings>) => request<AppSettings>('PATCH', '/settings', patch),
-  saveClaudeToken: (token: string) => request<{ verified: boolean }>('PUT', '/secrets/claude', { token }),
   saveGithubToken: (token: string) => request<void>('PUT', '/secrets/github', { token }),
   importGithubToken: () => request<void>('POST', '/secrets/github/import'),
-  startLogin: (agent: AgentId, method: LoginMethod) => request<LoginState | null>('POST', `/agents/${agent}/login`, { method }),
-  cancelLogin: (agent: AgentId) => request<void>('DELETE', `/agents/${agent}/login`),
-  submitLoginCode: (agent: AgentId, code: string) => request<void>('POST', `/agents/${agent}/login/code`, { code }),
-  loginOutput: (agent: AgentId) => request<string>('GET', `/agents/${agent}/login/output`),
-  saveCodexKey: (key: string) => request<{ verified: boolean }>('PUT', '/agents/codex/api-key', { key }),
-  logout: (agent: AgentId) => request<void>('POST', `/agents/${agent}/logout`),
+  addProfile: (agent: AgentId, name: string, firstName?: string) => request<Profile>('POST', '/profiles', { agent, name, firstName }),
+  updateProfile: (id: string, patch: { name?: string; autoSwitch?: boolean; makeDefault?: true }) => request<Profile>('PATCH', `/profiles/${id}`, patch),
+  removeProfile: (id: string) => request<void>('DELETE', `/profiles/${id}`),
+  saveKey: (profileId: string, key: string) => request<{ verified: boolean }>('PUT', `/profiles/${profileId}/key`, { key }),
+  startLogin: (profileId: string, method: LoginMethod) => request<LoginState | null>('POST', `/profiles/${profileId}/login`, { method }),
+  cancelLogin: (profileId: string) => request<void>('DELETE', `/profiles/${profileId}/login`),
+  submitLoginCode: (profileId: string, code: string) => request<void>('POST', `/profiles/${profileId}/login/code`, { code }),
+  loginOutput: (profileId: string) => request<string>('GET', `/profiles/${profileId}/login/output`),
+  logout: (profileId: string) => request<void>('POST', `/profiles/${profileId}/logout`),
   refreshAgents: () => request<void>('POST', '/agents/refresh'),
   rebuildImage: () => request<void>('POST', '/image/rebuild'),
   checkSandboxes: () => request<void>('POST', '/sandboxes/check'),

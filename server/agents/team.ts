@@ -1,9 +1,13 @@
 import crypto from 'node:crypto';
-import type { AgentId, AgentJob, ChatItem, LeadChoice, NoticeItem, Session, TextItem, ToolItem, UserItem, Workspace } from '../../shared/types.ts';
+import type { AgentId, AgentJob, ChatItem, LeadChoice, NoticeItem, Profile, Session, TextItem, ToolItem, UserItem, Workspace } from '../../shared/types.ts';
 import { canRun, isWorking, leadBlocker, staysHeld } from '../../shared/lead.ts';
+import {
+  autoSwitchTarget, hasSeveral, isLimited, isReady, leadDefaultFor, leadMayUse, limitEnds, profileIdOf, profileLabel, profileName, profileStatus,
+  projectBringsKey,
+} from '../../shared/profiles.ts';
 import { notifyUser } from '../notify.ts';
 import { getProject, getSession, getWorkspace, state } from '../store.ts';
-import { system } from '../system.ts';
+import { getProfile, system } from '../system.ts';
 import { transcriptFor } from '../transcript.ts';
 import { HttpError } from '../util.ts';
 import { publishWorkspace, startWorkspace } from '../workspaces.ts';
@@ -24,8 +28,20 @@ function modelName(session: Session): string {
   return state.catalog[session.agent].models.find((model) => model.id === session.model)?.label ?? session.model;
 }
 
+/** A sign-in's long name, such as "Claude – work". */
+function signInName(id: string, agent: AgentId): string {
+  return profileLabel(state.profiles, state.catalog, id, agent);
+}
+
 function nameOf(session: Session): string {
-  return `"${session.title}" (${modelName(session)}, id ${session.id})`;
+  // Which sign-in only says anything where there's more than one.
+  const signIn = hasSeveral(state.profiles, session.agent) ? `, sign-in ${profileIdOf(session)}` : '';
+  return `"${session.title}" (${modelName(session)}${signIn}, id ${session.id})`;
+}
+
+/** Whose usage limit stopped it, which can be another sign-in's than the one it's on now. */
+function limitName(session: Session): string {
+  return signInName(session.limitProfileId ?? profileIdOf(session), session.agent);
 }
 
 function stateOf(session: Session): string {
@@ -33,7 +49,7 @@ function stateOf(session: Session): string {
   if (session.userStopped) return 'stopped by the user';
   if (session.queue.length > 0 && !session.held) return 'queued';
   switch (session.lastOutcome) {
-    case 'limit': return 'paused at a usage limit';
+    case 'limit': return `paused at the usage limit of ${limitName(session)}`;
     case 'failed': return 'failed';
     case 'stopped': return 'stopped';
     case 'completed': return 'finished';
@@ -41,15 +57,57 @@ function stateOf(session: Session): string {
   }
 }
 
-function signedIn(agent: AgentId, workspace: Workspace): boolean {
-  return canRun(agent, system, getProject(workspace.projectId));
+/** Whether a Lead can start an agent on this provider, on a sign-in it may use. */
+function signedIn(lead: Session, agent: AgentId, workspace: Workspace): boolean {
+  const project = getProject(workspace.projectId);
+  if (projectBringsKey(agent, project)) return true;
+  return state.profiles.some((profile) => profile.agent === agent && leadMayUse(lead, profile, state.profiles)
+    && canRun({ agent, profileId: profile.id }, system, project));
 }
 
-function usableModels(workspace: Workspace): string {
+function usableModels(lead: Session, workspace: Workspace): string {
   return (Object.keys(state.catalog) as AgentId[])
-    .filter((agent) => signedIn(agent, workspace))
+    .filter((agent) => signedIn(lead, agent, workspace))
     .flatMap((agent) => state.catalog[agent].models.map((model) => `${model.id} (${state.catalog[agent].label}; ${model.efforts.join(', ')}; default ${model.defaultEffort})`))
     .join('\n');
+}
+
+function describeSignIn(profile: Profile, lead: Session): string {
+  const status = profileStatus(system, profile.id);
+  const ends = limitEnds(status);
+  const whose = profile.agent === lead.agent && profile.id === profileIdOf(lead) ? 'yours'
+    : leadMayUse(lead, profile, state.profiles) ? (profile.autoSwitch ? 'allowed' : 'the default') : 'not for you';
+  const condition = !status.signedIn ? 'not signed in'
+    : status.rejected ? 'its service stopped accepting it'
+      : isLimited(status) ? `at its usage limit${ends ? ` until ${new Date(ends).toISOString()}` : ''}` : 'ready';
+  return `- ${profile.id}: ${profileName(profile, state.catalog)} (${whose}): ${condition}`;
+}
+
+/** The sign-ins agents can run on, which the Lead can choose between when a provider has several. */
+function signInList(lead: Session): string {
+  return `Sign-ins (id: name (whether you may use it): state). You may start or move agents on yours, another provider's default, and any the user allowed:\n${state.profiles.map((profile) => describeSignIn(profile, lead)).join('\n')}`;
+}
+
+/**
+ * The sign-in an agent of this provider runs on: the one the Lead asked for, if it may use it, or
+ * its own, or for another provider that one's default.
+ */
+function signInArg(lead: Session, workspace: Workspace, agent: AgentId, args: Record<string, unknown>, current?: string): string {
+  const wanted = args.sign_in;
+  if (wanted === undefined || wanted === null || wanted === '') return current ?? leadDefaultFor(lead, agent, state.profiles) ?? agent;
+  if (typeof wanted !== 'string') throw new ToolError('sign_in must be a sign-in id from team_status.');
+  const profile = getProfile(wanted);
+  if (!profile) throw new ToolError(`There's no sign-in with the id ${wanted}.\n\n${signInList(lead)}`);
+  const name = profileName(profile, state.catalog);
+  if (profile.agent !== agent) throw new ToolError(`${wanted} is one of ${state.catalog[profile.agent].label}’s sign-ins, and this model needs one of ${state.catalog[agent].label}’s.`);
+  if (wanted === current) return wanted;
+  if (!leadMayUse(lead, profile, state.profiles)) throw new ToolError(`The user hasn't allowed you to use ${name}. Ask them, or use one you may.\n\n${signInList(lead)}`);
+  const status = profileStatus(system, profile.id);
+  if (!projectBringsKey(agent, getProject(workspace.projectId))) {
+    if (!isReady(status)) throw new ToolError(`${name} isn't signed in, so nothing can run on it.`);
+    if (isLimited(status) && profile.id !== leadDefaultFor(lead, agent, state.profiles)) throw new ToolError(`${name} is at its usage limit.\n\n${signInList(lead)}`);
+  }
+  return profile.id;
 }
 
 function agentArg(lead: Session, args: Record<string, unknown>): Session {
@@ -109,14 +167,14 @@ export function warnOfOtherWriter(session: Session): void {
   if (writer) notice(session.id, undefined, 'warning', `${writer.title} is changing files at the same time, so these two could overwrite each other’s work.`);
 }
 
-function findModel(workspace: Workspace, id: string): { agent: AgentId; efforts: string[]; defaultEffort: string } {
+function findModel(lead: Session, workspace: Workspace, id: string): { agent: AgentId; efforts: string[]; defaultEffort: string } {
   for (const agent of Object.keys(state.catalog) as AgentId[]) {
     const model = state.catalog[agent].models.find((entry) => entry.id === id);
     if (!model) continue;
-    if (!signedIn(agent, workspace)) throw new ToolError(`${state.catalog[agent].label} isn't signed in, so ${id} can't run. You can use:\n${usableModels(workspace)}`);
+    if (!signedIn(lead, agent, workspace)) throw new ToolError(`${state.catalog[agent].label} isn't signed in, so ${id} can't run. You can use:\n${usableModels(lead, workspace)}`);
     return { agent, efforts: model.efforts, defaultEffort: model.defaultEffort };
   }
-  throw new ToolError(`There's no model called ${id}. You can use:\n${usableModels(workspace)}`);
+  throw new ToolError(`There's no model called ${id}. You can use:\n${usableModels(lead, workspace)}`);
 }
 
 // The receipt is saved with the message, so replay can return the same reply even if the user
@@ -132,12 +190,16 @@ async function spawnAgent(lead: Session, workspace: Workspace, call: ToolCall): 
   if (!agent) {
     const label = textArg(call.args, 'label').trim().replace(/\s+/g, ' ').slice(0, LABEL_LENGTH);
     const job = jobArg(call.args) ?? 'analyze';
-    const model = findModel(workspace, textArg(call.args, 'model'));
+    const model = findModel(lead, workspace, textArg(call.args, 'model'));
     const effort = typeof call.args.effort === 'string' ? call.args.effort : model.defaultEffort;
     if (!model.efforts.includes(effort)) throw new ToolError(`${call.args.model} doesn't offer the thinking level ${effort}. It offers: ${model.efforts.join(', ')}.`);
+    const profileId = signInArg(lead, workspace, model.agent, call.args);
+    if (!canRun({ agent: model.agent, profileId }, system, getProject(workspace.projectId))) {
+      throw new ToolError(`${signInName(profileId, model.agent)} isn't signed in, so ${call.args.model} can't run on it.\n\n${signInList(lead)}`);
+    }
     checkRoom(workspace);
     checkOneWriter(lead, job);
-    agent = createSession(workspace, { id, role: 'agent', title: label, agent: model.agent, model: call.args.model as string, effort, work: { job } });
+    agent = createSession(workspace, { id, role: 'agent', title: label, agent: model.agent, model: call.args.model as string, effort, profileId, work: { job } });
   }
   const text = `Started ${nameOf(agent)}. End your turn: Lonca wakes you when it finishes.`;
   await deliver(agent, call, task, { lead, id: call.id, reply: { text } });
@@ -196,7 +258,8 @@ function teamStatus(lead: Session, workspace: Workspace): string {
   const agents = agentsOf(workspace.id).map((agent) => `- ${nameOf(agent)}, ${agent.effort}, job ${agent.work?.job}: ${stateOf(agent)}${agent.work?.activity ? `. Latest: ${agent.work.activity}` : ''}`);
   return [
     agents.length ? `Agents:\n${agents.join('\n')}` : 'You haven\'t started any agents.',
-    `Models you can start agents on (model id, provider, thinking levels):\n${usableModels(workspace)}`,
+    `Models you can start agents on (model id, provider, thinking levels):\n${usableModels(lead, workspace)}`,
+    signInList(lead),
     `At most ${state.settings.leadMaxAgents} agents can work at once.`,
   ].join('\n\n');
 }
@@ -215,18 +278,23 @@ function continuation(session: Session): string {
   return `Continue where you left off. If you hadn't started, this was the request:\n\n${last?.text ?? ''}`;
 }
 
-/** Works for a usage limit or a failure, which a conversation survives. */
-async function retrySession(session: Session, from: UserItem['from'], id?: string, receipt?: ToolReceipt): Promise<void> {
+/** Works for a usage limit or a failure, which a conversation survives. `patch` is saved with what carries it on. */
+async function retrySession(session: Session, from: UserItem['from'], id?: string, receipt?: ToolReceipt, patch?: Partial<Session>): Promise<void> {
   if (session.status === 'running') throw new HttpError(409, `${nameOf(session)} is already working.`);
-  if (session.queue.length > 0) return flushQueue(session.id, receipt);
-  await sendMessage(session.id, continuation(session), [], { id, from, summary: TRYING_AGAIN, receipt });
+  if (session.queue.length > 0) return flushQueue(session.id, receipt, patch);
+  await sendMessage(session.id, continuation(session), [], { id, from, summary: TRYING_AGAIN, receipt, patch });
 }
 
 async function retryAgent(lead: Session, workspace: Workspace, call: ToolCall): Promise<string> {
   const agent = agentArg(lead, call.args);
   if (agent.userStopped) return `${nameOf(agent)} was stopped by the user. Ask them before it continues.`;
+  const profileId = signInArg(lead, workspace, agent.agent, call.args, profileIdOf(agent));
   checkRoom(workspace, agent);
   checkOneWriter(lead, agent.work?.job, agent);
+  if (profileId !== profileIdOf(agent)) {
+    if (agent.status === 'running') throw new ToolError(`${nameOf(agent)} is still working. Move it to another sign-in once it's finished.`);
+    recordMove(agent, getProfile(profileId)!, 'lead');
+  }
   const text = `Asked ${nameOf(agent)} to try again. End your turn: Lonca wakes you when it finishes.`;
   await retrySession(agent, 'lead', call.id, { lead, id: call.id, reply: { text } });
   return text;
@@ -268,7 +336,8 @@ function describeTurn(agent: Session): string {
   const parts: string[] = [];
   if (agent.lastOutcome === 'limit') {
     const when = agent.limitResetsAt ? ` It ends at ${new Date(agent.limitResetsAt).toISOString()}.` : '';
-    parts.push(`${nameOf(agent)} hit ${state.catalog[agent.agent].label}'s usage limit.${when} Its work so far is kept: use retry_agent when it can run, or start another agent on a different provider.`);
+    const elsewhere = hasSeveral(state.profiles, agent.agent) ? ', or with sign_in to carry on its conversation on another sign-in you may use (team_status lists them)' : '';
+    parts.push(`${nameOf(agent)} hit the usage limit of ${limitName(agent)}.${when} Its work so far is kept: use retry_agent when it can run${elsewhere}, or start another agent on a different provider.`);
   } else if (agent.lastOutcome === 'failed') {
     parts.push(`${nameOf(agent)} failed. Look at it with read_agent, then use retry_agent or try another way.`);
   } else {
@@ -281,7 +350,7 @@ function describeTurn(agent: Session): string {
 
 function wakeSummary(agents: Session[]): string {
   const limited = agents.find((agent) => agent.lastOutcome === 'limit');
-  if (limited) return `${limited.title} hit ${state.catalog[limited.agent].label}’s usage limit`;
+  if (limited) return `${limited.title} hit the usage limit of ${limitName(limited)}`;
   const failed = agents.find((agent) => agent.lastOutcome === 'failed');
   if (failed) return `${failed.title} failed`;
   return agents.length === 1 ? `${agents[0].title} finished` : `${agents.length} agents finished`;
@@ -369,6 +438,72 @@ function handover(workspace: Workspace): string | undefined {
   return note;
 }
 
+/**
+ * Says in the conversation that it moved to another sign-in, and why, and makes the move. A move
+ * while a turn runs takes effect from its next one. A Lead's choice goes with the workspace.
+ */
+function recordMove(session: Session, to: Profile, by: 'user' | 'lead' | 'lonca'): void {
+  const from = profileIdOf(session);
+  const fromName = signInName(from, session.agent);
+  const toName = profileName(to, state.catalog);
+  const atLimit = session.lastOutcome === 'limit' && (session.limitProfileId ?? from) === from;
+  const because = atLimit ? ` because ${fromName} reached its usage limit` : '';
+  const text = by === 'lonca'
+    ? `Lonca moved this to ${toName}${because}. You chose this in Settings.`
+    : `${by === 'lead' ? 'The Lead moved this' : 'Moved'} from ${fromName} to ${toName}${because}.${session.status === 'running' ? ' The turn under way finishes on the one it started on.' : ''}`;
+  if (session.hasMessages) notice(session.id, undefined, 'info', text);
+  persistSession(session, { profileId: to.id });
+  const workspace = getWorkspace(session.workspaceId);
+  if (session.role === 'lead' && workspace) {
+    workspace.lead = { agent: session.agent, model: session.model, effort: session.effort, profileId: to.id };
+    publishWorkspace(workspace);
+  }
+}
+
+/**
+ * Moves a conversation to another of its provider's sign-ins, keeping the conversation, whatever
+ * its model is locked to. With `retry`, a conversation that stopped carries on there at once.
+ */
+export async function moveToProfile(session: Session, profileId: string, { retry = false }: { retry?: boolean } = {}): Promise<Session> {
+  if (session.closedAt) throw new HttpError(409, 'This Lead was closed. Its conversation can still be read.');
+  const to = getProfile(profileId);
+  if (!to) throw new HttpError(404, 'That sign-in was removed.');
+  if (to.agent !== session.agent) throw new HttpError(409, `This conversation is with ${state.catalog[session.agent].label}, which can’t read another provider’s. Open a new tab for ${state.catalog[to.agent].label}.`);
+  const workspace = getWorkspace(session.workspaceId);
+  if (!isReady(profileStatus(system, to.id)) && !projectBringsKey(to.agent, workspace && getProject(workspace.projectId))) {
+    throw new HttpError(409, `${profileName(to, state.catalog)} isn’t signed in.`);
+  }
+  const carryOn = retry && session.status !== 'running' && (session.lastOutcome === 'limit' || session.lastOutcome === 'failed' || session.queue.length > 0);
+  // Said before anything changes, so a refusal doesn't leave it moved but stopped.
+  if (carryOn) checkButtonCanStart(session);
+  if (to.id !== profileIdOf(session)) recordMove(session, to, 'user');
+  if (carryOn) await tryAgain(session);
+  return session;
+}
+
+/**
+ * A turn reached a usage limit, so the conversation goes on, on a sign-in the user chose for that,
+ * if there's one that can. Not once someone pressed Stop, which a limit just before it can't overrule.
+ */
+export async function limitReached(session: Session, from: string, stopped = false): Promise<void> {
+  if (stopped || session.closedAt || session.userStopped || session.lastOutcome !== 'limit' || profileIdOf(session) !== from) return;
+  const workspace = getWorkspace(session.workspaceId);
+  if (!workspace || ['archived', 'archiving', 'error', 'deleting', 'stopping'].includes(workspace.status)) return;
+  if (projectBringsKey(session.agent, getProject(workspace.projectId))) return;
+  const to = autoSwitchTarget(state.profiles, system, session.agent, from);
+  if (!to) return;
+  recordMove(session, to, 'lonca');
+  // The limit doesn't apply where it's going, and a Lead mustn't hear of one that it carried on
+  // from. That's saved with what carries it on, so a failure or a crash before then leaves it at
+  // its limit, saying so, and carrying on where it moved once it's tried again.
+  await retrySession(session, 'lonca', undefined, undefined, {
+    lastOutcome: undefined, limitResetsAt: undefined, limitProfileId: undefined,
+    ...(session.work ? { work: { ...session.work, unreported: false } } : {}),
+    // Nobody asked for this, so a Lead's turns without the user go on counting towards its pause.
+    ...(session.role === 'lead' ? { autonomousTurns: session.autonomousTurns } : {}),
+  });
+}
+
 setTeamHooks({
   toolCall: handleToolCall,
   settled,
@@ -377,11 +512,16 @@ setTeamHooks({
     notice(lead.id, undefined, 'warning', why);
     needsYou(lead, 'paused and needs you to let it continue.');
   },
+  limitReached,
 });
 
-/** Stopped by the user means stopped until the user says otherwise, whatever a Lead or a wake wants. */
+/**
+ * Stopped by the user means stopped until the user says otherwise, whatever a Lead, a wake or a move
+ * to another sign-in wants. That includes what's queued but hasn't started, such as a continuation
+ * waiting for its workspace when Stop arrives.
+ */
 export function holdWhenStopped(session: Session): void {
-  if (!session.role || session.userStopped) return;
+  if (session.userStopped) return;
   session.held = true;
   session.userStopped = true;
   publishSession(session);
@@ -412,12 +552,17 @@ export async function switchLead(workspace: Workspace, choice: LeadChoice): Prom
   const previous = modelName(lead);
   const reason = { retired: 'is no longer available', 'signed-out': 'isn’t signed in', limit: 'reached its usage limit' }[blocker];
   const record = `The Lead moved from ${previous} to ${model.label} because ${previous} ${reason}.`;
-  workspace.lead = choice;
-  if (choice.agent === lead.agent) {
+  // A sign-in of another provider's, or one that's gone, means that provider's own choice.
+  const sameProvider = choice.agent === lead.agent;
+  const wanted = getProfile(choice.profileId ?? '');
+  const profileId = wanted?.agent === choice.agent ? wanted.id : sameProvider ? profileIdOf(lead) : leadDefaultFor(lead, choice.agent, state.profiles);
+  workspace.lead = { agent: choice.agent, model: choice.model, effort: choice.effort, profileId };
+  if (sameProvider) {
     // The same CLI can carry on the conversation.
     Object.assign(lead, { model: choice.model, effort: choice.effort });
     notice(lead.id, undefined, 'info', record);
     persistSession(lead, {});
+    if (profileId && profileId !== profileIdOf(lead)) recordMove(lead, getProfile(profileId)!, 'user');
     publishWorkspace(workspace);
     await retrySession(lead, 'lonca');
     return lead;

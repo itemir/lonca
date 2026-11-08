@@ -182,7 +182,7 @@ describe('tool calls', () => {
 
 describe('when a Lead’s model can change', () => {
   const lead = { agent: 'claude', model: 'claude-opus-5-5' } as Session;
-  const system = (signedIn: boolean, agentsChecked = true) => ({ agentsChecked, agents: { claude: { signedIn }, codex: { signedIn } } }) as unknown as SystemStatus;
+  const system = (signedIn: boolean, agentsChecked = true) => ({ agentsChecked, profiles: { claude: { signedIn }, codex: { signedIn } } }) as unknown as SystemStatus;
 
   it('stays put while it can run', () => {
     expect(leadBlocker(lead, DEFAULT_CATALOG, system(true), undefined)).toBeNull();
@@ -190,7 +190,7 @@ describe('when a Lead’s model can change', () => {
     expect(leadBlocker(lead, DEFAULT_CATALOG, system(false, false), undefined)).toBeNull();
     // A project can bring its own key.
     expect(leadBlocker(lead, DEFAULT_CATALOG, system(false), { settings: { env: { ANTHROPIC_API_KEY: 'sk-x' } } as never })).toBeNull();
-    expect(canRun('codex', system(false), { settings: { env: { CODEX_API_KEY: 'sk-x' } } as never })).toBe(true);
+    expect(canRun({ agent: 'codex' }, system(false), { settings: { env: { CODEX_API_KEY: 'sk-x' } } as never })).toBe(true);
   });
 
   it('can move when it’s out of limit, signed out or retired', () => {

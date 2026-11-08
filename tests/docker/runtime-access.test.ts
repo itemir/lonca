@@ -19,7 +19,7 @@ beforeAll(async () => {
   await lonca.api('PATCH', `/projects/${project.id}`, {
     settings: { network: 'host', env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`, ANTHROPIC_API_KEY: 'sk-ant-api03-runtime-access-not-a-real-key' } },
   });
-  await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-runtime-access-not-a-real-key' });
+  await lonca.api('PUT', '/profiles/claude/key', { key: 'sk-ant-api03-runtime-access-not-a-real-key' });
   workspace = await lonca.waitForWorkspace((await lonca.api('POST', `/projects/${project.id}/workspaces`, {})).workspace.id);
   await sleep(1000); // Let optional setup discovery finish before an external stop.
 });

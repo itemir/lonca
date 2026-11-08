@@ -15,6 +15,8 @@ export interface MockLlm {
   refuseCodex: boolean;
   /** Models that answer with a 429, as the real APIs do at a usage limit. */
   limited: Set<string>;
+  /** Credentials, or what stands in for them, that answer with a 429: one sign-in at its limit while another isn't. */
+  limitedAuth: Set<string>;
   close(): Promise<void>;
 }
 
@@ -199,7 +201,7 @@ async function responsesStream(res: http.ServerResponse, body: any): Promise<voi
 
 export function startMockLlm(port = 0): Promise<MockLlm> {
   const requests: MockLlm['requests'] = [];
-  const mock: MockLlm = { port: 0, requests, refuseCodex: false, limited: new Set(), close: async () => {} };
+  const mock: MockLlm = { port: 0, requests, refuseCodex: false, limited: new Set(), limitedAuth: new Set(), close: async () => {} };
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk) => chunks.push(chunk));
@@ -211,12 +213,14 @@ export function startMockLlm(port = 0): Promise<MockLlm> {
       } catch {
         // Some CLI background calls send non-JSON bodies; they get the default reply.
       }
-      requests.push({ path, model: body.model, auth: req.headers.authorization ?? (req.headers['x-api-key'] as string | undefined), body: JSON.stringify(body) });
-      if (req.method === 'POST' && mock.limited.has(body.model) && path.endsWith('/messages')) {
+      const auth = req.headers.authorization ?? (req.headers['x-api-key'] as string | undefined);
+      requests.push({ path, model: body.model, auth, body: JSON.stringify(body) });
+      const limited = mock.limited.has(body.model) || [...mock.limitedAuth].some((credential) => auth?.includes(credential));
+      if (req.method === 'POST' && limited && path.endsWith('/messages')) {
         // Told not to retry, as with a subscription: an API key's client would keep trying for minutes.
         res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '3600', 'x-should-retry': 'false' });
         res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Number of requests has exceeded your rate limit.' } }));
-      } else if (req.method === 'POST' && mock.limited.has(body.model) && path.endsWith('/responses')) {
+      } else if (req.method === 'POST' && limited && path.endsWith('/responses')) {
         res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '3600' });
         res.end(JSON.stringify({ error: { type: 'usage_limit_reached', message: "You've hit your usage limit.", resets_in_seconds: 3600 } }));
       } else if (req.method === 'POST' && path.endsWith('/messages/count_tokens')) {

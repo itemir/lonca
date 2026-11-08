@@ -680,8 +680,8 @@ EOF`);
       const current = await lonca.api('GET', '/state');
       return current.catalog.codex.models.length > 1 ? current : null;
     }, 60000);
-    expect(state.system.agents.claude.signedIn).toBe(false);
-    expect(state.system.agents.codex.signedIn).toBe(false);
+    expect(state.system.profiles.claude.signedIn).toBe(false);
+    expect(state.system.profiles.codex.signedIn).toBe(false);
     expect(state.catalog.claude.models.map((model: { id: string }) => model.id)).toContain('claude-opus-5-5');
     for (const model of state.catalog.codex.models) expect(model.efforts.length).toBeGreaterThan(0);
   });
@@ -947,7 +947,7 @@ describe('signing in', () => {
   let signInProject: Project;
   let workspace: Workspace;
   let session: Session;
-  const agents = async () => (await lonca.api('GET', '/state')).system.agents;
+  const agents = async () => (await lonca.api('GET', '/state')).system.profiles;
 
   beforeAll(async () => {
     // Only the URL points at the mock; the credentials are the ones Lonca was given.
@@ -965,7 +965,7 @@ describe('signing in', () => {
   });
 
   it('saves a Claude token for the proxy, wherever line wrapping broke it, and keeps it out of the workspace', async () => {
-    await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-oat01-not\n-a-real-token ' });
+    await lonca.api('PUT', '/profiles/claude/key', { key: 'sk-ant-oat01-not\n-a-real-token ' });
     expect((await agents()).claude.signedIn).toBe(true);
     expect((await lonca.api('GET', '/state')).secrets.claudeToken).toBe('••••oken');
     expect(fs.readFileSync(path.join(lonca.home, 'boundary', 'claude'), 'utf8')).toBe('sk-ant-oat01-not-a-real-token');
@@ -978,7 +978,7 @@ describe('signing in', () => {
   });
 
   it('treats anything else as an Anthropic API key', async () => {
-    await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-not-a-real-key' });
+    await lonca.api('PUT', '/profiles/claude/key', { key: 'sk-ant-api03-not-a-real-key' });
     await lonca.api('POST', `/sessions/${session.id}/messages`, { text: 'with a key', attachments: [] });
     await lonca.waitForIdle(session.id);
     expect(mock.requests.filter((request) => request.path.endsWith('/messages')).at(-1)?.auth).toBe('sk-ant-oat01-lonca-placeholder');
@@ -988,7 +988,7 @@ describe('signing in', () => {
   it.runIf(REAL_SANDBOX)('gets a sign-in token to the real service through the sandbox’s proxy', async () => {
     await lonca.api('PATCH', `/projects/${signInProject.id}`, { settings: { env: {} } });
     try {
-      await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-oat01-not-a-real-token' });
+      await lonca.api('PUT', '/profiles/claude/key', { key: 'sk-ant-oat01-not-a-real-token' });
       const real = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, { agent: 'claude' });
       await lonca.api('POST', `/sessions/${real.id}/messages`, { text: 'hello', attachments: [] });
       const items = await lonca.waitForIdle(real.id, 60000);
@@ -1001,15 +1001,15 @@ describe('signing in', () => {
   });
 
   it('signs out of Claude', async () => {
-    await lonca.api('POST', '/agents/claude/logout');
+    await lonca.api('POST', '/profiles/claude/logout');
     expect((await agents()).claude.signedIn).toBe(false);
     expect((await lonca.api('GET', '/state')).secrets.claudeToken).toBeNull();
   });
 
   it('refuses something that isn’t a key, without saving it', async () => {
-    await expect(lonca.api('PUT', '/secrets/claude', { token: 'BMp0bJmrftqKRaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#bbbbbbbbbbbbbbbbbbbbbb' }))
+    await expect(lonca.api('PUT', '/profiles/claude/key', { key: 'BMp0bJmrftqKRaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#bbbbbbbbbbbbbbbbbbbbbb' }))
       .rejects.toThrow(/isn’t a key/);
-    await expect(lonca.api('PUT', '/agents/codex/api-key', { key: 'FAKE-7CODE' })).rejects.toThrow(/isn’t an API key/);
+    await expect(lonca.api('PUT', '/profiles/codex/key', { key: 'FAKE-7CODE' })).rejects.toThrow(/isn’t an API key/);
     expect((await agents()).claude.signedIn).toBe(false);
     expect((await lonca.api('GET', '/state')).secrets.claudeToken).toBeNull();
   });
@@ -1019,12 +1019,12 @@ describe('signing in', () => {
     await lonca.kill();
     await lonca.start();
     try {
-      await expect(lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-not-a-real-key' })).rejects.toThrow(/didn’t accept this key/);
-      await expect(lonca.api('PUT', '/agents/codex/api-key', { key: 'sk-not-a-real-key-for-testing' })).rejects.toThrow(/didn’t accept this key/);
+      await expect(lonca.api('PUT', '/profiles/claude/key', { key: 'sk-ant-api03-not-a-real-key' })).rejects.toThrow(/didn’t accept this key/);
+      await expect(lonca.api('PUT', '/profiles/codex/key', { key: 'sk-not-a-real-key-for-testing' })).rejects.toThrow(/didn’t accept this key/);
       const state = await lonca.api('GET', '/state');
       expect(state.secrets.claudeToken).toBeNull();
-      expect(state.system.agents.claude.signedIn).toBe(false);
-      expect(state.system.agents.codex.signedIn).toBe(false);
+      expect(state.system.profiles.claude.signedIn).toBe(false);
+      expect(state.system.profiles.codex.signedIn).toBe(false);
     } finally {
       lonca.env = {};
       await lonca.kill();
@@ -1036,13 +1036,13 @@ describe('signing in', () => {
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const ws = await lonca.waitForWorkspace(created.workspace.id);
     // A made-up key against the real API: it costs nothing and gives the real error.
-    await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-not-a-real-key' });
+    await lonca.api('PUT', '/profiles/claude/key', { key: 'sk-ant-api03-not-a-real-key' });
     expect((await agents()).claude).toMatchObject({ signedIn: true });
     await lonca.api('POST', `/sessions/${created.session.id}/messages`, { text: 'hello', attachments: [] });
     const items = await lonca.waitForIdle(created.session.id, 60000);
     expect(items.find((item) => item.type === 'notice')).toMatchObject({ level: 'error', code: 'auth', text: expect.stringMatching(/invalid api key/i) });
     expect((await agents()).claude).toMatchObject({ signedIn: true, rejected: true });
-    await lonca.api('POST', '/agents/claude/logout');
+    await lonca.api('POST', '/profiles/claude/logout');
     expect((await agents()).claude.rejected).toBeFalsy();
     await lonca.api('DELETE', `/workspaces/${ws.id}`);
   });
@@ -1090,7 +1090,7 @@ describe('signing in', () => {
       mock.refuseCodex = false;
       await lonca.api('DELETE', `/workspaces/${ws.id}`);
       await lonca.api('PATCH', `/projects/${project.id}`, { settings: { network: 'internet', env: {} } });
-      await lonca.api('POST', '/agents/claude/logout');
+      await lonca.api('POST', '/profiles/claude/logout');
     }
   });
 
@@ -1117,11 +1117,11 @@ describe('signing in', () => {
 
   it('saves an API key for Codex, for the proxy, and signs out of it', async () => {
     const forProxy = path.join(lonca.home, 'boundary', 'codex');
-    await lonca.api('PUT', '/agents/codex/api-key', { key: 'sk-not-a-real-key-for-testing' });
+    await lonca.api('PUT', '/profiles/codex/key', { key: 'sk-not-a-real-key-for-testing' });
     expect((await agents()).codex.signedIn).toBe(true);
     expect(fs.readFileSync(forProxy, 'utf8')).toBe('sk-not-a-real-key-for-testing');
     expect(fs.statSync(forProxy).mode & 0o777).toBe(0o600);
-    await lonca.api('POST', '/agents/codex/logout');
+    await lonca.api('POST', '/profiles/codex/logout');
     expect((await agents()).codex.signedIn).toBe(false);
     expect(fs.existsSync(forProxy)).toBe(false);
   });
@@ -1172,7 +1172,7 @@ describe('the real sign-in flows', () => {
 
   it('signs in to Claude with the real CLI, and the token never reaches the browser', async () => {
     setFakeSignIn(tools(), { mode: 'ok' });
-    const started = await lonca.api<LoginState>('POST', '/agents/claude/login');
+    const started = await lonca.api<LoginState>('POST', '/profiles/claude/login');
     expect(started.phase).toBe('starting');
     const waiting = await readyForCode();
     expect(new URL(waiting.url!).hostname).toBe('claude.com');
@@ -1180,26 +1180,26 @@ describe('the real sign-in flows', () => {
     expect(waiting.url).toContain('state=');
 
     const state = new URL(waiting.pasteUrl!).searchParams.get('state');
-    await lonca.api('POST', '/agents/claude/login/code', { code: `fakecode#${state}` });
+    await lonca.api('POST', '/profiles/claude/login/code', { code: `fakecode#${state}` });
     const done = await reached('claude', 'done');
     expect(done.url).toBeUndefined();
 
     const token = `sk-ant-oat01-${'FakeTokenForTesting_-'.repeat(4)}zzzzzzzAA`;
     expect(JSON.parse(fs.readFileSync(path.join(lonca.home, 'secrets.json'), 'utf8')).claudeToken).toBe(token);
     const all = await lonca.api('GET', '/state');
-    expect(all.system.agents.claude).toMatchObject({ signedIn: true, summary: 'Signed in with your Claude subscription', usesKey: false });
+    expect(all.system.profiles.claude).toMatchObject({ signedIn: true, summary: 'Signed in with your Claude subscription', usesKey: false });
     // Everything the browser could have been sent.
     expect(frames.join('\n')).not.toContain('sk-ant-oat');
     expect(JSON.stringify(all)).not.toContain('sk-ant-oat');
-    expect(await lonca.api('GET', '/agents/claude/login/output')).not.toContain('sk-ant-oat');
-    await lonca.api('DELETE', '/agents/claude/login');
+    expect(await lonca.api('GET', '/profiles/claude/login/output')).not.toContain('sk-ant-oat');
+    await lonca.api('DELETE', '/profiles/claude/login');
     expect(await login('claude')).toBeUndefined();
-    await lonca.api('POST', '/agents/claude/logout');
+    await lonca.api('POST', '/profiles/claude/logout');
   });
 
   it('signs in to Claude with the browser coming back to the real CLI, and tells it how it went', async () => {
     setFakeSignIn(tools(), { mode: 'ok' });
-    await lonca.api('POST', '/agents/claude/login');
+    await lonca.api('POST', '/profiles/claude/login');
     const waiting = await reached('claude', 'waiting');
     const back = comeBack(waiting.url!);
     expect(back).toMatch(/^http:\/\/localhost:\d+\/callback\?/);
@@ -1218,59 +1218,59 @@ describe('the real sign-in flows', () => {
     expect(frames.join('\n')).not.toContain('sk-ant-oat');
     await expect(fetch(back)).rejects.toThrow();
     expect(sandboxExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
-    await lonca.api('DELETE', '/agents/claude/login');
-    await lonca.api('POST', '/agents/claude/logout');
+    await lonca.api('DELETE', '/profiles/claude/login');
+    await lonca.api('POST', '/profiles/claude/logout');
   });
 
   it('tells a browser that came back when the real CLI failed', async () => {
     setFakeSignIn(tools(), { mode: 'rejected' });
-    await lonca.api('POST', '/agents/claude/login');
+    await lonca.api('POST', '/profiles/claude/login');
     const waiting = await reached('claude', 'waiting');
     const answer = await fetch(comeBack(waiting.url!));
     expect(await answer.text()).toContain('didn’t finish');
     expect((await login('claude'))).toMatchObject({ phase: 'failed', failure: 'rejected' });
     expect(JSON.parse(fs.readFileSync(path.join(lonca.home, 'secrets.json'), 'utf8')).claudeToken).toBeUndefined();
-    await lonca.api('DELETE', '/agents/claude/login');
+    await lonca.api('DELETE', '/profiles/claude/login');
     setFakeSignIn(tools(), { mode: 'ok' });
   });
 
   it('reports a code the real CLI refuses, and starts over cleanly', async () => {
     setFakeSignIn(tools(), { mode: 'rejected' });
-    await lonca.api('POST', '/agents/claude/login');
+    await lonca.api('POST', '/profiles/claude/login');
     const waiting = await readyForCode();
     const state = new URL(waiting.pasteUrl!).searchParams.get('state');
-    await lonca.api('POST', '/agents/claude/login/code', { code: `wrongcode#${state}` });
+    await lonca.api('POST', '/profiles/claude/login/code', { code: `wrongcode#${state}` });
     const failed = await reached('claude', 'failed', 30000);
     expect(failed.failure).toBe('rejected');
     expect(failed.output).toContain('wasn');
     expect(sandboxExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
 
     setFakeSignIn(tools(), { mode: 'ok' });
-    await lonca.api('POST', '/agents/claude/login');
+    await lonca.api('POST', '/profiles/claude/login');
     await reached('claude', 'waiting');
-    await lonca.api('DELETE', '/agents/claude/login');
+    await lonca.api('DELETE', '/profiles/claude/login');
     expect(sandboxExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
   });
 
   it('turns away a code from another sign-in, or a key in the code box', async () => {
-    await lonca.api('POST', '/agents/claude/login');
+    await lonca.api('POST', '/profiles/claude/login');
     await readyForCode();
-    await expect(lonca.api('POST', '/agents/claude/login/code', { code: 'code#from-an-older-tab' })).rejects.toThrow(/earlier sign-in/);
-    await expect(lonca.api('POST', '/agents/claude/login/code', { code: 'sk-ant-api03-a-key-pasted-here' })).rejects.toThrow(/a key, not a sign-in code/);
-    await expect(lonca.api('POST', '/agents/claude/login/code', { code: 'x\u001b[201~rm -rf /' })).rejects.toThrow(/doesn’t look like a sign-in code/);
+    await expect(lonca.api('POST', '/profiles/claude/login/code', { code: 'code#from-an-older-tab' })).rejects.toThrow(/earlier sign-in/);
+    await expect(lonca.api('POST', '/profiles/claude/login/code', { code: 'sk-ant-api03-a-key-pasted-here' })).rejects.toThrow(/a key, not a sign-in code/);
+    await expect(lonca.api('POST', '/profiles/claude/login/code', { code: 'x\u001b[201~rm -rf /' })).rejects.toThrow(/doesn’t look like a sign-in code/);
     expect((await login('claude'))?.phase).toBe('waiting');
-    await lonca.api('DELETE', '/agents/claude/login');
+    await lonca.api('DELETE', '/profiles/claude/login');
   });
 
   it('joins a sign-in already under way, rather than starting a second CLI', async () => {
-    await Promise.all([lonca.api('POST', '/agents/claude/login'), lonca.api('POST', '/agents/claude/login')]);
+    await Promise.all([lonca.api('POST', '/profiles/claude/login'), lonca.api('POST', '/profiles/claude/login')]);
     await reached('claude', 'waiting');
     expect(sandboxExec(tools(), `pgrep -fc '^/usr/local/bin/claude.real setup-token|^claude setup-token'`).output).toBe('1');
-    await lonca.api('DELETE', '/agents/claude/login');
+    await lonca.api('DELETE', '/profiles/claude/login');
   });
 
   it('cleans up a sign-in the server was following when it restarted', async () => {
-    await lonca.api('POST', '/agents/claude/login');
+    await lonca.api('POST', '/profiles/claude/login');
     await reached('claude', 'waiting');
     await lonca.kill();
     await lonca.start();
@@ -1283,7 +1283,7 @@ describe('the real sign-in flows', () => {
     const ws = await lonca.waitForWorkspace(created.workspace.id);
     const forProxy = path.join(lonca.home, 'boundary', 'codex');
     setFakeSignIn(tools(), { mode: 'ok' });
-    await lonca.api('POST', '/agents/codex/login');
+    await lonca.api('POST', '/profiles/codex/login');
     const waiting = await reached('codex', 'waiting');
     expect(new URL(waiting.url!).hostname).toBe('auth.openai.com');
     const back = comeBack(waiting.url!);
@@ -1298,7 +1298,7 @@ describe('the real sign-in flows', () => {
     expect(await answer.text()).toContain('You’re signed in');
     expect(answer.url).toBe(back);
     expect((await login('codex'))?.phase).toBe('done');
-    expect((await lonca.api('GET', '/state')).system.agents.codex).toMatchObject({ signedIn: true, summary: 'Signed in with ChatGPT as probe@example.com' });
+    expect((await lonca.api('GET', '/state')).system.profiles.codex).toMatchObject({ signedIn: true, summary: 'Signed in with ChatGPT as probe@example.com' });
     expect(codexClis().code).not.toBe(0);
     await helperHoldsNoLogin();
     await expect(fetch(back)).rejects.toThrow();
@@ -1314,51 +1314,51 @@ describe('the real sign-in flows', () => {
     expect(sandboxExec(ws.sandboxName, 'cat ~/.codex/auth.json 2>/dev/null; env').output).not.toContain(token);
 
     // Starting another sign-in and cancelling it must not sign out.
-    await lonca.api('POST', '/agents/codex/login');
+    await lonca.api('POST', '/profiles/codex/login');
     await reached('codex', 'waiting');
-    await lonca.api('DELETE', '/agents/codex/login');
+    await lonca.api('DELETE', '/profiles/codex/login');
     await helperHoldsNoLogin();
     expect(fs.readFileSync(forProxy, 'utf8')).toBe(token);
     await expect(fetch(back)).rejects.toThrow();
 
-    await lonca.api('POST', '/agents/codex/logout');
+    await lonca.api('POST', '/profiles/codex/logout');
     await lonca.api('DELETE', `/workspaces/${ws.id}`);
   });
 
   it('tells Codex’s browser sign-ins apart when they fail, and leaves nobody signed in', async () => {
-    await lonca.api('POST', '/agents/codex/login');
+    await lonca.api('POST', '/profiles/codex/login');
     let waiting = await reached('codex', 'waiting');
     expect(await (await fetch(comeBack(waiting.url!, 'error=access_denied&error_description=No'))).text()).toContain('didn’t finish');
     expect(await login('codex')).toMatchObject({ phase: 'failed', failure: 'denied' });
 
     setFakeSignIn(tools(), { mode: 'rejected' });
-    await lonca.api('POST', '/agents/codex/login');
+    await lonca.api('POST', '/profiles/codex/login');
     waiting = await reached('codex', 'waiting');
     expect(await (await fetch(comeBack(waiting.url!))).text()).toContain('didn’t finish');
     expect(await login('codex')).toMatchObject({ phase: 'failed', failure: 'rejected' });
-    expect((await lonca.api('GET', '/state')).system.agents.codex.signedIn).toBe(false);
-    await lonca.api('DELETE', '/agents/codex/login');
+    expect((await lonca.api('GET', '/state')).system.profiles.codex.signedIn).toBe(false);
+    await lonca.api('DELETE', '/profiles/codex/login');
     setFakeSignIn(tools(), { mode: 'ok' });
   });
 
   it('moves Codex over to the one-time code, without the port or the first CLI left behind', async () => {
-    await lonca.api('POST', '/agents/codex/login');
+    await lonca.api('POST', '/profiles/codex/login');
     const waiting = await reached('codex', 'waiting');
-    await lonca.api('POST', '/agents/codex/login', { method: 'device' });
+    await lonca.api('POST', '/profiles/codex/login', { method: 'device' });
     expect((await reached('codex', 'waiting')).code).toBe('FAKE-7CODE');
     await expect(fetch(comeBack(waiting.url!))).rejects.toThrow();
     expect(codexClis().output).toBe('1');
-    await lonca.api('DELETE', '/agents/codex/login');
+    await lonca.api('DELETE', '/profiles/codex/login');
   });
 
   it('ends a sign-in that’s under way on signing out, so that finishing it can’t sign back in', async () => {
     setFakeSignIn(tools(), { mode: 'ok', approved: false });
-    await lonca.api('POST', '/agents/codex/login', { method: 'device' });
+    await lonca.api('POST', '/profiles/codex/login', { method: 'device' });
     await reached('codex', 'waiting');
-    await lonca.api('POST', '/agents/codex/logout');
+    await lonca.api('POST', '/profiles/codex/logout');
     expect(await login('codex')).toBeUndefined();
     expect(codexClis().code).not.toBe(0);
-    expect((await lonca.api('GET', '/state')).system.agents.codex.signedIn).toBe(false);
+    expect((await lonca.api('GET', '/state')).system.profiles.codex.signedIn).toBe(false);
   });
 
   it('signs in to Codex with the one-time code on the real CLI, for the proxy to use and out of reach of workspaces', async () => {
@@ -1366,7 +1366,7 @@ describe('the real sign-in flows', () => {
     const ws = await lonca.waitForWorkspace(created.workspace.id);
     const forProxy = path.join(lonca.home, 'boundary', 'codex');
     setFakeSignIn(tools(), { mode: 'ok', approved: false });
-    await lonca.api('POST', '/agents/codex/login', { method: 'device' });
+    await lonca.api('POST', '/profiles/codex/login', { method: 'device' });
     const waiting = await reached('codex', 'waiting');
     expect(waiting.code).toBe('FAKE-7CODE');
     expect(waiting.url).toBe('http://127.0.0.1:8080/codex/device');
@@ -1375,50 +1375,50 @@ describe('the real sign-in flows', () => {
     // Approving on the page is all it takes. Nothing else happens in Lonca.
     setFakeSignIn(tools(), { approved: true });
     await reached('codex', 'done', 30000);
-    const agents = (await lonca.api('GET', '/state')).system.agents;
+    const agents = (await lonca.api('GET', '/state')).system.profiles;
     expect(agents.codex).toMatchObject({ signedIn: true, summary: 'Signed in with ChatGPT as probe@example.com', usesKey: false });
     await helperHoldsNoLogin();
     const token = fs.readFileSync(forProxy, 'utf8');
     expect(token).toBeTruthy();
     expect(sandboxExec(ws.sandboxName, 'cat ~/.codex/auth.json 2>/dev/null; env').output).not.toContain(token);
-    await lonca.api('DELETE', '/agents/codex/login');
+    await lonca.api('DELETE', '/profiles/codex/login');
 
     // Starting another sign-in and cancelling it must not sign out.
     setFakeSignIn(tools(), { approved: false });
-    await lonca.api('POST', '/agents/codex/login', { method: 'device' });
+    await lonca.api('POST', '/profiles/codex/login', { method: 'device' });
     await reached('codex', 'waiting');
-    await lonca.api('DELETE', '/agents/codex/login');
+    await lonca.api('DELETE', '/profiles/codex/login');
     expect(codexClis().code).not.toBe(0);
     expect(fs.readFileSync(forProxy, 'utf8')).toBe(token);
-    expect((await lonca.api('GET', '/state')).system.agents.codex.signedIn).toBe(true);
+    expect((await lonca.api('GET', '/state')).system.profiles.codex.signedIn).toBe(true);
 
-    await lonca.api('POST', '/agents/codex/logout');
+    await lonca.api('POST', '/profiles/codex/logout');
     expect(fs.existsSync(forProxy)).toBe(false);
     await lonca.api('DELETE', `/workspaces/${ws.id}`);
   });
 
   it('explains when Codex device sign-in is off, or the page turns it down', async () => {
     setFakeSignIn(tools(), { mode: 'disabled', approved: false });
-    await lonca.api('POST', '/agents/codex/login', { method: 'device' });
+    await lonca.api('POST', '/profiles/codex/login', { method: 'device' });
     expect((await reached('codex', 'failed')).failure).toBe('disabled');
 
     setFakeSignIn(tools(), { mode: 'denied' });
-    await lonca.api('POST', '/agents/codex/login', { method: 'device' });
+    await lonca.api('POST', '/profiles/codex/login', { method: 'device' });
     expect((await reached('codex', 'failed')).failure).toBe('denied');
-    expect((await lonca.api('GET', '/state')).system.agents.codex.signedIn).toBe(false);
-    await lonca.api('DELETE', '/agents/codex/login');
+    expect((await lonca.api('GET', '/state')).system.profiles.codex.signedIn).toBe(false);
+    await lonca.api('DELETE', '/profiles/codex/login');
     setFakeSignIn(tools(), { mode: 'ok' });
   });
 
   it('keeps a saved key working when another sign-in is cancelled, and ends a sign-in when a key is saved', async () => {
-    await lonca.api('POST', '/agents/claude/login');
+    await lonca.api('POST', '/profiles/claude/login');
     await reached('claude', 'waiting');
-    const saved = await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-api03-not-a-real-key' });
+    const saved = await lonca.api('PUT', '/profiles/claude/key', { key: 'sk-ant-api03-not-a-real-key' });
     expect(saved).toEqual({ verified: true });
     expect(await login('claude')).toBeUndefined();
     expect(sandboxExec(tools(), `pgrep -fc 'setup-token'`).code).not.toBe(0);
-    expect((await lonca.api('GET', '/state')).system.agents.claude).toMatchObject({ signedIn: true, summary: 'Using an API key ending in -key', usesKey: true });
-    await lonca.api('POST', '/agents/claude/logout');
+    expect((await lonca.api('GET', '/state')).system.profiles.claude).toMatchObject({ signedIn: true, summary: 'Using an API key ending in -key', usesKey: true });
+    await lonca.api('POST', '/profiles/claude/logout');
   });
 });
 

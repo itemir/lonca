@@ -3,6 +3,7 @@ import {
   AlertTriangle, ArrowDown, Bell, Bot, Brain, CheckCircle2, ChevronRight, Circle, CircleDot, ClipboardList, Eye, FilePen, Globe,
   Info, Paperclip, Search, Send, Terminal as TerminalIcon, Users, Wrench, X,
 } from 'lucide-react';
+import { hasSeveral, isReady, profileIdOf, profileLabel, profileShortName, profileStatus } from '../../../shared/profiles.ts';
 import type {
   ChatItem, NoticeItem, ResultItem, Session, ThinkingItem, ToolItem, ToolKind, UserItem, Workspace,
 } from '../../../shared/types.ts';
@@ -56,6 +57,8 @@ function ToolRow({ item, root, nested }: { item: ToolItem; root: string; nested:
   const [open, setOpen] = useState(false);
   const agent = useStore((store) => (item.agentId ? store.sessions.find((session) => session.id === item.agentId) : undefined));
   const catalog = useStore((store) => store.catalog);
+  const signIn = useStore((store) => (agent && hasSeveral(store.profiles, agent.agent)
+    ? profileShortName(store.profiles.find((profile) => profile.id === profileIdOf(agent)), store.catalog) : null));
   const Icon = TOOL_ICONS[item.kind];
   if (item.kind === 'todos' && item.todos?.length) {
     return <div className="tool tool-todos"><TodoList item={item} /></div>;
@@ -68,7 +71,7 @@ function ToolRow({ item, root, nested }: { item: ToolItem; root: string; nested:
       <button type="button" className="tool-head" aria-expanded={open} disabled={!hasBody} onClick={() => setOpen((value) => !value)}>
         <span className="tool-icon">{item.status === 'running' ? <Spinner size={13} /> : <Icon size={14} />}</span>
         <span className="tool-title">
-          {item.title}{agent && <> {agent.title} <span className="tab-model">{modelLabel(catalog, agent.agent, agent.model)}</span></>}
+          {item.title}{agent && <> {agent.title} <span className="tab-model">{modelLabel(catalog, agent.agent, agent.model)}{signIn && ` · ${signIn}`}</span></>}
         </span>
         {detail && <span className={`tool-detail ${item.kind === 'team' ? 'tool-detail-plain' : ''}`}>{detail.split('\n')[0]}</span>}
         {item.status === 'error' && <span className="tool-failed">failed</span>}
@@ -145,26 +148,33 @@ function AuthNotice({ item, sessionId }: { item: NoticeItem; sessionId: string }
   const session = useStore((store) => store.sessions.find((entry) => entry.id === sessionId));
   const items = useStore((store) => store.transcripts[sessionId]?.items);
   const catalog = useStore((store) => store.catalog);
-  const agents = useStore((store) => store.system.agents);
+  const system = useStore((store) => store.system);
+  const profiles = useStore((store) => store.profiles);
   const signInBlocked = useStore((store) => signInBlocker(store.system) !== null);
-  const setLoginAgent = useStore((store) => store.setLoginAgent);
+  const setLoginProfile = useStore((store) => store.setLoginProfile);
   if (!session) return null;
-  const status = agents[session.agent];
-  const name = catalog[session.agent].label;
-  const ready = status.signedIn && !status.rejected;
+  // The sign-in the turn ran on, which can have been moved from since. One that's been removed has
+  // nothing left to sign in to, and the conversation went to another, which sending again uses.
+  const ranOn = item.profileId ?? profileIdOf(session);
+  const removed = !profiles.some((profile) => profile.id === ranOn);
+  const profileId = removed ? profileIdOf(session) : ranOn;
+  const status = profileStatus(system, profileId);
+  const name = hasSeveral(profiles, session.agent) ? profileLabel(profiles, catalog, ranOn, session.agent) : catalog[session.agent].label;
+  const ready = isReady(status);
   const lastSent = items?.findLast((entry): entry is UserItem => entry.type === 'user' && !entry.queued);
   const canRetry = ready && session.status === 'idle' && lastSent !== undefined && item.ts >= lastSent.ts;
-  const text = ready
+  const info = ready || removed;
+  const text = info
     ? `This didn’t go through because ${name} wasn’t signed in.`
     : status.rejected
       ? `${name} stopped accepting this sign-in.`
       : `${name} isn’t signed in yet.`;
   return (
-    <div className={`notice ${ready ? 'notice-info' : 'notice-error'}`} role={ready ? undefined : 'alert'} title={item.text}>
-      {ready ? <Info size={15} /> : <AlertTriangle size={15} />}
+    <div className={`notice ${info ? 'notice-info' : 'notice-error'}`} role={info ? undefined : 'alert'} title={item.text}>
+      {info ? <Info size={15} /> : <AlertTriangle size={15} />}
       <span className="notice-text">{text}</span>
-      {!ready && !signInBlocked && (
-        <button type="button" className="button button-small" onClick={() => setLoginAgent(session.agent)}>
+      {!info && !signInBlocked && (
+        <button type="button" className="button button-small" onClick={() => setLoginProfile(profileId)}>
           {status.rejected ? 'Sign in again' : 'Sign in'}
         </button>
       )}

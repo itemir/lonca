@@ -230,9 +230,9 @@ export class Lonca {
   /** The helper only runs when something needs it, and a sign-in is the first thing to. */
   async startHelper(): Promise<string> {
     const helper = `${this.prefix}-tools`;
-    await this.api('POST', '/agents/claude/login');
+    await this.api('POST', '/profiles/claude/login');
     await until('the helper', () => sandboxExec(helper, 'true').code === 0, 300000, 500);
-    await this.api('DELETE', '/agents/claude/login');
+    await this.api('DELETE', '/profiles/claude/login');
     return helper;
   }
 

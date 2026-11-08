@@ -3,9 +3,10 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import type {
-  AppSettings, Catalog, ChatItem, Project, SecretsStatus, Session, Workspace,
+  AppSettings, Catalog, ChatItem, Profile, Project, SecretsStatus, Session, Workspace,
 } from '../shared/types.ts';
 import { DEFAULT_CATALOG } from '../shared/catalog.ts';
+import { PROFILE_ID } from '../shared/profiles.ts';
 import { paths } from './config.ts';
 
 interface StateFile {
@@ -14,14 +15,29 @@ interface StateFile {
   workspaces: Workspace[];
   sessions: Session[];
   settings: AppSettings;
+  /** Each provider's sign-ins, in order, the first being its default. Kept apart from settings, which a page patches whole. */
+  profiles: Profile[];
+  /** Sign-ins whose usage limit a turn reached, so that they aren't moved to again until it ends. */
+  profileLimits?: Record<string, { at: number; resetsAt?: number }>;
   catalog: Catalog;
   /** The template `catalog` was read from. */
   catalogTemplate?: string;
 }
 
 export interface Secrets {
+  /** The Claude sign-in each Lonca had before there could be several, whose id is `claude`. */
   claudeToken?: string;
+  /** Every other Claude sign-in's, by id. */
+  claudeTokens?: Record<string, string>;
   githubToken?: string;
+}
+
+/** Before there could be several, each provider had one sign-in, which keeps the provider's id. */
+function firstProfiles(): Profile[] {
+  return [
+    { id: 'claude', agent: 'claude', name: '' },
+    { id: 'codex', agent: 'codex', name: '' },
+  ];
 }
 
 function defaultSettings(): AppSettings {
@@ -62,12 +78,13 @@ function load(): StateFile {
       ...parsed,
       workspaces: parsed.workspaces.map(upgradeWorkspace),
       settings: { ...defaultSettings(), ...parsed.settings },
+      profiles: (parsed.profiles ?? firstProfiles()).filter((profile) => PROFILE_ID.test(profile.id)),
       // Only Codex's list is discovered at runtime. Claude's ships with the app, so upgrades update it.
       catalog: { claude: DEFAULT_CATALOG.claude, codex: parsed.catalog?.codex ?? DEFAULT_CATALOG.codex },
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    return { version: 1, projects: [], workspaces: [], sessions: [], settings: defaultSettings(), catalog: DEFAULT_CATALOG };
+    return { version: 1, projects: [], workspaces: [], sessions: [], settings: defaultSettings(), profiles: firstProfiles(), catalog: DEFAULT_CATALOG };
   }
 }
 
@@ -127,17 +144,37 @@ export function getSecrets(): Readonly<Secrets> {
 export function updateSecrets(patch: Partial<Secrets>): void {
   secrets = { ...secrets, ...patch };
   for (const key of Object.keys(secrets) as (keyof Secrets)[]) {
-    if (!secrets[key]) delete secrets[key];
+    if (!secrets[key] || (typeof secrets[key] === 'object' && Object.keys(secrets[key]).length === 0)) delete secrets[key];
   }
   writeAtomic(paths.secrets, JSON.stringify(secrets, null, 2), 0o600);
   shareSecretsWithProxy();
 }
 
-type BoundaryName = 'claude' | 'codex' | 'github';
+/** A Claude sign-in's token or key. The first one's stays where it always was, so going back a version keeps it. */
+export function claudeCredential(profileId: string): string | undefined {
+  return profileId === 'claude' ? secrets.claudeToken : secrets.claudeTokens?.[profileId];
+}
+
+export function setClaudeCredential(profileId: string, value: string | undefined): void {
+  if (!PROFILE_ID.test(profileId) || !profileId.startsWith('claude')) throw new Error('That isn’t a Claude sign-in.');
+  if (profileId === 'claude') return updateSecrets({ claudeToken: value ?? '' });
+  const claudeTokens = { ...secrets.claudeTokens };
+  if (value) claudeTokens[profileId] = value;
+  else delete claudeTokens[profileId];
+  updateSecrets({ claudeTokens });
+}
+
+/** A sign-in's id, or GitHub's. Anything else could name a file outside the directory. */
+type BoundaryName = string;
+
+function boundaryFile(name: BoundaryName): string {
+  if (name !== 'github' && !PROFILE_ID.test(name)) throw new Error(`Not a credential the proxy reads: ${name}`);
+  return path.join(paths.boundary, name);
+}
 
 /** What the proxy on this computer sends for a virtual machine. It reads this for every request, so a change applies at once. */
 export function setBoundaryValue(name: BoundaryName, value: string | undefined): void {
-  const file = path.join(paths.boundary, name);
+  const file = boundaryFile(name);
   if (!value) {
     fs.rmSync(file, { force: true });
     return;
@@ -148,14 +185,27 @@ export function setBoundaryValue(name: BoundaryName, value: string | undefined):
 
 export function boundaryValue(name: BoundaryName): string | undefined {
   try {
-    return fs.readFileSync(path.join(paths.boundary, name), 'utf8') || undefined;
+    return fs.readFileSync(boundaryFile(name), 'utf8') || undefined;
   } catch {
     return undefined;
   }
 }
 
+function boundaryNames(): string[] {
+  try {
+    return fs.readdirSync(paths.boundary);
+  } catch {
+    return [];
+  }
+}
+
+/** What the proxy reads follows what's saved, so a file left by a sign-out that was cut short goes too. */
 function shareSecretsWithProxy(): void {
   setBoundaryValue('claude', secrets.claudeToken);
+  const tokens = secrets.claudeTokens ?? {};
+  for (const id of new Set([...Object.keys(tokens), ...boundaryNames()])) {
+    if (PROFILE_ID.test(id) && id.startsWith('claude-')) setBoundaryValue(id, tokens[id]);
+  }
   setBoundaryValue('github', secrets.githubToken);
 }
 

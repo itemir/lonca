@@ -1,13 +1,15 @@
 import crypto from 'node:crypto';
 import type { AgentId, AgentJob, AgentWork, Attachment, ChatItem, LeadChoice, Project, Session, ToolItem, TurnOutcome, UserItem, Workspace } from '../../shared/types.ts';
 import { MAX_AUTONOMOUS_TURNS, staysHeld } from '../../shared/lead.ts';
+import { defaultProfile, profileIdOf } from '../../shared/profiles.ts';
+import { codexTurn, turnProfile } from '../boundary.ts';
 import { RUNS_DIR } from '../config.ts';
 import { execEnv } from '../env.ts';
 import { exec, execStream, execText, isSandboxRunning, sandboxState, type OutputStream } from '../sandbox.ts';
 import { publish } from '../events.ts';
 import { refreshDiffStat } from '../inspect.ts';
 import { deleteTranscript, flushState, flushTranscript, getProject, getSession, getWorkspace, saveState, state } from '../store.ts';
-import { markAgentRejected, system } from '../system.ts';
+import { clearProfileLimit, getProfile, markAgentRejected, markProfileLimited, system } from '../system.ts';
 import { dropTranscript, transcriptFor } from '../transcript.ts';
 import { HttpError, KeyedQueue, errorMessage, newId, sleep } from '../util.ts';
 import { onWorkspaceReady, onWorkspaceTeardown, publishWorkspace, runningSandbox, setUpCodex, startWorkspace } from '../workspaces.ts';
@@ -38,9 +40,13 @@ export interface TeamHooks {
   /** What a Lead taking over a workspace needs to be told. */
   handover(workspace: Workspace): string | undefined;
   paused(lead: Session, why: string): void;
+  /** A turn on this sign-in reached its usage limit, which the conversation may be able to carry on from on another. */
+  limitReached(session: Session, profileId: string, stopped: boolean): Promise<void>;
 }
 
-let team: TeamHooks = { toolCall: async () => ({ text: '', failed: true }), settled: () => {}, handover: () => undefined, paused: () => {} };
+let team: TeamHooks = {
+  toolCall: async () => ({ text: '', failed: true }), settled: () => {}, handover: () => undefined, paused: () => {}, limitReached: async () => {},
+};
 
 export function setTeamHooks(hooks: TeamHooks): void {
   team = hooks;
@@ -85,6 +91,8 @@ interface ActiveRun {
   playbookVersion?: string;
   /** The conversation has been told its workspace stopped. */
   reportedStopped?: boolean;
+  /** The sign-in it runs on, which its limits and refusals belong to. None for a project's own key. */
+  profileId?: string;
 }
 
 const runs = new Map<string, ActiveRun>();
@@ -129,10 +137,17 @@ export function agentsOf(workspaceId: string): Session[] {
   return state.sessions.filter((session) => session.workspaceId === workspaceId && session.role === 'agent');
 }
 
+/** A sign-in of this provider's, the one asked for if it's there, or else its default. */
+export function chooseProfile(agent: AgentId, wanted: string | undefined): string {
+  const profile = wanted ? getProfile(wanted) : undefined;
+  return profile?.agent === agent ? profile.id : defaultProfile(state.profiles, agent)?.id ?? agent;
+}
+
 export function createSession(workspace: Workspace, options: {
   agent?: AgentId;
   model?: string;
   effort?: string;
+  profileId?: string;
   id?: string;
   title?: string;
   role?: Session['role'];
@@ -154,6 +169,7 @@ export function createSession(workspace: Workspace, options: {
     agent,
     model: model?.id ?? matching ?? '',
     effort: model?.efforts.includes(wanted ?? '') ? wanted! : model?.defaultEffort ?? 'medium',
+    profileId: chooseProfile(agent, options.profileId),
     status: 'idle',
     resumeId: null,
     activeRunId: null,
@@ -173,14 +189,15 @@ export function createLead(workspace: Workspace, choice: Partial<LeadChoice> = {
   const fallback = workspace.lead ?? state.settings.leadDefault;
   const wanted = workspace.leadLockedAt ? workspace.lead! : {
     agent: choice.agent ?? fallback.agent, model: choice.model ?? fallback.model, effort: choice.effort ?? fallback.effort,
+    profileId: choice.profileId ?? (!choice.agent || choice.agent === fallback.agent ? fallback.profileId : undefined),
   };
   const session = createSession(workspace, { ...wanted, role: 'lead', title: 'Lead' });
   // A locked model that has since gone from the catalog stays what it was, so that this can say so.
   if (workspace.leadLockedAt) {
-    Object.assign(session, workspace.lead);
+    Object.assign(session, { agent: workspace.lead!.agent, model: workspace.lead!.model, effort: workspace.lead!.effort });
     publishSession(session);
   }
-  workspace.lead = { agent: session.agent, model: session.model, effort: session.effort };
+  workspace.lead = { agent: session.agent, model: session.model, effort: session.effort, profileId: session.profileId };
   publishWorkspace(workspace);
   return session;
 }
@@ -213,10 +230,9 @@ function apply(sessionId: string, run: ActiveRun | null, ops: ChatOp[]): void {
           run.reportedFailure ||= Boolean(item.failed);
           item.durationMs ??= Date.now() - run.startedAt;
         }
-        if (item.type === 'notice' && item.code === 'auth') {
-          const session = getSession(sessionId);
-          if (session) markAgentRejected(session.agent);
-        }
+        // Which sign-in refused it or reached a limit, which isn't the conversation's for long.
+        if (item.type === 'notice' && item.code && run?.profileId) item.profileId = run.profileId;
+        if (item.type === 'notice' && item.code === 'auth' && run?.profileId) markAgentRejected(run.profileId);
         if (item.type === 'notice' && item.code === 'limit' && run) {
           run.limited = true;
           run.limitResetsAt = item.resetsAt;
@@ -558,6 +574,9 @@ async function finishRun(run: ActiveRun, { code, stderr }: { code: number | null
     }
   }
   run.outcome = run.limited ? 'limit' : run.stopped ? 'stopped' : failed || run.interrupted || run.reportedFailure ? 'failed' : 'completed';
+  if (run.profileId && run.outcome === 'limit') markProfileLimited(run.profileId, run.limitResetsAt);
+  // A turn picked up after a restart can't say when it began, so it leaves a limit for one that can.
+  if (run.profileId && run.outcome === 'completed' && !run.replay) clearProfileLimit(run.profileId, run.startedAt);
   await checkFilesUntouched(run, session);
   await retireRun(run);
 }
@@ -578,7 +597,7 @@ async function retireRun(run: ActiveRun, extra: () => Partial<Session> = () => (
     try {
       const patch = extra();
       persistSession(session, {
-        ...patch, ...outcomeOf(run, session), status: 'idle', activeRunId: null, activeMessageId: undefined, stopRequested: undefined,
+        ...patch, ...outcomeOf(run, session), status: 'idle', activeRunId: null, activeMessageId: undefined, activeProfileId: undefined, stopRequested: undefined,
         ...(session.role === 'lead' ? { toolReplies: undefined } : {}),
         // Whatever is queued would only meet the same limit.
         held: run.outcome === 'limit' || (run.holdQueue && (patch.queue ?? session.queue).length > 0) ? true : session.held,
@@ -598,6 +617,10 @@ async function retireRun(run: ActiveRun, extra: () => Partial<Session> = () => (
   cleanupRunOutput(run);
   const session = getSession(run.sessionId);
   const workspace = getWorkspace(run.workspaceId);
+  // Before anyone hears about the limit, since the conversation may carry on elsewhere.
+  if (session && run.outcome === 'limit' && run.profileId) {
+    await team.limitReached(session, run.profileId, run.stopped).catch((error) => console.error('could not move a conversation at its limit:', errorMessage(error)));
+  }
   if (session && workspace?.status === 'ready') {
     refreshDiffStat(workspace).catch(() => {});
     startNextQueued(session);
@@ -612,6 +635,7 @@ function outcomeOf(run: ActiveRun, session: Session): Partial<Session> {
     lastOutcome: run.outcome,
     ...(run.outcome === 'completed' && run.playbookVersion ? { playbookVersion: run.playbookVersion } : {}),
     limitResetsAt: run.outcome === 'limit' ? run.limitResetsAt : undefined,
+    limitProfileId: run.outcome === 'limit' ? run.profileId : undefined,
     ...(session.work ? {
       // Whoever stopped it knows, so nobody needs telling.
       unread: run.outcome !== 'stopped',
@@ -635,9 +659,12 @@ function playbookUpdate(session: Session, run: ActiveRun, content: string | unde
     ? `Update from Lonca: this is your current playbook. From now on, follow this instead of the one you started with:\n\n${content}` : undefined;
 }
 
-/** What a turn's processes are given, which isn't the same for a Lead and the agents it starts. */
-function turnEnv(session: Session, project: Project): string[] {
-  const env = execEnv(project);
+/** What a turn's processes are given, which isn't the same for a Lead and the agents it starts, or on every sign-in. */
+export function turnEnv(session: Session, project: Project, profileId: string): string[] {
+  const profile = getProfile(profileId) ?? { id: profileId, agent: session.agent };
+  const env = session.agent === 'claude'
+    ? execEnv(project, profile)
+    : [...execEnv(project), ...codexTurn(profile, project).env];
   // Claude would otherwise leave the Lead's tools to be looked up, and it might not bother.
   if (session.role === 'lead') return [...env, 'ENABLE_TOOL_SEARCH=false'];
   if (session.role !== 'agent') return env;
@@ -654,11 +681,13 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
   if (!project) throw new HttpError(404, 'This workspace’s project no longer exists');
   const runId = newId();
   const adapter = adapters[session.agent];
+  const profileId = profileIdOf(session);
   const run: ActiveRun = {
     runId, sessionId: session.id, workspaceId: workspace.id, sandbox: '', dir: `${RUNS_DIR}/${runId}`,
     parser: adapter.parser(runId),
     startedAt: Date.now(), offset: 0, interrupted: false, holdQueue: false, launched: false, sawResult: false, outputLimitHit: false, output: null,
     item, resumedFrom: session.resumeId, toolCalls: new Set(), toolQueue: Promise.resolve(), limited: false, reportedFailure: false, stopped: false,
+    profileId: turnProfile(session.agent, profileId, project),
   };
   // Registered before anything slow happens, so Stop works from the moment the turn begins.
   runs.set(session.id, run);
@@ -668,7 +697,7 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
   try {
     // Keep the accepted item queued until its promotion and run ID are both saved.
     persistSession(session, {
-      status: 'running', activeRunId: runId, activeMessageId: item.id, stopRequested: undefined,
+      status: 'running', activeRunId: runId, activeMessageId: item.id, activeProfileId: profileId, stopRequested: undefined,
       ...(session.role === 'lead' ? { toolReplies: undefined } : {}),
       queue: session.queue.filter((id) => id !== item.id),
       lastOutcome: undefined, limitResetsAt: undefined,
@@ -697,10 +726,11 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
     const command = adapter.command({
       session, workspace, project, attachments, systemPrompt: sessionPrompt(session, workspace, project, playbook),
       ...(session.role === 'lead' ? { tools: { command: 'python3', args: ['-I', `${run.dir}/lonca-tools.py`, run.dir] } } : {}),
+      ...(session.agent === 'codex' ? { config: codexTurn(getProfile(profileId), project).config } : {}),
     });
     launchAttempted = true;
     await execText(sandbox, ['lonca-run', run.dir, ...command], {
-      env: turnEnv(session, project),
+      env: turnEnv(session, project, profileId),
       workdir: workspace.path,
       timeoutMs: 20000,
     });
@@ -799,6 +829,8 @@ export interface MessageOptions {
   /** A Lead's job change is accepted with its message, rather than ahead of it. */
   job?: AgentJob;
   receipt?: ToolReceipt;
+  /** Saved in the same write as the message, so that nothing can come between the two. */
+  patch?: Partial<Session>;
 }
 
 /** Releasing a queue also applies to a Stop whose process is still being retired or recovered. */
@@ -843,11 +875,12 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
     }
     transcript.upsert(item);
     if (locksLead) {
-      workspace.lead = { agent: session.agent, model: session.model, effort: session.effort };
+      workspace.lead = { agent: session.agent, model: session.model, effort: session.effort, profileId: profileIdOf(session) };
       workspace.leadLockedAt = Date.now();
     }
     // Accept the text and its queue reservation together before acknowledging it or starting a CLI.
     const patch: Partial<Session> = {
+      ...options.patch,
       hasMessages: true,
       title: !session.hasMessages && session.title === 'Untitled' ? titleFrom(text) : session.title,
       queue: [...session.queue, item.id],
@@ -885,14 +918,15 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
 }
 
 /** Releases waiting messages, saving a Lead retry's receipt in the same state write. */
-export async function flushQueue(sessionId: string, receipt?: ToolReceipt): Promise<void> {
+export async function flushQueue(sessionId: string, receipt?: ToolReceipt, patch: Partial<Session> = {}): Promise<void> {
   const session = getSession(sessionId);
   if (!session) throw new HttpError(404, 'No such session');
   if (deletingSessions.has(sessionId)) throw new HttpError(409, 'This conversation is closing.');
   const workspace = getWorkspace(session.workspaceId);
   if (!workspace) throw new HttpError(404, 'No such workspace');
   if (NOT_ACCEPTING.has(workspace.status)) throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
-  releaseQueueHold(session, session.role === 'lead' ? { autonomousTurns: 0 } : {}, receipt);
+  // Releasing it is someone going on, so a Lead's turns without the user count from nothing, unless the patch says otherwise.
+  releaseQueueHold(session, { ...(session.role === 'lead' ? { autonomousTurns: 0 } : {}), ...patch }, receipt);
   if ((workspace.status === 'stopped' || workspace.status === 'ready') && session.queue.length > 0) await startWorkspace(workspace);
   startNextQueued(session);
 }
@@ -1064,6 +1098,8 @@ async function resumeRun(session: Session): Promise<void> {
       startedAt: session.updatedAt, offset: 0, interrupted: Boolean(session.stopRequested), holdQueue: session.stopRequested?.holdQueue ?? false, launched: true, sawResult: false, outputLimitHit: false, output: null,
       item: item?.type === 'user' ? item : undefined, resumedFrom: session.resumeId,
       replay: { previous, seen: new Set() }, toolCalls: new Set(), toolQueue: Promise.resolve(), limited: false, reportedFailure: false, stopped: Boolean(session.stopRequested),
+      // One that started before there could be several runs on the provider's first.
+      profileId: turnProfile(session.agent, session.activeProfileId ?? session.agent, getProject(workspace.projectId)),
     };
     runs.set(session.id, run);
     // A crash during teardown can leave an agent alive in a workspace now marked error.
@@ -1073,7 +1109,7 @@ async function resumeRun(session: Session): Promise<void> {
   } else {
     transcriptFor(session.id).upsert({ id: `${runId}:result`, ts: Date.now(), runId, type: 'result', interrupted: true } satisfies ChatItem);
     persistSession(session, {
-      status: 'idle', activeRunId: null, activeMessageId: undefined, stopRequested: undefined,
+      status: 'idle', activeRunId: null, activeMessageId: undefined, activeProfileId: undefined, stopRequested: undefined,
       held: session.queue.length > 0 ? true : session.held,
     });
   }

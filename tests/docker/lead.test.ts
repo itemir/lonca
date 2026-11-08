@@ -87,7 +87,7 @@ describe('a workspace’s Lead', () => {
     await lonca.api('PATCH', '/settings', { leadDefault: { agent: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' } });
     const { workspace, lead } = await newWorkspace();
     expect(lead).toMatchObject({ role: 'lead', title: 'Lead', agent: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' });
-    expect((await lonca.workspace(workspace.id)).lead).toEqual({ agent: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' });
+    expect((await lonca.workspace(workspace.id)).lead).toEqual({ agent: 'claude', model: 'claude-sonnet-5-5', effort: 'medium', profileId: 'claude' });
     await expect(lonca.api('POST', `/workspaces/${workspace.id}/lead`)).rejects.toThrow(/already has a Lead/);
     await lonca.api('PATCH', '/settings', { leadDefault: { agent: 'claude', model: 'claude-opus-5-5', effort: 'high' } });
   });
@@ -606,7 +606,7 @@ describe('a project’s own key', () => {
 
   it('is what the real CLIs send, rather than the placeholder or a sign-in', async () => {
     const { workspace } = await newWorkspace();
-    await lonca.api('PUT', '/secrets/claude', { token: 'sk-ant-oat01-a-sign-in-that-should-lose' });
+    await lonca.api('PUT', '/profiles/claude/key', { key: 'sk-ant-oat01-a-sign-in-that-should-lose' });
     try {
       // Codex's usual provider, at the mock's address. A config that isn't Lonca's stays as it is.
       sandboxExec(workspace.sandboxName, `cat > ~/.codex/config.toml <<EOF
@@ -624,7 +624,7 @@ EOF`);
       expect(await sent('codex', CODEX_MODEL, 'WHOSE-KEY-CODEX')).toBe('Bearer sk-mock');
       expect(await sent('claude', 'claude-sonnet-5-5', 'WHOSE-KEY-CLAUDE')).toBe('sk-mock');
     } finally {
-      await lonca.api('POST', '/agents/claude/logout');
+      await lonca.api('POST', '/profiles/claude/logout');
     }
   });
 });
