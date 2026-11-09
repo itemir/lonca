@@ -15,6 +15,8 @@ import { isPortFree, onSandboxChange, publishWorkspace, reserveHostPorts, runnin
 const CODEX_SIGN_IN_PORT = 1455;
 const LOWEST_HOST_PORT = 1024;
 const HIGHEST_PORT = 65535;
+// Browsers won't open these whatever is there: the Fetch standard's bad ports from 1024 up.
+const BROWSER_BLOCKED_PORTS = [1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080];
 // Ports the system offers can be ones Lonca keeps for something else, so it may take a few.
 const PICK_ATTEMPTS = 20;
 
@@ -133,6 +135,7 @@ async function hostPortProblem(workspace: Workspace, hostPort: number): Promise<
   // A browser keeps Lonca's token for each origin it opened Lonca on, and a page the VM served there could read it.
   if ([HTTP_PORT, DEFAULT_HTTP_PORT, DEV_PORT].includes(hostPort)) return `localhost:${hostPort} is kept for Lonca's own pages.`;
   if (hostPort === CODEX_SIGN_IN_PORT) return `localhost:${hostPort} is kept for signing in to Codex.`;
+  if (BROWSER_BLOCKED_PORTS.includes(hostPort)) return `Browsers won't open localhost:${hostPort}.`;
   const owner = state.workspaces.find((entry) => isOwnPort(entry, hostPort));
   if (owner) return `localhost:${hostPort} is one of the ports published for ${owner === workspace ? 'this workspace' : 'another workspace'}.`;
   for (const entry of state.workspaces) {
