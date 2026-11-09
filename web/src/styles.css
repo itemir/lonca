@@ -801,8 +801,13 @@ a.crumb:hover { color: var(--text); }
 }
 
 .tab-action:hover { background: var(--hover); color: var(--text); }
-.session-tab .tab-close { display: none; }
-.session-tab:hover .tab-close, .session-tab .tab-close:focus-visible { display: inline-grid; }
+
+/* A tab's close button keeps its place while hidden, so showing it doesn't push the tabs after it.
+   Only a real pointer can reveal it, so anything else keeps it in view. */
+@media (hover: hover) and (pointer: fine) {
+  .session-tab .tab-close { opacity: 0; }
+  .session-tab:hover .tab-close, .session-tab .tab-close:focus-visible { opacity: 1; }
+}
 
 /* The Lead and its agents: one fixed place for state, so labels don't jump. */
 .session-tab.team-tab, .session-tab.team-tab.active { min-width: 0; padding-right: 4px; }
