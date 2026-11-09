@@ -3,7 +3,7 @@ import net, { type AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PortForward, Project, Workspace } from '../../shared/types.ts';
+import type { PortForward, Project, Session, Workspace } from '../../shared/types.ts';
 import type { ToolCall } from '../../server/agents/process.ts';
 
 // The real workspace lifecycle, store and Lead tools, with only the sandbox replaced: what sbx was
@@ -16,6 +16,7 @@ const vm = vi.hoisted(() => ({
   publishPort: vi.fn(async (_name: string, _hostPort: number, _port: number) => {}),
   unpublishPort: vi.fn(async (_name: string, _hostPort: number, _port: number) => {}),
   stopSandbox: vi.fn(async (_name: string) => {}),
+  sandboxState: vi.fn(),
   ensureSandbox: vi.fn(),
   execText: vi.fn(),
 }));
@@ -30,11 +31,12 @@ vi.mock('../../server/sandbox.ts', async (importOriginal) => {
     return spec.name;
   });
   vm.execText.mockImplementation(async () => vm.tables);
+  vm.sandboxState.mockImplementation(async () => (!vm.exists ? 'missing' : vm.running ? 'running' : 'stopped'));
   return {
     ...original,
     ensureSandbox: vm.ensureSandbox,
     execText: vm.execText,
-    sandboxState: async () => (!vm.exists ? 'missing' : vm.running ? 'running' : 'stopped'),
+    sandboxState: vm.sandboxState,
     isSandboxRunning: async () => vm.running,
     stopSandbox: async (name: string) => {
       await vm.stopSandbox(name);
@@ -107,11 +109,14 @@ function listenOn(host: string): Promise<number> {
   });
 }
 
-/** A port nothing on this computer is listening on, as far as anyone can know. */
+/** A port nothing on this computer is listening on, on any address, as far as anyone can know. */
 async function freePort(): Promise<number> {
-  const port = await listen();
-  await new Promise((resolve) => servers.pop()!.close(resolve));
-  return port;
+  for (;;) {
+    const port = await listen();
+    await new Promise((resolve) => servers.pop()!.close(resolve));
+    // The system only knows it's free on 127.0.0.1, and Lonca asks of every address.
+    if (await workspaces.isPortFree(port)) return port;
+  }
 }
 
 const HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode';
@@ -132,6 +137,7 @@ function tables(...rows: string[]): string {
 beforeAll(async () => {
   home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lonca-ports-')));
   vi.stubEnv('LONCA_HOME', home);
+  vi.stubEnv('PORT', '4801');
   store = await import('../../server/store.ts');
   workspaces = await import('../../server/workspaces.ts');
   // As the runner's does when an agent won't stop. It comes before the ports' own, as it does in the server.
@@ -468,6 +474,24 @@ describe('forwards when the workspace stops and starts', () => {
     expect(vm.unpublishPort.mock.calls).toEqual(forwards.map((forward) => ['vm-own', forward.hostPort, forward.port]));
   });
 
+  it('closes forwards before asking sbx anything else, so a stop that fails on the way leaves none behind', async () => {
+    const forwards = await forwardTwo();
+    // An agent's turn makes the stop check whether the sandbox is running, which sbx can fail to answer.
+    store.state.sessions = [{ id: 'turn', workspaceId: own.id, activeRunId: 'run' } as Session];
+    const answer = vm.sandboxState.getMockImplementation()!;
+    vm.sandboxState.mockImplementation(async () => {
+      throw new Error('error: cannot connect to sandboxd');
+    });
+    try {
+      await expect(workspaces.stopWorkspace(own)).rejects.toThrow('cannot connect to sandboxd');
+    } finally {
+      vm.sandboxState.mockImplementation(answer);
+    }
+    expect(own.status).toBe('error');
+    expect(own.forwards).toBeUndefined();
+    expect(vm.unpublishPort.mock.calls).toEqual(forwards.map((forward) => ['vm-own', forward.hostPort, forward.port]));
+  });
+
   it('closes the forwards of a sandbox stopped outside Lonca, which doesn’t start it', async () => {
     const forwards = await forwardTwo();
     vm.running = false;
@@ -522,6 +546,29 @@ describe('forwards when the workspace stops and starts', () => {
     expect(own.forwards).toBeUndefined();
     // Once the sandbox has gone, there's nothing to ask sbx.
     expect(vm.unpublishPort).toHaveBeenCalledTimes(2);
+  });
+
+  it('forgets forwards once a rebuild has removed the sandbox, even when sbx can’t say it’s gone', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    fs.mkdirSync(own.path, { recursive: true });
+    await forwardTwo();
+    const answer = vm.sandboxState.getMockImplementation()!;
+    // Before it's removed, sbx can't be reached. After, it only says the sandbox isn't there.
+    vm.sandboxState.mockImplementation(async () => {
+      if (vm.exists) return answer();
+      throw new Error('error: cannot connect to sandboxd');
+    });
+    vm.unpublishPort.mockImplementation(async () => {
+      throw new Error(vm.exists ? 'error: cannot connect to sandboxd' : 'error: sandbox \'vm-own\' not found');
+    });
+    try {
+      await workspaces.rebuildWorkspace(own);
+    } finally {
+      vm.sandboxState.mockImplementation(answer);
+      vm.unpublishPort.mockImplementation(async () => {});
+    }
+    expect(own.status).toBe('ready');
+    expect(own.forwards).toBeUndefined();
   });
 
   it('gives a new workspace no block of ports that a forward uses, even one that isn’t listening', async () => {

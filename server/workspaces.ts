@@ -484,6 +484,7 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
       case 'rebuild':
       case 'archive':
       case 'delete':
+        await beforeSandboxChange(workspace);
         // Operations that keep conversations need the stopped sandbox's unread
         // output. Explicit deletion only needs its processes confirmed dead.
         if (operation !== 'delete'
@@ -491,13 +492,14 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
           && await sandboxState(workspace.sandboxName) === 'stopped') {
           await startWorkspaceSandbox(workspace, projectOf(workspace));
         }
-        await beforeSandboxChange(workspace);
         if (hasSandbox) for (const listener of teardownListeners) await listener(workspace);
         if (operation === 'stop') {
           await stopSandbox(workspace.sandboxName);
           finishOperation(workspace, 'stopped');
         } else if (operation === 'rebuild') {
           await removeSandbox(workspace.sandboxName);
+          // Removing it let go of every port it had, including any forward that couldn't be closed.
+          workspace.forwards = undefined;
           await startWorkspaceSandbox(workspace, projectOf(workspace));
           finishOperation(workspace, 'ready');
         } else {

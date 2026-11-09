@@ -41,24 +41,32 @@ function urlIn(reply: string | undefined): string {
 
 const portOf = (url: string) => Number(new URL(url).port);
 
-/** A port on this computer that nothing is using. Its number serves for one in the VM too. */
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address() as AddressInfo;
-      server.close(() => resolve(port));
+/** Whether nothing on this computer listens on a port on any address, as Lonca asks before forwarding to it. */
+async function hostPortFree(port: number): Promise<boolean> {
+  for (const host of ['127.0.0.1', '0.0.0.0', '::1', '::']) {
+    const free = await new Promise<boolean>((resolve) => {
+      const server = net.createServer();
+      server.once('error', () => resolve(false));
+      server.listen(port, host, () => server.close(() => resolve(true)));
     });
-  });
+    if (!free) return false;
+  }
+  return true;
 }
 
-function hostPortFree(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const server = net.createServer();
-    server.once('error', () => resolve(false));
-    server.listen(port, '127.0.0.1', () => server.close(() => resolve(true)));
-  });
+/** A port on this computer that nothing is using. Its number serves for one in the VM too. */
+async function freePort(): Promise<number> {
+  for (;;) {
+    const port = await new Promise<number>((resolve, reject) => {
+      const server = net.createServer();
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        const { port } = server.address() as AddressInfo;
+        server.close(() => resolve(port));
+      });
+    });
+    if (await hostPortFree(port)) return port;
+  }
 }
 
 async function page(url: string): Promise<string> {
