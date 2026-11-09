@@ -1,11 +1,13 @@
 import path from 'node:path';
+import { predates, summarize } from '../shared/pr.ts';
 import type {
-  ChangeSet, ChangedFile, CheckRun, Checks, DiffStat, FileContent, FileEntry, PullRequest, SearchHit, Workspace,
+  ChangeSet, ChangedFile, CheckRun, Checks, DiffStat, FileContent, FileEntry, LocalState, MergeSettings, PrSummary, PullRequest, SearchHit, Workspace,
 } from '../shared/types.ts';
 import { exec, execText } from './sandbox.ts';
 import { execEnv } from './env.ts';
-import { getProject, getSecrets } from './store.ts';
-import { HttpError } from './util.ts';
+import { parseGithubRepo } from './projects.ts';
+import { getProject, getSecrets, getWorkspace } from './store.ts';
+import { HttpError, errorMessage } from './util.ts';
 import { publishWorkspace, runningSandbox } from './workspaces.ts';
 
 // Every read of a checkout happens through the sandbox. The host never follows a path
@@ -277,23 +279,188 @@ export function normalizeCheck(raw: any): CheckRun {
   return { name, status: 'failure', url };
 }
 
-export async function getChecks(workspace: Workspace): Promise<Checks> {
-  const project = getProject(workspace.projectId);
-  if (!project?.githubOwner) return { github: 'not-github', pr: null, checks: [] };
-  if (!project.settings.env.GH_TOKEN && !getSecrets().githubToken) return { github: 'missing-token', pr: null, checks: [] };
-  const sandbox = await runningSandbox(workspace);
-  const result = await exec(sandbox, [
-    'gh', 'pr', 'view', workspace.branch,
-    '--json', 'number,title,url,state,isDraft,reviewDecision,mergeable,statusCheckRollup',
-  ], { workdir: workspace.path, env: execEnv(project), timeoutMs: 30000 });
-  if (result.code !== 0) {
-    const message = result.stderr.toString('utf8').trim();
-    if (/no pull requests found/i.test(message)) return { github: 'connected', pr: null, checks: [] };
-    return { github: 'error', error: message || 'GitHub could not be reached', pr: null, checks: [] };
+const PR_FIELDS = [
+  'number', 'title', 'url', 'state', 'isDraft', 'reviewDecision', 'mergeable', 'mergeStateStatus', 'statusCheckRollup',
+  'headRefOid', 'baseRefName', 'createdAt', 'mergedAt', 'closedAt', 'autoMergeRequest',
+].join(',');
+
+/** The view command, which names the repository so that nothing an agent set in the checkout can redirect it. */
+export function prViewArgs(branch: string, repo: string): string[] {
+  return ['gh', 'pr', 'view', branch, '--repo', repo, '--json', PR_FIELDS];
+}
+
+// A query, never a mutation. `gh pr view` doesn't say whether the base branch has a merge queue.
+const MERGE_SETTINGS_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerDefaultMergeMethod viewerPermission
+    pullRequest(number: $number) { isInMergeQueue isMergeQueueEnabled }
   }
-  const data = JSON.parse(result.stdout.toString('utf8')) as PullRequest & { statusCheckRollup?: unknown[] };
-  const { statusCheckRollup, ...pr } = data;
-  return { github: 'connected', pr, checks: (statusCheckRollup ?? []).map(normalizeCheck) };
+}`;
+
+export function mergeSettingsArgs(owner: string, name: string, number: number): string[] {
+  // -f sends the names as strings even when they look like numbers, which -F wouldn't.
+  return ['gh', 'api', 'graphql', '-f', `query=${MERGE_SETTINGS_QUERY}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${number}`];
+}
+
+// Polled in the background too, so it must never take locks an agent's git commands need.
+const LOCAL_STATE_SCRIPT = String.raw`
+set -o pipefail
+export GIT_OPTIONAL_LOCKS=0
+pr_head="$1"
+head=$(git rev-parse --verify --quiet HEAD) || exit 1
+uncommitted=$(git status --porcelain | wc -l) || exit 1
+if [ "$head" = "$pr_head" ]; then
+  unpushed=0
+elif [ -n "$pr_head" ] && git cat-file -e "$pr_head^{commit}" 2>/dev/null; then
+  unpushed=$(git rev-list --count "$pr_head..HEAD") || exit 1
+else
+  unpushed=null
+fi
+printf '%s %s %s\n' "$head" "$unpushed" "$uncommitted"
+`;
+
+const SHA = /^[0-9a-f]{40}$/;
+
+/** Reads what GitHub said about a pull request, trusting none of it to have the expected shape. */
+export function parsePullRequest(raw: any): { pr: PullRequest; checks: CheckRun[] } | null {
+  if (!raw || typeof raw !== 'object' || !Number.isInteger(raw.number) || raw.number <= 0) return null;
+  const state = String(raw.state ?? '').toUpperCase();
+  if (state !== 'OPEN' && state !== 'MERGED' && state !== 'CLOSED') return null;
+  const text = (value: unknown) => (typeof value === 'string' ? value : '');
+  const optional = (value: unknown) => (typeof value === 'string' && value ? value : null);
+  const pr: PullRequest = {
+    number: raw.number,
+    title: text(raw.title),
+    url: text(raw.url),
+    state,
+    isDraft: raw.isDraft === true,
+    reviewDecision: optional(raw.reviewDecision),
+    mergeable: optional(raw.mergeable),
+    mergeStateStatus: optional(raw.mergeStateStatus),
+    headRefOid: SHA.test(text(raw.headRefOid)) ? raw.headRefOid : '',
+    baseRefName: text(raw.baseRefName),
+    createdAt: text(raw.createdAt),
+    mergedAt: optional(raw.mergedAt),
+    closedAt: optional(raw.closedAt),
+    autoMergeRequest: Boolean(raw.autoMergeRequest),
+  };
+  const rollup: unknown[] = Array.isArray(raw.statusCheckRollup) ? raw.statusCheckRollup : [];
+  return { pr, checks: rollup.map(normalizeCheck) };
+}
+
+export function parseMergeSettings(output: string): { repo: MergeSettings; queue: { enabled: boolean; queued: boolean } } | null {
+  try {
+    const repository = JSON.parse(output)?.data?.repository;
+    if (!repository || typeof repository !== 'object') return null;
+    const method = String(repository.viewerDefaultMergeMethod ?? '').toUpperCase();
+    return {
+      repo: {
+        mergeCommitAllowed: repository.mergeCommitAllowed === true,
+        squashMergeAllowed: repository.squashMergeAllowed === true,
+        rebaseMergeAllowed: repository.rebaseMergeAllowed === true,
+        viewerDefaultMergeMethod: method === 'MERGE' || method === 'SQUASH' || method === 'REBASE' ? method : null,
+        viewerPermission: typeof repository.viewerPermission === 'string' ? repository.viewerPermission.toUpperCase() : null,
+      },
+      queue: {
+        enabled: repository.pullRequest?.isMergeQueueEnabled === true,
+        queued: repository.pullRequest?.isInMergeQueue === true,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function parseLocalState(output: string): LocalState | null {
+  const [head, unpushed, uncommitted] = output.trim().split(/\s+/);
+  if (!SHA.test(head ?? '') || !/^\d+$/.test(uncommitted ?? '') || !/^(\d+|null)$/.test(unpushed ?? '')) return null;
+  return { head, unpushed: unpushed === 'null' ? null : Number(unpushed), uncommitted: Number(uncommitted) };
+}
+
+function emptyChecks(github: Checks['github'], checkedAt: number, error?: string): Checks {
+  return { github, ...(error ? { error } : {}), pr: null, checks: [], repo: null, queue: null, local: null, checkedAt };
+}
+
+// When each workspace's saved pull request was read. A slow read that began before a newer one
+// was saved, such as a poll that overlapped a merge, must not put back what it saw.
+const prReadAt = new Map<string, number>();
+
+function sameSummary(a: PrSummary | null, b: PrSummary | null): boolean {
+  if (!a || !b) return a === b;
+  return a.number === b.number && a.title === b.title && a.url === b.url && a.state === b.state
+    && a.isDraft === b.isDraft && a.baseRefName === b.baseRefName && a.headRefOid === b.headRefOid;
+}
+
+/** Keeps the latest read on the workspace, for when GitHub or its virtual machine can't be asked. */
+function rememberPr(workspace: Workspace, pr: PullRequest | null, startedAt: number): void {
+  // Publishing a workspace that's since been deleted would bring it back on every page.
+  if (getWorkspace(workspace.id) !== workspace || (prReadAt.get(workspace.id) ?? 0) > startedAt) return;
+  prReadAt.set(workspace.id, startedAt);
+  const next = pr ? summarize(pr, startedAt) : null;
+  const current = workspace.pr ?? null;
+  if (sameSummary(current, next)) {
+    // Nobody needs telling that nothing changed, but a page loaded later should know how recent it is.
+    if (current) current.checkedAt = startedAt;
+    else workspace.pr = null;
+    return;
+  }
+  workspace.pr = next;
+  publishWorkspace(workspace);
+}
+
+export async function getChecks(workspace: Workspace): Promise<Checks> {
+  const startedAt = Date.now();
+  const project = getProject(workspace.projectId);
+  const repo = parseGithubRepo(project?.remoteUrl ?? null);
+  if (!project?.githubOwner || !repo) return emptyChecks('not-github', startedAt);
+  if (!project.settings.env.GH_TOKEN && !getSecrets().githubToken) return emptyChecks('missing-token', startedAt);
+  const sandbox = await runningSandbox(workspace);
+  const env = execEnv(project);
+  try {
+    const result = await exec(sandbox, prViewArgs(workspace.branch, `${repo.owner}/${repo.name}`), { workdir: workspace.path, env, timeoutMs: 30000 });
+    if (result.code !== 0) {
+      const message = result.stderr.toString('utf8').trim();
+      if (/no pull requests found/i.test(message)) {
+        rememberPr(workspace, null, startedAt);
+        return emptyChecks('connected', startedAt);
+      }
+      // Not the same as having no pull request, which would offer to open another.
+      return emptyChecks('error', startedAt, message || 'GitHub couldn’t be reached.');
+    }
+    let parsed: ReturnType<typeof parsePullRequest>;
+    try {
+      parsed = parsePullRequest(JSON.parse(result.stdout.toString('utf8')));
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) return emptyChecks('error', startedAt, 'GitHub’s reply about this pull request couldn’t be read.');
+    const { pr, checks } = parsed;
+    // A branch name can come back after its workspace is deleted, and with it that workspace's pull request.
+    if (predates(pr, workspace.createdAt)) {
+      rememberPr(workspace, null, startedAt);
+      return emptyChecks('connected', startedAt);
+    }
+    const [settings, local] = await Promise.all([
+      pr.state === 'OPEN'
+        ? exec(sandbox, mergeSettingsArgs(repo.owner, repo.name, pr.number), { workdir: workspace.path, env, timeoutMs: 30000 })
+          .then((answer) => (answer.code === 0 ? parseMergeSettings(answer.stdout.toString('utf8')) : null), () => null)
+        : null,
+      exec(sandbox, ['bash', '-c', LOCAL_STATE_SCRIPT, 'lonca-pr-local', pr.headRefOid], { workdir: workspace.path, timeoutMs: 30000 })
+        .then((answer) => (answer.code === 0 ? parseLocalState(answer.stdout.toString('utf8')) : null), () => null),
+    ]);
+    rememberPr(workspace, pr, startedAt);
+    return {
+      github: 'connected',
+      pr,
+      checks,
+      repo: settings?.repo ?? null,
+      queue: settings?.queue ?? null,
+      local,
+      checkedAt: startedAt,
+    };
+  } catch (error) {
+    return emptyChecks('error', startedAt, errorMessage(error));
+  }
 }
 
 const SAFE_NAME = /[^\w.\- ()]+/g;

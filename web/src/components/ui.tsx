@@ -57,11 +57,13 @@ export function Menu({ trigger, label, entries, align = 'left', className }: {
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
   const close = useCallback(() => setOpen(false), []);
   useOutsideClick(ref, close, open);
   return (
     <div className={`menu-anchor ${className ?? ''}`} ref={ref}>
       <button
+        ref={button}
         type="button"
         className="menu-trigger"
         aria-label={label}
@@ -85,6 +87,8 @@ export function Menu({ trigger, label, entries, align = 'left', className }: {
               disabled={entry.disabled}
               onClick={(event) => {
                 event.stopPropagation();
+                // The item goes with the menu, so a dialog it opens gives focus back to the menu's button.
+                button.current?.focus();
                 setOpen(false);
                 entry.onSelect();
               }}
@@ -99,6 +103,19 @@ export function Menu({ trigger, label, entries, align = 'left', className }: {
   );
 }
 
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+// Dialogs open on top of each other now and then. Only the top one keeps focus to itself.
+const openDialogs: HTMLElement[] = [];
+
+/** Where Tab can go in a dialog. A radio group is one stop, at its chosen radio. */
+function tabStops(dialog: HTMLElement): HTMLElement[] {
+  return [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((element) => {
+    if (element instanceof HTMLInputElement && element.type === 'radio' && !element.checked) return false;
+    return element.getClientRects().length > 0;
+  });
+}
+
 export function Modal({ title, onClose, children, closeOnBackdrop = true, className }: {
   title: string;
   onClose: () => void;
@@ -106,6 +123,9 @@ export function Modal({ title, onClose, children, closeOnBackdrop = true, classN
   closeOnBackdrop?: boolean;
   className?: string;
 }) {
+  const dialog = useRef<HTMLDivElement>(null);
+  // Taken while rendering, before anything inside takes focus with autoFocus.
+  const [opener] = useState(() => document.activeElement);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose();
@@ -113,9 +133,40 @@ export function Modal({ title, onClose, children, closeOnBackdrop = true, classN
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
   }, [onClose]);
+  // Tab and Shift+Tab go round the dialog rather than out to the page behind it.
+  useEffect(() => {
+    const own = dialog.current!;
+    openDialogs.push(own);
+    const keepFocus = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || openDialogs.at(-1) !== own) return;
+      const stops = tabStops(own);
+      const active = document.activeElement;
+      const inside = active instanceof Node && own.contains(active);
+      if (stops.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      if (event.shiftKey && (!inside || active === stops[0])) {
+        event.preventDefault();
+        stops.at(-1)!.focus();
+      } else if (!event.shiftKey && (!inside || active === stops.at(-1))) {
+        event.preventDefault();
+        stops[0].focus();
+      }
+    };
+    document.addEventListener('keydown', keepFocus);
+    return () => {
+      document.removeEventListener('keydown', keepFocus);
+      openDialogs.splice(openDialogs.indexOf(own), 1);
+      // Back to whatever had focus before, unless that's gone, as a menu item has. Focus that was in the
+      // dialog has fallen to the page by now, so anything else holding it was given it on purpose.
+      const lost = !document.activeElement || document.activeElement === document.body;
+      if (lost && opener instanceof HTMLElement && opener !== document.body && opener.isConnected) opener.focus({ preventScroll: true });
+    };
+  }, [opener]);
   return createPortal(
     <div className={`modal-backdrop ${className ?? ''}`} onMouseDown={(event) => closeOnBackdrop && event.target === event.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="modal" ref={dialog} role="dialog" aria-modal="true" aria-label={title}>
         <header className="modal-header">
           <h2>{title}</h2>
           <IconButton label="Close" onClick={onClose}><X size={16} /></IconButton>

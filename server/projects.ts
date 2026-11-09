@@ -96,6 +96,20 @@ export function parseGithubOwner(url: string | null): string | null {
   return /github\.com[/:]([\w.-]+)\/[\w.-]+?(\.git)?\/?$/.exec(url)?.[1] ?? null;
 }
 
+/**
+ * The `owner/repo` that pull requests are read from and merged in. It comes from the URL saved on
+ * this computer, never from a workspace's git config, which agents can change.
+ */
+export function parseGithubRepo(url: string | null): { owner: string; name: string } | null {
+  if (!url) return null;
+  const match = /^(?:https?:\/\/(?:www\.)?github\.com\/|ssh:\/\/git@github\.com(?::\d+)?\/|git@github\.com:)([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i
+    .exec(url.trim());
+  if (!match) return null;
+  const [, owner, name] = match;
+  if ([owner, name].some((part) => /^\.+$/.test(part))) return null;
+  return { owner, name };
+}
+
 export function repoNameFromUrl(url: string): string {
   return url.replace(/\/+$/, '').replace(/\.git$/, '').split(/[/:]/).at(-1) || 'project';
 }

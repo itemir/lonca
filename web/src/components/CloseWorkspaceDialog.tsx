@@ -1,7 +1,9 @@
 import { type ReactNode, useEffect, useState } from 'react';
 import { useMatch, useNavigate } from 'react-router-dom';
+import type { PrStatus } from '../../../shared/pr.ts';
 import type { Workspace } from '../../../shared/types.ts';
 import { api } from '../api.ts';
+import { usePrStatus, usePrStore } from '../pr.ts';
 import { attempt, useStore } from '../store.ts';
 import { Modal } from './ui.tsx';
 
@@ -56,6 +58,29 @@ export function useCloseWorkspace(workspace: Workspace): { press: () => void; ch
   return { press, checking: checking && workspace.status === 'ready', dialog };
 }
 
+/** What archiving means for the branch's pull request, when there is one. */
+function PrLines({ status, unpushed }: { status: PrStatus; unpushed: number | null }) {
+  const pr = status.pr;
+  if (!pr) return null;
+  const { number, baseRefName: base } = pr;
+  if (status.kind === 'closed') {
+    return <p className="close-warning">#{number} was closed without merging, so this work isn’t in {base}. Its branch is kept.</p>;
+  }
+  if (status.kind !== 'merged') return null;
+  return (
+    <>
+      <p>#{number} is merged into {base}.</p>
+      {unpushed !== null && unpushed > 0 && (
+        <p className="close-warning">
+          {unpushed === 1
+            ? `1 commit on this branch isn’t in #${number}, so it isn’t in ${base}. The branch keeps it.`
+            : `${unpushed} commits on this branch aren’t in #${number}, so they aren’t in ${base}. The branch keeps them.`}
+        </p>
+      )}
+    </>
+  );
+}
+
 function uncommittedLine(count: number | null, running: boolean): string {
   if (count === null) return running ? 'Any uncommitted changes are lost.' : 'Any uncommitted changes are lost. They can’t be counted while it isn’t running.';
   if (count === 0) return 'No uncommitted changes.';
@@ -72,6 +97,10 @@ export function CloseWorkspaceDialog({ workspace, agentWorking: serverSaysWorkin
   const [uncommitted, setUncommitted] = useState<number | null>(null);
   const [stopAsking, setStopAsking] = useState(false);
   const ready = workspace.status === 'ready';
+  const pr = usePrStatus(workspace);
+  // Only known from a read of this workspace's own checkout, which only the workspace on screen has.
+  const read = usePrStore((store) => store.entries[workspace.id]?.good ?? null);
+  const unpushed = read?.pr?.state === 'MERGED' && read.pr.number === pr.pr?.number ? read.local?.unpushed ?? null : null;
 
   // The dialog doesn't wait for this: a busy sandbox can be slow to answer, and a stopped one isn't woken just to ask.
   useEffect(() => {
@@ -93,7 +122,7 @@ export function CloseWorkspaceDialog({ workspace, agentWorking: serverSaysWorkin
   };
 
   return (
-    <Modal className="close-dialog" title={`${closeVerb(workspace)} this workspace?`} onClose={onClose}>
+    <Modal className="close-dialog sheet-dialog" title={`${closeVerb(workspace)} this workspace?`} onClose={onClose}>
       <div className="close-target">
         <span>{workspace.title ?? workspace.name}</span>
         <code>{workspace.branch}</code>
@@ -106,6 +135,7 @@ export function CloseWorkspaceDialog({ workspace, agentWorking: serverSaysWorkin
         ) : (
           <>
             <div>
+              <PrLines status={pr} unpushed={unpushed} />
               {agentWorking && <p className="close-warning">An agent is working here and will be stopped.</p>}
               <p>Its virtual machine and checkout are removed, along with any git-ignored files and attachments.</p>
               <p className={uncommitted || !ready ? 'close-warning' : undefined}>{uncommittedLine(uncommitted, ready)}</p>

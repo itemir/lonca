@@ -121,6 +121,8 @@ export interface Workspace {
   steps: WorkspaceStep[];
   filesCopied: number;
   diff: DiffStat | null;
+  /** The branch's pull request when GitHub was last asked, kept for when it can't be asked. */
+  pr?: PrSummary | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -497,14 +499,47 @@ export interface CheckRun {
   url?: string;
 }
 
+export type PrState = 'OPEN' | 'MERGED' | 'CLOSED';
+
 export interface PullRequest {
   number: number;
   title: string;
   url: string;
-  state: string;
+  state: PrState;
   isDraft: boolean;
+  /** GitHub sends an empty string, not null, when no review is required. */
   reviewDecision: string | null;
+  /** MERGEABLE, CONFLICTING or UNKNOWN. */
   mergeable: string | null;
+  /** CLEAN, UNSTABLE, HAS_HOOKS, BLOCKED, BEHIND, DIRTY, DRAFT or UNKNOWN. */
+  mergeStateStatus: string | null;
+  headRefOid: string;
+  baseRefName: string;
+  createdAt: string;
+  mergedAt: string | null;
+  closedAt: string | null;
+  /** Someone turned on auto-merge, so GitHub merges it by itself once it can. */
+  autoMergeRequest: boolean;
+}
+
+export type MergeMethod = 'squash' | 'merge' | 'rebase';
+
+/** How the repository lets this user merge, from GitHub's GraphQL API. */
+export interface MergeSettings {
+  mergeCommitAllowed: boolean;
+  squashMergeAllowed: boolean;
+  rebaseMergeAllowed: boolean;
+  viewerDefaultMergeMethod: 'MERGE' | 'SQUASH' | 'REBASE' | null;
+  /** ADMIN, MAINTAIN, WRITE, TRIAGE or READ. */
+  viewerPermission: string | null;
+}
+
+/** The workspace's own checkout, compared with the pull request. */
+export interface LocalState {
+  head: string;
+  /** Commits here that aren't in the pull request, or null when its head isn't in this repository. */
+  unpushed: number | null;
+  uncommitted: number;
 }
 
 export interface Checks {
@@ -512,6 +547,31 @@ export interface Checks {
   error?: string;
   pr: PullRequest | null;
   checks: CheckRun[];
+  /** Null when GitHub couldn't say, which leaves every method to try. */
+  repo: MergeSettings | null;
+  queue: { enabled: boolean; queued: boolean } | null;
+  local: LocalState | null;
+  checkedAt: number;
+}
+
+/** What's kept of a pull request on its workspace, to show while it can't be read. */
+export interface PrSummary {
+  number: number;
+  title: string;
+  url: string;
+  state: PrState;
+  isDraft: boolean;
+  baseRefName: string;
+  headRefOid: string;
+  checkedAt: number;
+}
+
+export type MergeOutcome = 'merged' | 'queued' | 'pending' | 'failed' | 'unknown';
+
+export interface MergeReply {
+  outcome: MergeOutcome;
+  message?: string;
+  checks: Checks;
 }
 
 export type ServerEvent =
