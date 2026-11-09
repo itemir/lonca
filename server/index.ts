@@ -11,7 +11,7 @@ import { launchUrl, parseRequestUrl, requireLocalRequest, requireToken, security
 import { HTTP_PORT, LONCA_HOME, WEB_DIST } from './config.ts';
 import { subscribe } from './events.ts';
 import { setClientFocus } from './notify.ts';
-import { flushState, flushTranscripts, saveState, state } from './store.ts';
+import { flushState, flushTranscripts, renewTokenOnNewPort, saveState, state } from './store.ts';
 import { checkDisk, checkSandboxes, ensureSandboxImage, moveCodexLogin, onSandboxesReady, refreshAgents, refreshCodexCatalog, system } from './system.ts';
 import { attachTerminal, closeWorkspaceTerminals, reconcileTerminals, runSetupScript } from './terminals.ts';
 import { reapLeftoverLogins } from './logins.ts';
@@ -152,6 +152,7 @@ moveCodexLogin();
 reapSbxLogin();
 reconcileProjects();
 markInterruptedWork();
+renewTokenOnNewPort(HTTP_PORT);
 
 server.listen(HTTP_PORT, '127.0.0.1', () => {
   const url = launchUrl();

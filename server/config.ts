@@ -14,8 +14,7 @@ export const WEB_DIST = path.join(REPO_ROOT, 'dist', 'web');
 /** What the template new workspaces start from is made of. */
 export const TEMPLATE_DIR = path.join(REPO_ROOT, 'template');
 
-export const DEFAULT_HTTP_PORT = 4700;
-export const HTTP_PORT = Number(process.env.PORT ?? DEFAULT_HTTP_PORT);
+export const HTTP_PORT = Number(process.env.PORT ?? 4700);
 export const DEV_MODE = process.env.LONCA_DEV === '1';
 /** Where Vite serves the web app in development, passing the API on to the server. */
 export const DEV_PORT = 5173;
@@ -34,6 +33,8 @@ export const paths = {
   state: path.join(LONCA_HOME, 'state.json'),
   secrets: path.join(LONCA_HOME, 'secrets.json'),
   token: path.join(LONCA_HOME, 'token'),
+  /** The port the token was last given out on. */
+  tokenPort: path.join(LONCA_HOME, 'token-port'),
   /** Instructions for every project's Leads. Never mounted into a workspace. */
   playbook: path.join(LONCA_HOME, 'lead.md'),
   /** A project's own. Beside its repository rather than in it, so agents can't reach it. */
