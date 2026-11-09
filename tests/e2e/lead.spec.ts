@@ -122,7 +122,7 @@ test('agents appear in tabs, and everything between them goes through the Lead',
   await shot(page, 'agent-tab');
 
   // They finish, the Lead is woken, and what it was told isn't shown as if the user wrote it.
-  await page.locator('.lead-tab').getByRole('button', { name: 'Lead', exact: true }).click();
+  await page.locator('.lead-tab .tab-label').click();
   await expect(page.locator('.wake-row')).toContainText('2 agents finished', { timeout: 90000 });
   await expect(page.locator('.user-text').filter({ hasText: 'Update from Lonca' })).toHaveCount(0);
   await expect(page.locator('.team-card')).toHaveCount(0);
@@ -138,7 +138,7 @@ test('agents appear in tabs, and everything between them goes through the Lead',
   await expect.poll(async () => (await lonca.session(lead.id)).unread).toBe(true);
   await expect(page.locator('.workspace-row.active .unread-dot')).toBeVisible();
   await expect(page).toHaveTitle('● Lonca');
-  await page.locator('.lead-tab').getByRole('button', { name: 'Lead', exact: true }).click();
+  await page.locator('.lead-tab .tab-label').click();
   await expect.poll(async () => (await lonca.session(lead.id)).unread).toBe(false);
   await expect(page.locator('.workspace-row.active .unread-dot')).toHaveCount(0);
 });
