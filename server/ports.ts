@@ -211,6 +211,8 @@ export function forwardPort(workspace: Workspace, port: number, wanted?: number)
     try {
       await publishPort(sandbox, forward.hostPort, port);
     } catch (error) {
+      // It may have been published anyway, as when sbx took too long to answer. Unpublishing what isn't does nothing.
+      await unpublishPort(sandbox, forward.hostPort, port).catch(() => {});
       setForwards(workspace, forwardsOf(workspace).filter((entry) => entry !== forward));
       throw new HttpError(502, `Docker Sandboxes couldn't forward localhost:${forward.hostPort} to port ${port}: ${errorMessage(error)}`);
     }

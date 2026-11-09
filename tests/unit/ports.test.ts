@@ -355,9 +355,11 @@ describe('forward_port’s replies', () => {
     expect(vm.execText).toHaveBeenCalledWith('vm-own', ['sh', '-c', expect.stringContaining('cat /proc/net/tcp /proc/net/tcp6')], expect.anything());
   });
 
-  it('takes the record back when sbx can’t publish it', async () => {
-    vm.publishPort.mockRejectedValueOnce(new Error('error: port is already allocated'));
-    await expect(ports.forwardPort(own, 3000, await freePort())).rejects.toThrow('Docker Sandboxes couldn\'t forward');
+  it('takes the record back when sbx can’t publish it, and makes sure it didn’t anyway', async () => {
+    const hostPort = await freePort();
+    vm.publishPort.mockRejectedValueOnce(new Error('sbx ports took too long'));
+    await expect(ports.forwardPort(own, 3000, hostPort)).rejects.toThrow('Docker Sandboxes couldn\'t forward');
+    expect(vm.unpublishPort).toHaveBeenCalledWith('vm-own', hostPort, 3000);
     expect(own.forwards).toBeUndefined();
   });
 
