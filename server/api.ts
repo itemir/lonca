@@ -31,7 +31,7 @@ import {
 import { sessionSnapshot } from './transcript.ts';
 import { HttpError, errorMessage, newId } from './util.ts';
 import {
-  archiveWorkspace, configuredSetupScript, createWorkspace, deleteWorkspace, publishWorkspace, rebuildWorkspace, restoreWorkspace,
+  agentWorkingIn, archiveWorkspace, configuredSetupScript, createWorkspace, deleteWorkspace, publishWorkspace, rebuildWorkspace, restoreWorkspace,
   applyCodexSetup, applyCodexSetupEverywhere, markStoppedBySignOut, retryWorkspace, runningSandbox, startWorkspace, stopWorkspace,
 } from './workspaces.ts';
 
@@ -247,9 +247,12 @@ export function createApi(me: AppState['me']): Router {
     res.status(204).end();
   });
 
-  api.post('/workspaces/:id/archive', async (req, res) => {
-    await archiveWorkspace(workspaceParam(req));
-    res.status(204).end();
+  api.post('/workspaces/:id/archive', express.json(), async (req, res) => {
+    const workspace = workspaceParam(req);
+    const { asked } = parse(z.object({ asked: z.boolean().default(true) }), req.body ?? {});
+    if (await archiveWorkspace(workspace, { asked })) res.status(204).end();
+    // The page may not have heard about the agent yet, and its dialog should still warn of it.
+    else res.json({ ask: true, agentWorking: agentWorkingIn(workspace) });
   });
 
   api.post('/workspaces/:id/recreate', async (req, res) => {

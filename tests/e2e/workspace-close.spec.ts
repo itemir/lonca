@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { AppState, Project, Workspace } from '../../shared/types.ts';
-import { Lonca, makeFixtureRepo, sandboxRunning, until } from '../support/harness.ts';
+import { Lonca, makeFixtureRepo, sandboxExec, sandboxRunning, until } from '../support/harness.ts';
 
 const lonca = new Lonca({ port: 48371, instance: 'workspace-close-ui', firstWorkspacePort: 56300 });
 let fixture: string;
@@ -201,6 +201,10 @@ test('asks anyway, with a warning, when there’s something to lose', async ({ p
   const stopped = await create('Stopped');
   const busy = await create('Agent at work');
   fs.writeFileSync(path.join(changed.path, 'new.txt'), 'uncommitted\n');
+  // An agent can hide new files from git status, and they still count. Every workspace shares this
+  // setting, and this one's VM is still there to undo it at the end.
+  const gitConfig = (args: string) => expect(sandboxExec(busy.sandboxName, `cd '${busy.path}' && git config ${args}`).code).toBe(0);
+  gitConfig('status.showUntrackedFiles no');
   await lonca.api('POST', `/workspaces/${stopped.id}/stop`);
   await lonca.api('PATCH', '/settings', { confirmArchive: false });
   try {
@@ -246,7 +250,23 @@ test('asks anyway, with a warning, when there’s something to lose', async ({ p
     expect((await lonca.workspace(stopped.id)).status).toBe('stopped');
     expect((await lonca.workspace(busy.id)).status).toBe('ready');
   } finally {
-    // The other tests here expect to be asked.
+    // The other tests here expect to be asked, and to see new files.
+    await lonca.api('PATCH', '/settings', { confirmArchive: true });
+    gitConfig('--unset status.showUntrackedFiles');
+  }
+});
+
+test('warns of an agent that only the server knows is working', async ({ page }) => {
+  const workspace = await create();
+  await lonca.api('PATCH', '/settings', { confirmArchive: false });
+  try {
+    // A page that has fallen behind still shows the agent as idle.
+    await page.route('**/api/workspaces/*/archive', (route) => route.fulfill({ json: { ask: true, agentWorking: true } }));
+    await page.goto(opened(workspace));
+    await page.getByRole('button', { name: 'Archive this workspace' }).click();
+    await expect(page.getByRole('dialog').locator('.close-warning')).toHaveText(['An agent is working here and will be stopped.']);
+    expect((await lonca.workspace(workspace.id)).status).toBe('ready');
+  } finally {
     await lonca.api('PATCH', '/settings', { confirmArchive: true });
   }
 });

@@ -486,7 +486,8 @@ export interface ChangeSet {
   files: ChangedFile[];
   added: number;
   removed: number;
-  uncommitted: number;
+  /** Null when git couldn't count them. */
+  uncommitted: number | null;
   ahead: number;
 }
 

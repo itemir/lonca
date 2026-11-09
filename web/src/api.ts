@@ -49,6 +49,8 @@ export const api = {
   deleteWorkspace: (id: string) => request<void>('DELETE', `/workspaces/${id}`),
   workspaceAction: (id: string, action: 'retry' | 'restore' | 'start' | 'archive' | 'recreate') =>
     request<void>('POST', `/workspaces/${id}/${action}`),
+  /** Archives without asking, unless the server finds something the user should be asked about first. */
+  archiveUnasked: (id: string) => request<{ ask: true; agentWorking: boolean } | undefined>('POST', `/workspaces/${id}/archive`, { asked: false }),
 
   listFiles: (id: string, path: string) => request<FileEntry[]>('GET', `/workspaces/${id}/files?${query({ path })}`),
   readFile: (id: string, path: string) => request<FileContent>('GET', `/workspaces/${id}/file?${query({ path })}`),

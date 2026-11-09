@@ -25,57 +25,35 @@ export function closeVerb(workspace: Workspace): string {
   return deletes(workspace) ? 'Delete' : 'Archive';
 }
 
-function archive(workspace: Workspace) {
-  void attempt(() => api.workspaceAction(workspace.id, 'archive'));
-}
-
 function agentWorkingIn(workspaceId: string): boolean {
   return useStore.getState().sessions.some((session) => session.workspaceId === workspaceId && session.status === 'running');
 }
 
 /**
- * Archiving goes ahead without asking only for someone who said not to be asked, and even then only
- * when nothing they'd want warning of is lost: an agent at work is stopped, and uncommitted changes
- * are lost. Those can only be counted while the workspace is running.
+ * What pressing the trash icon does, whether it's waiting to hear if it can archive without asking,
+ * and the dialog it opens. Someone who said not to be asked is asked anyway when an agent is working
+ * or there may be uncommitted changes. The page can be out of date, so the server has the last word.
  */
-function mayArchiveUnasked(workspace: Workspace): boolean {
-  return !deletes(workspace) && !useStore.getState().settings.confirmArchive && workspace.status === 'ready' && !agentWorkingIn(workspace.id);
-}
-
-// A busy sandbox can be slow to answer. After this long the dialog asks instead, and goes on counting.
-const COUNT_PATIENCE_MS = 3000;
-
-function countUncommitted(workspace: Workspace): Promise<number | undefined> {
-  return Promise.race([
-    api.changes(workspace.id).then((changes) => changes.uncommitted, () => undefined),
-    new Promise<undefined>((resolve) => setTimeout(resolve, COUNT_PATIENCE_MS)),
-  ]);
-}
-
-/** What pressing the trash icon does, whether it's counting changes first, and the dialog it opens. */
 export function useCloseWorkspace(workspace: Workspace): { press: () => void; checking: boolean; dialog: ReactNode } {
-  const [asking, setAsking] = useState<{ uncommitted?: number } | null>(null);
+  const [asking, setAsking] = useState<{ agentWorking?: boolean } | null>(null);
   const [checking, setChecking] = useState(false);
 
   const press = () => {
     if (checking) return;
-    if (!mayArchiveUnasked(workspace)) {
+    if (deletes(workspace) || useStore.getState().settings.confirmArchive || workspace.status !== 'ready' || agentWorkingIn(workspace.id)) {
       setAsking({});
       return;
     }
     setChecking(true);
-    void countUncommitted(workspace).then((uncommitted) => {
+    void attempt(() => api.archiveUnasked(workspace.id)).then((outcome) => {
       setChecking(false);
-      // Things can move on while it counts, and someone else may have closed it already.
-      const current = useStore.getState().workspaces.find((entry) => entry.id === workspace.id);
-      if (!current || !canClose(current)) return;
-      if (uncommitted === 0 && mayArchiveUnasked(current)) archive(current);
-      else setAsking({ uncommitted });
+      if (outcome?.ask) setAsking({ agentWorking: outcome.agentWorking });
     });
   };
 
-  const dialog = asking && <CloseWorkspaceDialog workspace={workspace} counted={asking.uncommitted} onClose={() => setAsking(null)} />;
-  return { press, checking, dialog };
+  const dialog = asking && <CloseWorkspaceDialog workspace={workspace} agentWorking={asking.agentWorking} onClose={() => setAsking(null)} />;
+  // Once it's archiving, its row and banner show that instead.
+  return { press, checking: checking && workspace.status === 'ready', dialog };
 }
 
 function uncommittedLine(count: number | null, running: boolean): string {
@@ -84,13 +62,14 @@ function uncommittedLine(count: number | null, running: boolean): string {
   return count === 1 ? '1 uncommitted change is lost.' : `${count} uncommitted changes are lost.`;
 }
 
-export function CloseWorkspaceDialog({ workspace, counted, onClose }: { workspace: Workspace; counted?: number; onClose: () => void }) {
+/** `agentWorking` is the server saying so, which a page that's behind may not know yet. */
+export function CloseWorkspaceDialog({ workspace, agentWorking: serverSaysWorking, onClose }: { workspace: Workspace; agentWorking?: boolean; onClose: () => void }) {
   const navigate = useNavigate();
   const onScreen = useMatch('/w/:id')?.params.id === workspace.id;
-  const agentWorking = useStore((store) => store.sessions.some((session) => session.workspaceId === workspace.id && session.status === 'running'));
+  const agentWorking = useStore((store) => store.sessions.some((session) => session.workspaceId === workspace.id && session.status === 'running')) || serverSaysWorking;
   // Once someone has said not to be asked, they're only asked when something is at stake, and the box has nothing left to do.
   const asksEveryTime = useStore((store) => store.settings.confirmArchive);
-  const [uncommitted, setUncommitted] = useState<number | null>(counted ?? null);
+  const [uncommitted, setUncommitted] = useState<number | null>(null);
   const [stopAsking, setStopAsking] = useState(false);
   const ready = workspace.status === 'ready';
 
@@ -101,10 +80,10 @@ export function CloseWorkspaceDialog({ workspace, counted, onClose }: { workspac
   }, [ready, workspace.id]);
 
   // Ticking the box and then cancelling leaves things as they were.
-  const confirmArchive = () => {
+  const archive = () => {
     onClose();
     if (stopAsking) void attempt(() => api.updateSettings({ confirmArchive: false }));
-    archive(workspace);
+    void attempt(() => api.workspaceAction(workspace.id, 'archive'));
   };
 
   const remove = () => {
@@ -145,7 +124,7 @@ export function CloseWorkspaceDialog({ workspace, counted, onClose }: { workspac
         <button type="button" className="button" autoFocus onClick={onClose}>Cancel</button>
         {deletes(workspace)
           ? <button type="button" className="button button-danger" onClick={remove}>Delete permanently</button>
-          : <button type="button" className="button button-primary" onClick={confirmArchive}>Archive</button>}
+          : <button type="button" className="button button-primary" onClick={archive}>Archive</button>}
       </div>
     </Modal>
   );
