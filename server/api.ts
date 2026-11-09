@@ -191,8 +191,8 @@ export function createApi(me: AppState['me']): Router {
     res.status(204).end();
   });
 
-  api.get('/projects/:id/branches', (req, res) => {
-    res.json(listBranches(projectParam(req)));
+  api.get('/projects/:id/branches', async (req, res) => {
+    res.json(await listBranches(projectParam(req)));
   });
 
   api.post('/projects/:id/workspaces', express.json(), async (req, res) => {

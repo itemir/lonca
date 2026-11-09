@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import type { Project, Workspace } from '../../shared/types.ts';
-import { Lonca, sandboxExec, git, makeFixtureRepo, sandboxRunning, until, asRoot, REAL_SANDBOX, sleep } from '../support/harness.ts';
+import { Lonca, sandboxExec, git, makeFixtureRepo, sandboxRunning, until, REAL_SANDBOX } from '../support/harness.ts';
 
 const lonca = new Lonca({ port: 48319, instance: `operation-recovery-sandbox`, firstWorkspacePort: 52600});
 let fixture: string;
@@ -70,61 +70,22 @@ it.skipIf(REAL_SANDBOX).each(['archive', 'delete', 'stop'] as const)('retries %s
   if (operation !== 'delete') await lonca.api('DELETE', `/workspaces/${workspace.id}`);
 });
 
-it.skipIf(REAL_SANDBOX).each(['archive', 'delete'] as const)('reports partial %s cleanup failures and retries the same cleanup', async (operation) => {
+it.skipIf(REAL_SANDBOX)('deletes an archived workspace while Docker Sandboxes can’t be reached', async () => {
   const workspace = await create();
-  // Fail after deleting checkout files, before pruning worktree metadata or deleting the branch.
-  asRoot(workspace.sandboxName, `cat > /usr/local/bin/git <<'GIT'
-#!/bin/bash
-if [ "$3 $4" = 'worktree prune' ] && [ ! -e /tmp/prune-failed ]; then
-  touch /tmp/prune-failed
-  echo 'Injected prune failure' >&2
-  exit 42
-fi
-exec /usr/bin/git "$@"
-GIT
-chmod +x /usr/local/bin/git`);
-  await expect(operation === 'delete'
-    ? lonca.api('DELETE', `/workspaces/${workspace.id}`)
-    : lonca.api('POST', `/workspaces/${workspace.id}/archive`)).rejects.toThrow(/Injected prune failure/);
-  expect(await lonca.workspace(workspace.id)).toMatchObject({ status: 'error', pendingOperation: operation });
-  expect(fs.readdirSync(workspace.path)).toEqual([]);
-  expect(sandboxRunning(workspace.sandboxName)).toBe(false);
+  await lonca.api('POST', `/workspaces/${workspace.id}/archive`);
+  expect(fs.readdirSync(workspace.path)).toEqual(['.git']);
   await lonca.kill();
+  lonca.setOffline(true);
   await lonca.start();
-  await retry(workspace, operation);
-  if (operation === 'archive') {
-    await lonca.api('POST', `/workspaces/${workspace.id}/restore`);
-    await lonca.waitForWorkspace(workspace.id);
-    expect(fs.existsSync(path.join(workspace.path, 'README.md'))).toBe(true);
+  try {
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
+    expect(await lonca.workspace(workspace.id)).toBeUndefined();
+    expect(fs.existsSync(workspace.path)).toBe(false);
+  } finally {
+    await lonca.kill();
+    lonca.setOffline(false);
+    await lonca.start();
   }
-});
-
-it.skipIf(REAL_SANDBOX).each(['archive', 'delete'] as const)('retains %s intent when the server crashes during cleanup', async (operation) => {
-  const workspace = await create();
-  asRoot(workspace.sandboxName, `cat > /usr/local/bin/git <<'GIT'
-#!/bin/bash
-if [ "$3 $4" = 'worktree prune' ]; then
-  touch /tmp/prune-waiting
-  for i in $(seq 1 300); do
-    [ -e /tmp/prune-release ] && break
-    sleep 0.1
-  done
-fi
-exec /usr/bin/git "$@"
-GIT
-chmod +x /usr/local/bin/git`);
-  const pending = (operation === 'delete'
-    ? lonca.api('DELETE', `/workspaces/${workspace.id}`)
-    : lonca.api('POST', `/workspaces/${workspace.id}/archive`)).catch(() => {});
-  await until('partial cleanup', () => sandboxExec(workspace.sandboxName, 'test -e /tmp/prune-waiting').code === 0);
-  await lonca.kill();
-  await pending;
-  expect(sandboxExec(workspace.sandboxName, 'touch /tmp/prune-release').code).toBe(0);
-  await lonca.start();
-  expect(await lonca.workspace(workspace.id)).toMatchObject({ status: 'error', pendingOperation: operation });
-  await retry(workspace, operation);
-  if (operation === 'archive') await lonca.api('DELETE', `/workspaces/${workspace.id}`);
 });
 
 it.each(['create', 'restore'] as const)('resumes partial file copying during %s without overwriting completed files', async (operation) => {

@@ -5,7 +5,7 @@ const spec: SandboxSpec = {
   name: 'lonca-app-amman',
   image: async () => 'lonca-sandbox:abc',
   env: [],
-  mounts: ['/home/me/.lonca/projects/app/workspaces/amman', '/home/me/.lonca/projects/app/repo.git'],
+  mounts: ['/home/me/.lonca/projects/app/workspaces/amman'],
   agentState: '/home/me/.lonca/agent-state/w1',
   secrets: [],
   setup: () => ({ command: ['true'] }),
@@ -87,7 +87,7 @@ describe('talking to the sbx CLI', () => {
     expect(templateListIncludes(listed, 'another-registry.test/team/custom')).toBe(false);
   });
 
-  it('creates a sandbox from the template, with the worktree first and nothing else of the host', () => {
+  it('creates a sandbox from the template, with the checkout first and nothing else of the host', () => {
     const args = createArgs(spec, 'lonca-sandbox:abc');
     expect(args.slice(0, 2)).toEqual(['run', '--detach']);
     expect(args[args.indexOf('--name') + 1]).toBe('lonca-app-amman');

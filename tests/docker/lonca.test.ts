@@ -107,7 +107,7 @@ describe('projects and workspaces', () => {
     await expect(lonca.api('POST', '/projects', { url: 'not a url' })).rejects.toThrow(/Enter a GitHub URL/);
   });
 
-  it('creates several workspaces, each a real worktree in its own container', async () => {
+  it('creates several workspaces, each its own checkout in its own container', async () => {
     [a, b] = await Promise.all([
       lonca.api('POST', `/projects/${project.id}/workspaces`, {}),
       lonca.api('POST', `/projects/${project.id}/workspaces`, {}),
@@ -120,13 +120,17 @@ describe('projects and workspaces', () => {
 
     expect(sandboxRunning(a.workspace.sandboxName)).toBe(true);
 
-    const list = sandboxExec(a.workspace.sandboxName, `git -C ${a.workspace.path} worktree list`).output;
-    expect(list).toContain(a.workspace.path);
-    expect(list).toContain(b.workspace.path);
-    expect(list).toContain(`[${a.workspace.branch}]`);
     expect(sandboxExec(a.workspace.sandboxName, 'git status --short --branch').output).toContain(a.workspace.branch);
-    expect(fs.readFileSync(path.join(a.workspace.path, '.git'), 'utf8')).toMatch(/^gitdir: .*repo\.git\/worktrees\//);
+    expect(fs.lstatSync(path.join(a.workspace.path, '.git')).isDirectory()).toBe(true);
     expect(fs.readFileSync(path.join(a.workspace.path, 'README.md'), 'utf8')).toContain('Fixture');
+    // Nothing of git is shared: not settings, not stashes, and not Lonca's own copy of the repository.
+    expect(sandboxExec(a.workspace.sandboxName, 'git config lonca.test from-a && echo changed > README.md && git -c user.name=Test -c user.email=t@example.com stash --quiet && git stash list').output).toContain('stash@{0}');
+    expect(sandboxExec(b.workspace.sandboxName, 'git config lonca.test').code).not.toBe(0);
+    expect(sandboxExec(b.workspace.sandboxName, 'git stash list').output).toBe('');
+    expect(sandboxExec(a.workspace.sandboxName, `test -e ${b.workspace.path}`).code).not.toBe(0);
+    expect(sandboxExec(a.workspace.sandboxName, `test -e ${path.join(lonca.home, 'projects', project.slug, 'cache.git')}`).code).not.toBe(0);
+    sandboxExec(a.workspace.sandboxName, 'git config --unset lonca.test && git stash pop --quiet');
+    expect(sandboxExec(a.workspace.sandboxName, 'git checkout --quiet README.md && git status --porcelain').output).toBe('');
   });
 
   it('copies ignored files from the local checkout and ignores .context', async () => {
@@ -263,8 +267,6 @@ describe('isolation', () => {
 });
 
 describe('hostile files in a workspace', () => {
-  const repoPath = () => path.join(lonca.home, 'projects', project.slug, 'repo.git');
-
   it('doesn’t treat a directory’s name as an instruction', async () => {
     const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(created.workspace.id);
@@ -300,30 +302,13 @@ describe('hostile files in a workspace', () => {
     fs.rmSync(repo, { recursive: true, force: true });
   });
 
-  it('lists branches even if an agent swaps packed-refs for a FIFO', async () => {
-    const created = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
-    const workspace = await lonca.waitForWorkspace(created.workspace.id);
-    const fifo = path.join(repoPath(), 'packed-refs');
-    const hadPacked = fs.existsSync(fifo);
-    const saved = hadPacked ? fs.readFileSync(fifo) : null;
-    sandboxExec(workspace.sandboxName, `rm -f ${fifo} && mkfifo ${fifo}`);
-    const branches = await Promise.race([
-      lonca.api<string[]>('GET', `/projects/${project.id}/branches`),
-      sleep(5000).then(() => 'hung'),
-    ]);
-    expect(branches).not.toBe('hung');
-    fs.rmSync(fifo, { force: true });
-    if (saved) fs.writeFileSync(fifo, saved);
-    await lonca.api('DELETE', `/workspaces/${workspace.id}`);
-  });
-
   it('removes a project an agent made read-only, and never runs its hooks on the host', async () => {
     const repo = makeFixtureRepo();
     const marker = path.join(lonca.home, 'hook-ran-on-host');
     const created = await lonca.waitForProject((await lonca.api<Project>('POST', '/projects', { path: repo })).id);
     const made = await lonca.api('POST', `/projects/${created.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(made.workspace.id);
-    const hooks = path.join(lonca.home, 'projects', created.slug, 'repo.git', 'hooks');
+    const hooks = path.join(workspace.path, '.git', 'hooks');
     sandboxExec(workspace.sandboxName, `mkdir -p ${hooks} && printf '#!/bin/sh\\ntouch ${marker}\\n' > ${hooks}/reference-transaction && chmod +x ${hooks}/reference-transaction && chmod 555 ${hooks} && mkdir ${workspace.path}/locked && touch ${workspace.path}/locked/file && chmod 555 ${workspace.path}/locked`);
     await lonca.api('DELETE', `/projects/${created.id}`);
     expect(fs.existsSync(path.join(lonca.home, 'projects', created.slug))).toBe(false);
@@ -337,7 +322,7 @@ describe('hostile files in a workspace', () => {
     const repo = makeFixtureRepo();
     const name = path.basename(repo).toLowerCase().replace(/[^a-z0-9]+/g, '-');
     const leftover = path.join(lonca.home, 'projects', name);
-    fs.mkdirSync(path.join(leftover, 'repo.git', 'hooks'), { recursive: true });
+    fs.mkdirSync(path.join(leftover, 'workspaces', 'kyiv', '.git', 'hooks'), { recursive: true });
     const created = await lonca.waitForProject((await lonca.api<Project>('POST', '/projects', { path: repo })).id);
     expect(created.slug).toBe(`${name}-2`);
     await lonca.api('DELETE', `/projects/${created.id}`);
@@ -351,8 +336,9 @@ describe('hostile files in a workspace', () => {
     sandboxExec(workspace.sandboxName, `cd ${workspace.path} && mkdir -p cache/mod && touch cache/mod/file && chmod -R 555 cache`);
     await lonca.api('POST', `/workspaces/${workspace.id}/archive`);
     expect((await lonca.workspace(workspace.id)).status).toBe('archived');
-    expect(fs.existsSync(workspace.path)).toBe(false);
+    expect(fs.readdirSync(workspace.path)).toEqual(['.git']);
     await lonca.api('DELETE', `/workspaces/${workspace.id}`);
+    expect(fs.existsSync(workspace.path)).toBe(false);
   });
 
   it('survives a terminal paste larger than a WebSocket frame', async () => {
@@ -1444,30 +1430,28 @@ describe('workspace lifecycle', () => {
   });
 
   it('archives without losing the branch, then restores', async () => {
-    const { id, path: worktree, sandboxName, branch } = a.workspace;
-    const repo = path.join(lonca.home, 'projects', project.slug, 'repo.git');
-    const commits = sandboxExec(sandboxName, 'git rev-parse HEAD').output;
+    const { id, path: checkout, sandboxName, branch } = a.workspace;
+    sandboxExec(sandboxName, "git -c user.name=Test -c user.email=t@example.com commit --quiet --allow-empty -m 'Work to keep'");
+    const head = sandboxExec(sandboxName, 'git rev-parse HEAD').output;
     await lonca.api('POST', `/workspaces/${id}/archive`);
     expect((await lonca.workspace(id)).status).toBe('archived');
-    expect(fs.existsSync(worktree)).toBe(false);
     expect(sandboxRunning(sandboxName)).toBeNull();
-    expect(fs.existsSync(path.join(repo, 'worktrees', a.workspace.name))).toBe(false);
-    expect(fs.existsSync(path.join(repo, 'refs', 'heads', ...branch.split('/')))).toBe(true);
+    expect(fs.readdirSync(checkout)).toEqual(['.git']);
+    expect(fs.readFileSync(path.join(checkout, '.git', 'refs', 'heads', ...branch.split('/')), 'utf8').trim()).toBe(head);
 
     await lonca.api('POST', `/workspaces/${id}/restore`);
     await lonca.waitForWorkspace(id);
-    expect(sandboxExec(sandboxName, 'git rev-parse HEAD').output).toBe(commits);
-    expect(sandboxExec(sandboxName, 'git status --short --branch').output).toContain(branch);
+    expect(sandboxExec(sandboxName, 'git rev-parse HEAD').output).toBe(head);
+    expect(sandboxExec(sandboxName, 'git status --short --branch').output).toBe(`## ${branch}`);
+    expect(fs.readFileSync(path.join(checkout, 'README.md'), 'utf8')).toContain('Fixture');
   });
 
   it('deletes a workspace and everything it owned', async () => {
-    const { id, path: worktree, sandboxName, branch } = b.workspace;
-    const repo = path.join(lonca.home, 'projects', project.slug, 'repo.git');
+    const { id, path: checkout, sandboxName } = b.workspace;
     await lonca.api('DELETE', `/workspaces/${id}`);
-    expect(fs.existsSync(worktree)).toBe(false);
+    expect(fs.existsSync(checkout)).toBe(false);
     expect(sandboxRunning(sandboxName)).toBeNull();
     expect(fs.existsSync(path.join(lonca.home, 'agent-state', id))).toBe(false);
-    expect(fs.existsSync(path.join(repo, 'refs', 'heads', ...branch.split('/')))).toBe(false);
     expect((await lonca.workspace(id))).toBeUndefined();
   });
 });
@@ -1573,7 +1557,7 @@ describe('git in workspaces', () => {
     await lonca.waitForProject(created.id);
     const made = await lonca.api('POST', `/projects/${created.id}/workspaces`, {});
     const workspace = await lonca.waitForWorkspace(made.workspace.id);
-    expect(workspace.steps.find((step) => step.id === 'worktree')).toMatchObject({ status: 'warning', detail: expect.stringContaining('Could not fetch') });
+    expect(workspace.steps.find((step) => step.id === 'checkout')).toMatchObject({ status: 'warning', detail: expect.stringContaining('Could not fetch') });
     expect(fs.existsSync(path.join(workspace.path, 'README.md'))).toBe(true);
     await lonca.api('DELETE', `/projects/${created.id}`);
     fs.rmSync(repo, { recursive: true, force: true });
@@ -1597,7 +1581,7 @@ describe('remote repositories', () => {
     expect(remote.githubOwner).toBe('octocat');
     const made = await lonca.api('POST', `/projects/${remote.id}/workspaces`, {});
     const ws = await lonca.waitForWorkspace(made.workspace.id);
-    expect(ws.steps.find((step) => step.id === 'worktree')?.status).toBe('done');
+    expect(ws.steps.find((step) => step.id === 'checkout')?.status).toBe('done');
     expect(fs.existsSync(path.join(ws.path, 'README'))).toBe(true);
     await lonca.api('DELETE', `/projects/${remote.id}`);
     expect(fs.existsSync(path.join(lonca.home, 'projects', remote.slug))).toBe(false);

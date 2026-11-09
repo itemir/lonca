@@ -38,8 +38,21 @@ describe('GitHub import credentials', () => {
       expect(result.stdout).toContain('password=host-token\n');
       expect(result.stdout).not.toContain(token);
     }
-    expect(githubGitAuth('git@github.com:owner/repo.git', token)).toEqual({ args: [], env: {} });
     expect(githubGitAuth(remote, undefined)).toEqual({ args: [], env: {} });
+  });
+
+  it('sends GitHub’s SSH addresses over HTTPS, so that the saved token is what’s used', () => {
+    for (const ssh of ['git@github.com:owner/private.git', 'ssh://git@github.com/owner/private.git']) {
+      const auth = githubGitAuth(ssh, token);
+      expect(auth.env).toEqual({ LONCA_GITHUB_TOKEN: token });
+      const rewritten = spawnSync('git', [...auth.args, 'ls-remote', '--get-url', ssh], {
+        encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
+      });
+      expect(rewritten.stdout.trim(), rewritten.stderr).toBe('https://github.com/owner/private.git');
+    }
+    // Without a token, or for another host, this computer's own SSH is used.
+    expect(githubGitAuth('git@github.com:owner/repo.git', undefined)).toEqual({ args: [], env: {} });
+    expect(githubGitAuth('git@gitlab.com:owner/repo.git', token)).toEqual({ args: [], env: {} });
   });
 
   it('does not send the token to a credential store', () => {

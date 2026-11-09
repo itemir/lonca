@@ -7,14 +7,13 @@ import { codexSetup, proxySecrets } from './boundary.ts';
 import { FIRST_WORKSPACE_PORT, PORTS_PER_WORKSPACE, PREFIX, paths } from './config.ts';
 import { publish } from './events.ts';
 import { pickWorkspaceName } from './names.ts';
-import { projectLifecycle, refreshFromLocalRepo } from './projects.ts';
+import { makeCheckout, projectLifecycle } from './projects.ts';
 import { type ProxySecret, addSandboxSecret, ensureSandbox, exec, execText, isSandboxRunning, removeSandbox, sandboxState, stopSandbox } from './sandbox.ts';
 import { deleteTranscript, flushState, getProject, getSecrets, getWorkspace, saveState, state } from './store.ts';
 import { checkSandboxes, ensureCustomTemplate, ensureSandboxImage, releaseTemplateImage, system, templateImageOf } from './system.ts';
 import { HttpError, KeyedQueue, RuntimeStoppedError, errorMessage, newId, removeTree } from './util.ts';
 
 const lifecycle = new KeyedQueue();
-const repoLock = new KeyedQueue();
 const codexSetups = new KeyedQueue();
 // Names belong to a project, but port blocks are shared by every workspace.
 const allocation = new KeyedQueue();
@@ -90,25 +89,22 @@ function workspaceEnv(workspace: Workspace, project: Project): string[] {
   ];
 }
 
-/**
- * Prepares a workspace's sandbox, starting or creating it unless `start` is false. `bare` leaves
- * out what could stop it starting, which a workspace that's being removed doesn't need.
- */
-function ensureWorkspaceSandbox(workspace: Workspace, project: Project, options: { bare?: boolean; start?: boolean } = {}): Promise<string> {
-  const bare = options.bare ? { firstPort: undefined, memoryGb: 0, cpus: 0 } : {};
+/** Prepares a workspace's sandbox, starting or creating it unless `start` is false. */
+function ensureWorkspaceSandbox(workspace: Workspace, project: Project, options: { start?: boolean } = {}): Promise<string> {
   const settings = project.settings;
   // Boot writes Codex's login too, so an update must wait until that write has finished.
   return codexSetups.run(workspace.id, () => ensureSandbox({
     name: workspace.sandboxName,
     image: async () => {
-      const image = await (!options.bare && settings.image ? ensureCustomTemplate(settings.image) : ensureSandboxImage());
+      const image = await (settings.image ? ensureCustomTemplate(settings.image) : ensureSandboxImage());
       // Not being able to tell only means that image might go while the VM still wants it.
       workspace.templateImage = await templateImageOf(image).catch(() => undefined);
       saveState();
       return image;
     },
     env: workspaceEnv(workspace, project),
-    mounts: [workspace.path, paths.repo(project.slug)],
+    // Its checkout and nothing else of this computer, so workspaces can't reach each other's git.
+    mounts: [workspace.path],
     agentState: paths.agentState(workspace.id),
     secrets: proxySecrets(),
     setup: () => codexSetup(project),
@@ -116,7 +112,6 @@ function ensureWorkspaceSandbox(workspace: Workspace, project: Project, options:
     network: settings.network,
     memoryGb: settings.memoryGb,
     cpus: settings.cpus,
-    ...bare,
   }, { start: options.start }));
 }
 
@@ -186,39 +181,17 @@ export async function runningSandbox(workspace: Workspace): Promise<string> {
   }
 }
 
-// All git work on a repository that a workspace has mounted runs inside that workspace. Its
-// config and hooks are writable by agents, so running git on the host would let an agent
-// execute code outside its isolation.
-const WORKTREE_SCRIPT = String.raw`
+// A checkout is copied from Lonca's copy of the repository on this computer, but its files are
+// written in the VM, since checking files out can run filters and make links that point anywhere.
+const CHECKOUT_SCRIPT = String.raw`
 set -euo pipefail
-repo="$1"; wt="$2"; branch="$3"; base="$4"; fetch="$5"
-mkdir -p "$repo/info"
-grep -qxF '.context/' "$repo/info/exclude" 2>/dev/null || echo '.context/' >> "$repo/info/exclude"
-if [ -e "$wt/.git" ]; then exit 0; fi
-if [ "$fetch" = 1 ] && ! err=$(timeout 300 git -C "$repo" fetch origin --prune --quiet 2>&1); then
-  echo "fetch-failed: $err"
-fi
-if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
-  git -C "$repo" worktree add --quiet --lock --reason 'managed by lonca' "$wt" "$branch"
-else
-  git -C "$repo" worktree add --quiet --lock --reason 'managed by lonca' --no-track -b "$branch" "$wt" "origin/$base"
-fi
-mkdir -p "$wt/.context"
+cd "$1"
+# Without an index, the files were never all written: a new checkout, a restored one, or one cut short.
+[ -e .git/index ] || { rm -f .git/index.lock; git reset --quiet --hard; }
+mkdir -p .context
 `;
 
-const LONG_GIT_TIMEOUT_MS = 15 * 60 * 1000;
-
-const TEARDOWN_SCRIPT = String.raw`
-set -euo pipefail
-repo="$1"; wt="$2"; branch="$3"; delete_branch="$4"
-git -C "$repo" worktree unlock "$wt" 2>/dev/null || true
-chmod -R u+rwX "$wt" 2>/dev/null || true
-find "$wt" -mindepth 1 -delete
-git -C "$repo" worktree prune
-if [ "$delete_branch" = 1 ] && git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
-  git -c core.hooksPath=/dev/null -C "$repo" branch -D "$branch"
-fi
-`;
+const CHECKOUT_TIMEOUT_MS = 15 * 60 * 1000;
 
 // A retry may resume after only some files were copied. Publish complete files atomically,
 // and never replace a destination that already belongs to the workspace.
@@ -286,37 +259,30 @@ async function provision(workspace: Workspace): Promise<void> {
     if (!project.settings.image) await ensureSandboxImage();
     setStep(workspace, 'image', 'done');
 
+    // Before the VM, which mounts the checkout: once one has, git here leaves it alone. An archived
+    // workspace still has its checkout's history, with the branch in it.
+    currentStep = 'checkout';
+    setStep(workspace, 'checkout', 'running');
+    const fetchError = fs.existsSync(workspace.path)
+      ? undefined
+      : await makeCheckout(project, workspace.path, workspace.branch, workspace.baseBranch);
+    if (fetchError) {
+      console.error(`could not fetch for ${workspace.name}:`, fetchError);
+      const hint = project.remoteUrl && !getSecrets().githubToken ? ' If this repository is private, connect GitHub in Settings.' : '';
+      setStep(workspace, 'checkout', 'warning', `Could not fetch from ${project.remoteUrl ? 'origin' : project.localPath}, so this branch starts from the last fetched commit.${hint}`);
+    } else {
+      setStep(workspace, 'checkout', 'done');
+    }
+
     currentStep = 'sandbox';
     setStep(workspace, 'sandbox', 'running');
-    fs.mkdirSync(workspace.path, { recursive: true });
     const sandbox = await ensureWorkspaceSandbox(workspace, project);
     setStep(workspace, 'sandbox', 'done');
-
-    currentStep = 'worktree';
-    setStep(workspace, 'worktree', 'running');
-    const hasRemote = project.remoteUrl !== null;
-    const output = await repoLock.run(project.id, async () => {
-      if (!hasRemote) {
-        // An archived workspace's branch already lives in our repository. Restoring it
-        // must not depend on the original checkout still being at its imported path.
-        const savedBranch = await exec(sandbox, ['git', '-C', paths.repo(project.slug), 'show-ref', '--verify', '--quiet', `refs/heads/${workspace.branch}`]);
-        if (savedBranch.code !== 0) await refreshFromLocalRepo(project, sandbox);
-      }
-      return execText(sandbox, [
-        'bash', '-c', WORKTREE_SCRIPT, 'lonca-worktree',
-        paths.repo(project.slug), workspace.path, workspace.branch, workspace.baseBranch, hasRemote ? '1' : '0',
-      ], { env: ['GIT_HTTP_LOW_SPEED_LIMIT=1000', 'GIT_HTTP_LOW_SPEED_TIME=60'], timeoutMs: LONG_GIT_TIMEOUT_MS });
-    });
-    if (output.includes('fetch-failed:')) {
-      const hint = getSecrets().githubToken ? '' : ' If this repository is private, connect GitHub in Settings.';
-      setStep(workspace, 'worktree', 'warning', `Could not fetch from origin, so this branch starts from the last fetched commit.${hint}`);
-    } else {
-      setStep(workspace, 'worktree', 'done');
-    }
 
     if (workspace.steps.find((step) => step.id === 'files')?.status !== 'done') {
       currentStep = 'files';
       setStep(workspace, 'files', 'running');
+      await execText(sandbox, ['bash', '-c', CHECKOUT_SCRIPT, 'lonca-checkout', workspace.path], { timeoutMs: CHECKOUT_TIMEOUT_MS });
       await copyFiles(workspace, project, sandbox);
       setStep(workspace, 'files', 'done');
     }
@@ -339,7 +305,7 @@ async function provision(workspace: Workspace): Promise<void> {
 }
 
 function newSteps(): WorkspaceStep[] {
-  const ids: StepId[] = ['image', 'sandbox', 'worktree', 'files', 'setup'];
+  const ids: StepId[] = ['image', 'checkout', 'sandbox', 'files', 'setup'];
   return ids.map((id) => ({ id, status: 'pending' }));
 }
 
@@ -397,7 +363,7 @@ export async function createWorkspace(project: Project, options: NewWorkspaceOpt
         title: null,
         branch: prefix ? `${prefix}/${name}` : name,
         baseBranch: options.baseBranch ?? project.settings.defaultBranch,
-        path: paths.worktree(project.slug, name),
+        path: paths.checkout(project.slug, name),
         sandboxName: sandboxNameFor(PREFIX, project.slug, name, id),
         port,
         status: 'creating',
@@ -453,6 +419,8 @@ function finishOperation(workspace: Workspace, status: 'ready' | 'stopped' | 'ar
 async function performOperation(workspace: Workspace, operation: WorkspaceOperation): Promise<void> {
   if (!getWorkspace(workspace.id)) throw new HttpError(404, 'This workspace no longer exists');
   const previousImage = workspace.templateImage;
+  // Archiving removed its VM, and with it everything that ran there.
+  const hasSandbox = workspace.status !== 'archived';
   try {
     beginOperation(workspace, operation);
     switch (operation) {
@@ -469,14 +437,13 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
       case 'archive':
       case 'delete':
         // Operations that keep conversations need the stopped sandbox's unread
-        // output. Explicit deletion only needs its processes confirmed dead and
-        // must still reach teardown's fallback if the old sandbox cannot start.
+        // output. Explicit deletion only needs its processes confirmed dead.
         if (operation !== 'delete'
           && state.sessions.some((session) => session.workspaceId === workspace.id && session.activeRunId)
           && await sandboxState(workspace.sandboxName) === 'stopped') {
           await ensureWorkspaceSandbox(workspace, projectOf(workspace));
         }
-        for (const listener of teardownListeners) await listener(workspace);
+        if (hasSandbox) for (const listener of teardownListeners) await listener(workspace);
         if (operation === 'stop') {
           await stopSandbox(workspace.sandboxName);
           finishOperation(workspace, 'stopped');
@@ -485,11 +452,15 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
           await ensureWorkspaceSandbox(workspace, projectOf(workspace));
           finishOperation(workspace, 'ready');
         } else {
-          await teardown(workspace, projectOf(workspace), operation === 'delete');
+          // Once the VM has gone, nothing an agent left running can still be writing to the checkout.
+          if (hasSandbox) await removeSandbox(workspace.sandboxName);
+          workspace.templateImage = undefined;
           if (operation === 'archive') {
+            await removeCheckoutFiles(workspace.path);
             workspace.diff = null;
             finishOperation(workspace, 'archived');
           } else {
+            await removeTree(workspace.path);
             await removeTree(paths.agentState(workspace.id));
             const sessions = state.sessions.filter((session) => session.workspaceId === workspace.id);
             await Promise.all(sessions.map((session) => deleteTranscript(session.id)));
@@ -572,39 +543,31 @@ export function rebuildWorkspace(workspace: Workspace): Promise<void> {
   });
 }
 
-async function teardown(workspace: Workspace, project: Project, deleteBranch: boolean): Promise<void> {
-  fs.mkdirSync(workspace.path, { recursive: true });
-  // Begin from a fresh sandbox. Something an agent left running, such as a server it started
-  // with nohup, would otherwise keep writing to the checkout while it's being removed.
-  await stopSandbox(workspace.sandboxName);
-  try {
-    let sandbox: string;
-    try {
-      sandbox = await ensureWorkspaceSandbox(workspace, project);
-    } catch {
-      // A bad custom template or a taken port must not make a workspace impossible to remove.
-      await removeSandbox(workspace.sandboxName);
-      sandbox = await ensureWorkspaceSandbox(workspace, project, { bare: true });
-    }
-    await repoLock.run(project.id, () =>
-      execText(sandbox, [
-        'bash', '-c', TEARDOWN_SCRIPT, 'lonca-teardown',
-        paths.repo(project.slug), workspace.path, workspace.branch, deleteBranch ? '1' : '0',
-      ], { timeoutMs: LONG_GIT_TIMEOUT_MS }),
-    );
-    await removeSandbox(workspace.sandboxName);
-    workspace.templateImage = undefined;
-  } catch (error) {
-    // The sandbox was only started for this, and shouldn't stay up waiting for a retry.
-    await stopSandbox(workspace.sandboxName).catch(() => {});
-    throw error;
+/**
+ * Removes all of a checkout but its history, which keeps the branch for the workspace to be restored
+ * from. Without an index, restoring writes the files again. One entry at a time, so that nothing is
+ * still being removed once a failure has ended the operation.
+ */
+async function removeCheckoutFiles(dir: string): Promise<void> {
+  const isDirectory = async (entry: string) => (await fs.promises.lstat(entry).catch(() => null))?.isDirectory();
+  if (!await isDirectory(dir)) return;
+  // An agent can have taken away the permissions this needs. Its VM has gone, so nothing can
+  // swap these for links by now.
+  await fs.promises.chmod(dir, 0o700);
+  for (const name of await fs.promises.readdir(dir)) {
+    if (name !== '.git') await removeTree(path.join(dir, name));
   }
-  await removeTree(workspace.path);
+  const history = path.join(dir, '.git');
+  if (await isDirectory(history)) {
+    await fs.promises.chmod(history, 0o700);
+    await removeTree(path.join(history, 'index'));
+  }
 }
 
 /**
- * Removes the sandbox and checkout but keeps the branch and chat history. When the user wasn't
- * asked first, it can refuse, and returns false to say they need asking after all.
+ * Removes the sandbox and the checkout's files, but keeps its history, with the branch, and chat
+ * history. When the user wasn't asked first, it can refuse, and returns false to say they need
+ * asking after all.
  */
 export function archiveWorkspace(workspace: Workspace, { asked = true } = {}): Promise<boolean> {
   return lifecycle.run(workspace.id, async () => {

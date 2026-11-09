@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Run parallel coding agents from your browser, each in its own git worktree and virtual machine.",
+  "description": "Run parallel coding agents from your browser, each in its own git checkout and virtual machine.",
   "license": "MIT",
   "engines": {
     "node": ">=22.18"

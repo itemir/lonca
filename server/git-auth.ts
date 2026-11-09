@@ -12,18 +12,32 @@ const GITHUB_HELPER = `!f() {
   esac
 }; f`;
 
-/** Credentials for an initial HTTPS GitHub import, scoped again by Git's credential URL. */
-export function githubGitAuth(remoteUrl: string | null | undefined, token: string | undefined): { args: string[]; env: NodeJS.ProcessEnv } {
-  if (token && remoteUrl) {
-    try {
-      const url = new URL(remoteUrl);
-      if (url.protocol === 'https:' && url.hostname === 'github.com' && !url.port) {
-        return {
-          args: ['-c', 'credential.https://github.com.helper=', '-c', `credential.https://github.com.helper=${GITHUB_HELPER}`],
-          env: { LONCA_GITHUB_TOKEN: token },
-        };
-      }
-    } catch { /* SSH shorthand and local paths use the host's own authentication. */ }
+// GitHub's SSH addresses, which workspaces rewrite in the same way (template/gitconfig).
+const GITHUB_SSH = ['git@github.com:', 'ssh://git@github.com/'];
+
+function isGithubHttps(remoteUrl: string): boolean {
+  try {
+    const url = new URL(remoteUrl);
+    return url.protocol === 'https:' && url.hostname === 'github.com' && !url.port;
+  } catch {
+    return false;
   }
-  return { args: [], env: {} };
+}
+
+/**
+ * Credentials for fetching from GitHub over HTTPS, scoped again by Git's credential URL. An SSH
+ * address goes over HTTPS too, as it does in workspaces, so that the token is what's used rather
+ * than this computer's own SSH. Without a token, or for anything else, that's left to the host.
+ */
+export function githubGitAuth(remoteUrl: string | null | undefined, token: string | undefined): { args: string[]; env: NodeJS.ProcessEnv } {
+  if (!token || !remoteUrl) return { args: [], env: {} };
+  const ssh = GITHUB_SSH.some((prefix) => remoteUrl.startsWith(prefix));
+  if (!ssh && !isGithubHttps(remoteUrl)) return { args: [], env: {} };
+  return {
+    args: [
+      '-c', 'credential.https://github.com.helper=', '-c', `credential.https://github.com.helper=${GITHUB_HELPER}`,
+      ...(ssh ? GITHUB_SSH.flatMap((prefix) => ['-c', `url.https://github.com/.insteadOf=${prefix}`]) : []),
+    ],
+    env: { LONCA_GITHUB_TOKEN: token },
+  };
 }

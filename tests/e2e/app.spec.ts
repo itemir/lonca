@@ -816,7 +816,7 @@ test.describe('with agents connected', () => {
     await page.getByRole('button', { name: 'Archive this workspace' }).click();
     await dialog.getByRole('button', { name: 'Archive', exact: true }).click();
     await expect(page.locator('.workspace-banner')).toContainText('archived', { timeout: 30000 });
-    expect(fs.existsSync(workspace.path)).toBe(false);
+    expect(fs.readdirSync(workspace.path)).toEqual(['.git']);
     await expect(composer()).toBeDisabled();
     await expect(page.getByRole('button', { name: '1 archived' })).toBeVisible();
     await expect(page.locator('.user-message').first()).toContainText('THINK first');

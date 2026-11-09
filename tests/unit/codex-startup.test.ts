@@ -56,9 +56,9 @@ const hold = async (name) => {
     fs.writeFileSync(root + '/auth.json', Buffer.concat(chunks));
     fs.writeFileSync(root + '/endpoint', args.at(-1));
   }
-  if (args.includes('lonca-worktree')) {
-    fs.writeFileSync(root + '/worktree-entered', '');
-    await hold('worktree');
+  if (args.includes('lonca-checkout')) {
+    fs.writeFileSync(root + '/checkout-entered', '');
+    await hold('checkout');
   }
 })();
 `, { mode: 0o700 });
@@ -79,7 +79,7 @@ const hold = async (name) => {
 
 afterEach(async () => {
   release('setup');
-  release('worktree');
+  release('checkout');
   await Promise.allSettled(pending);
   const store = await import('../../server/store.ts');
   store.flushState();
@@ -101,16 +101,18 @@ it('keeps the latest key when an update overlaps the first boot after a server r
 });
 
 it.each(['create', 'restore'] as const)('keeps a key change made while %s prepares the checkout', async (operation) => {
-  fs.writeFileSync(file('hold-worktree'), '');
+  // A retried creation's checkout is already made, as an archived workspace's is.
+  fs.mkdirSync(workspace.path);
+  fs.writeFileSync(file('hold-checkout'), '');
   const provisioned = track(new Promise<void>((resolve) => lifecycle.setSetupScriptStarter(async () => resolve())));
   workspace.status = 'error';
   workspace.pendingOperation = operation;
   lifecycle.retryWorkspace(workspace);
-  await vi.waitFor(() => expect(fs.existsSync(file('worktree-entered'))).toBe(true));
+  await vi.waitFor(() => expect(fs.existsSync(file('checkout-entered'))).toBe(true));
   expect(key()).toBe('sk-first');
   project.settings.env = {};
   const update = track(lifecycle.applyCodexSetup(project));
-  release('worktree');
+  release('checkout');
   await Promise.all([provisioned, update]);
   expect(workspace.status).toBe('ready');
   expect(key()).toBe(PLACEHOLDER);
@@ -161,7 +163,8 @@ it.each(['boot', 'create'] as const)('keeps a global API-key endpoint change mad
   project.settings.env = {};
   const { setBoundaryValue } = await import('../../server/store.ts');
   setBoundaryValue('codex', undefined);
-  const hold = operation === 'boot' ? 'setup' : 'worktree';
+  const hold = operation === 'boot' ? 'setup' : 'checkout';
+  if (operation === 'create') fs.mkdirSync(workspace.path);
   fs.writeFileSync(file(`hold-${hold}`), '');
   const boot = operation === 'boot'
     ? track(lifecycle.runningSandbox(workspace))

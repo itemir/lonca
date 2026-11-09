@@ -80,7 +80,7 @@ test('archives another workspace from its sidebar row, then deletes it, without 
   await expect(page.getByRole('button', { name: '1 archived' })).toBeVisible({ timeout: 60000 });
   await expect(page).toHaveURL(workspaceUrl(here));
   expect(sandboxRunning(other.sandboxName)).toBeNull();
-  expect(fs.existsSync(other.path)).toBe(false);
+  expect(fs.readdirSync(other.path)).toEqual(['.git']);
 
   // Deleting for good happens from the archived list.
   await page.getByRole('button', { name: '1 archived' }).click();
@@ -158,7 +158,7 @@ test('archives without asking once told not to ask, until Settings asks again', 
     await trash('From the sidebar', second);
     await lonca.waitForWorkspace(second.id, 'archived');
     expect(sandboxRunning(second.sandboxName)).toBeNull();
-    expect(fs.existsSync(second.path)).toBe(false);
+    expect(fs.readdirSync(second.path)).toEqual(['.git']);
     await expect(page).toHaveURL(workspaceUrl(here));
 
     await row('From the header').getByRole('link').click();

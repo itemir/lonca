@@ -26,7 +26,7 @@ vi.mock('../../server/system.ts', () => ({ system: { sandbox: { state: 'ready' }
 }));
 vi.mock('../../server/sandbox.ts', () => ({ ensureSandbox: async () => 'box', isSandboxRunning: async () => true, stopSandbox,
   sandboxState: async () => 'running', exec, execText, removeSandbox: vi.fn() }));
-vi.mock('../../server/projects.ts', () => ({ refreshFromLocalRepo: vi.fn(), projectLifecycle: {} }));
+vi.mock('../../server/projects.ts', () => ({ makeCheckout: vi.fn(), projectLifecycle: {} }));
 
 const gitStatus = (stdout: string, code = 0) => ({ code, stdout: Buffer.from(stdout), stderr: Buffer.from(''), truncated: false });
 
