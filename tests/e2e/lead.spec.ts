@@ -122,7 +122,7 @@ test('agents appear in tabs, and everything between them goes through the Lead',
   await shot(page, 'agent-tab');
 
   // They finish, the Lead is woken, and what it was told isn't shown as if the user wrote it.
-  await page.locator('.lead-tab').getByRole('button', { name: 'Lead' }).click();
+  await page.locator('.lead-tab .tab-label').click();
   await expect(page.locator('.wake-row')).toContainText('2 agents finished', { timeout: 90000 });
   await expect(page.locator('.user-text').filter({ hasText: 'Update from Lonca' })).toHaveCount(0);
   await expect(page.locator('.team-card')).toHaveCount(0);
@@ -138,9 +138,29 @@ test('agents appear in tabs, and everything between them goes through the Lead',
   await expect.poll(async () => (await lonca.session(lead.id)).unread).toBe(true);
   await expect(page.locator('.workspace-row.active .unread-dot')).toBeVisible();
   await expect(page).toHaveTitle('● Lonca');
-  await page.locator('.lead-tab').getByRole('button', { name: 'Lead' }).click();
+  await page.locator('.lead-tab .tab-label').click();
   await expect.poll(async () => (await lonca.session(lead.id)).unread).toBe(false);
   await expect(page.locator('.workspace-row.active .unread-dot')).toHaveCount(0);
+});
+
+test('hovering a tab to close it leaves every tab where it was', async ({ page }) => {
+  const { workspace } = await newWorkspace();
+  await open(page, workspace);
+  await page.getByRole('button', { name: 'New conversation' }).click();
+  await expect(page.locator('.session-tab:not(.team-tab)')).toHaveClass(/active/);
+  await page.mouse.move(0, 0);
+
+  const places = () => page.locator('.tab-bar > *').evaluateAll((elements) => elements.map((element) => {
+    const { x, width } = element.getBoundingClientRect();
+    return { tab: element.textContent, x, width };
+  }));
+  const resting = await places();
+  for (const tab of await page.locator('.tab-bar .session-tab').all()) {
+    await tab.hover();
+    await expect(tab.locator('.tab-close')).toHaveCSS('opacity', '1');
+    expect(await places()).toEqual(resting);
+  }
+  await shot(page, 'tab-hover');
 });
 
 test('stopping the agents holds them, and shows it', async ({ page }) => {
