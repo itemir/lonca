@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import net, { type AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AppState, ChatItem, Project, Session, ToolItem, Workspace } from '../../shared/types.ts';
-import { Lonca, makeFixtureRepo, sandboxExec, sbx, until } from '../support/harness.ts';
+import { Lonca, makeFixtureRepo, sandboxExec, sandboxRunning, sbx, sleep, until } from '../support/harness.ts';
 import { type MockLlm, startMockLlm } from '../support/mock-llm.ts';
 
 // A Lead forwarding ports with the real CLI, through the same MCP server and files as in real use,
@@ -64,6 +64,18 @@ function hostPortFree(port: number): Promise<boolean> {
 async function page(url: string): Promise<string> {
   const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
   return response.text();
+}
+
+/**
+ * Stops the VM the way something outside Lonca would. Lonca reads from it after a turn, and a read
+ * can start it again, as sbx exec does, so this waits until it stays stopped.
+ */
+async function stopOutsideLonca(): Promise<void> {
+  await until('the VM to stay stopped', async () => {
+    sbx('stop', workspace.sandboxName);
+    await sleep(1500);
+    return sandboxRunning(workspace.sandboxName) === false;
+  }, 30000, 0);
 }
 
 /** A small web server in the VM, on 0.0.0.0 or only on loopback, saying which one it is. */
@@ -190,7 +202,7 @@ describe('a Lead forwarding ports', () => {
     const forwarded = await leadCalls('forward_port', { port });
     expect(forwarded.status, forwarded.output).toBe('done');
     const hostPort = portOf(urlIn(forwarded.output));
-    sbx('stop', workspace.sandboxName);
+    await stopOutsideLonca();
     await lonca.api('POST', `/workspaces/${workspace.id}/start`);
     await lonca.waitForWorkspace(workspace.id);
     expect((await current()).forwards).toBeUndefined();
@@ -206,7 +218,7 @@ describe('a Lead forwarding ports', () => {
     const forwarded = await leadCalls('forward_port', { port: await freePort() });
     expect(forwarded.status, forwarded.output).toBe('done');
     const hostPort = portOf(urlIn(forwarded.output));
-    sbx('stop', workspace.sandboxName);
+    await stopOutsideLonca();
     // sbx won't start a sandbox when a port it would publish again is taken.
     const squatter = net.createServer();
     await new Promise<void>((resolve, reject) => {

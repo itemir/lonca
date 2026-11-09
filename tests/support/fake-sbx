@@ -67,6 +67,8 @@ start_relay() {
   image=$(docker inspect --format '{{.Config.Image}}' "$name")
   if ! docker run -d --name "$relay" --label "$relay_marker=$name" --label "dev.lonca.instance=$prefix" \
     --publish "$ip:$host:7000" --entrypoint socat "$image" TCP-LISTEN:7000,fork,reuseaddr "TCP:$target:$port" >/dev/null 2>&1; then
+    # Another command starting the sandbox at the same moment may have just made it.
+    [ "$(docker inspect --format '{{.State.Running}}' "$relay" 2>/dev/null)" != true ] || return 0
     docker rm -f "$relay" >/dev/null 2>&1
     return 1
   fi
