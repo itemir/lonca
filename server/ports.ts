@@ -1,10 +1,10 @@
 import net, { type AddressInfo } from 'node:net';
 import type { PortForward, Workspace } from '../shared/types.ts';
-import { HTTP_PORT, PORTS_PER_WORKSPACE } from './config.ts';
+import { DEFAULT_HTTP_PORT, DEV_PORT, HTTP_PORT, PORTS_PER_WORKSPACE } from './config.ts';
 import { execText, publishPort, sandboxState, unpublishPort } from './sandbox.ts';
 import { flushState, state } from './store.ts';
 import { HttpError, KeyedQueue, errorMessage } from './util.ts';
-import { isPortFree, onWorkspaceStarting, onWorkspaceTeardown, publishWorkspace, reserveHostPorts, runningSandbox } from './workspaces.ts';
+import { isPortFree, onSandboxChange, publishWorkspace, reserveHostPorts, runningSandbox } from './workspaces.ts';
 
 // A Lead can forward a port on the user's localhost to any port in its workspace's VM, beyond the
 // ten every workspace has. sbx publishes a sandbox's ports again whenever it starts, and won't
@@ -130,7 +130,8 @@ async function hostPortProblem(workspace: Workspace, hostPort: number): Promise<
   if (!Number.isInteger(hostPort) || hostPort < LOWEST_HOST_PORT || hostPort > HIGHEST_PORT) {
     return `A port on the user's computer has to be from ${LOWEST_HOST_PORT} to ${HIGHEST_PORT}, so localhost:${hostPort} can't be used.`;
   }
-  if (hostPort === HTTP_PORT) return `localhost:${hostPort} is where Lonca itself runs.`;
+  // A browser keeps Lonca's token for each origin it opened Lonca on, and a page the VM served there could read it.
+  if ([HTTP_PORT, DEFAULT_HTTP_PORT, DEV_PORT].includes(hostPort)) return `localhost:${hostPort} is kept for Lonca's own pages.`;
   if (hostPort === CODEX_SIGN_IN_PORT) return `localhost:${hostPort} is kept for signing in to Codex.`;
   const owner = state.workspaces.find((entry) => isOwnPort(entry, hostPort));
   if (owner) return `localhost:${hostPort} is one of the ports published for ${owner === workspace ? 'this workspace' : 'another workspace'}.`;
@@ -263,12 +264,13 @@ export async function listPorts(workspace: Workspace): Promise<string> {
 }
 
 /**
- * Before Lonca stops, removes or starts a sandbox. sbx keeps what's published while a sandbox is
- * stopped, publishes it again when it starts, and won't start it if one of those ports has been
- * taken meanwhile. Unpublishing doesn't start a stopped one. A forward that can't be closed is
- * kept, to be tried again next time, and holds nothing up.
+ * Before Lonca starts, stops or removes a sandbox, ahead of anything that could fail on the way.
+ * sbx keeps what's published while a sandbox is stopped, publishes it again when it starts, and
+ * won't start it if one of those ports has been taken meanwhile. Unpublishing doesn't start a
+ * stopped one. A forward that can't be closed is kept, to be tried again next time, and holds
+ * nothing up.
  */
-export function closeForwards(workspace: Workspace): Promise<void> {
+function closeForwards(workspace: Workspace): Promise<void> {
   return changes.run(workspace.id, async () => {
     if (forwardsOf(workspace).length === 0) return;
     // Removing a sandbox, as by hand, lets go of every port it had.
@@ -286,6 +288,5 @@ export function closeForwards(workspace: Workspace): Promise<void> {
   });
 }
 
-onWorkspaceTeardown(closeForwards);
-// A sandbox that stopped some other way, as with sbx stop, had no chance to close its forwards.
-onWorkspaceStarting(closeForwards);
+// Before a start too, since a sandbox that stopped some other way, as with sbx stop, had no chance to.
+onSandboxChange(closeForwards);

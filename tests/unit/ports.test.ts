@@ -63,6 +63,7 @@ let workspaces: typeof import('../../server/workspaces.ts');
 let runner: typeof import('../../server/agents/runner.ts');
 let team: typeof import('../../server/agents/team.ts');
 let HTTP_PORT: number;
+let failTeardown = false;
 let own: Workspace;
 let other: Workspace;
 const servers: net.Server[] = [];
@@ -133,6 +134,10 @@ beforeAll(async () => {
   vi.stubEnv('LONCA_HOME', home);
   store = await import('../../server/store.ts');
   workspaces = await import('../../server/workspaces.ts');
+  // As the runner's does when an agent won't stop. It comes before the ports' own, as it does in the server.
+  workspaces.onWorkspaceTeardown(async () => {
+    if (failTeardown) throw new Error('An agent is still stopping. Retry once its process can be reached.');
+  });
   ports = await import('../../server/ports.ts');
   runner = await import('../../server/agents/runner.ts');
   team = await import('../../server/agents/team.ts');
@@ -142,6 +147,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  failTeardown = false;
   vm.running = true;
   vm.exists = true;
   vm.tables = tables();
@@ -195,6 +201,9 @@ describe('choosing the port on the user’s computer', () => {
     ['taken by something listening on ::1', async () => listenOn('::1')],
     ['below 1024', async () => 80],
     ['Lonca’s own', async () => HTTP_PORT],
+    // A browser may keep Lonca's token for these origins.
+    ['Lonca’s default', async () => 4700],
+    ['Lonca’s in development', async () => 5173],
     ['Codex’s sign-in port', async () => 1455],
     ['one of another workspace’s ten', async () => OTHER_PORT + 3],
     ['forwarded to another workspace', async () => {
@@ -218,7 +227,9 @@ describe('choosing the port on the user’s computer', () => {
   it.each([
     ['1023', async () => 1023, 'has to be from 1024 to 65535'],
     ['65536', async () => 65536, 'has to be from 1024 to 65535'],
-    ['Lonca’s own', async () => HTTP_PORT, 'is where Lonca itself runs'],
+    ['Lonca’s own', async () => HTTP_PORT, 'is kept for Lonca\'s own pages'],
+    ['Lonca’s default', async () => 4700, 'is kept for Lonca\'s own pages'],
+    ['Lonca’s in development', async () => 5173, 'is kept for Lonca\'s own pages'],
     ['Codex’s sign-in port', async () => 1455, 'is kept for signing in to Codex'],
     ['one of this workspace’s ten', async () => OWN_PORT + 3, 'is one of the ports published for this workspace'],
     ['one of another workspace’s ten', async () => OTHER_PORT + 9, 'is one of the ports published for another workspace'],
@@ -444,6 +455,17 @@ describe('forwards when the workspace stops and starts', () => {
     expect(vm.stopSandbox).toHaveBeenCalledTimes(1);
     expect(own.forwards).toEqual([kept]);
     expect(vm.unpublishPort).toHaveBeenCalledWith('vm-own', closed.hostPort, closed.port);
+  });
+
+  it('closes forwards before anything else that could stop the stop, such as an agent that won’t stop', async () => {
+    const forwards = await forwardTwo();
+    failTeardown = true;
+    await expect(workspaces.stopWorkspace(own)).rejects.toThrow('An agent is still stopping');
+    expect(own.status).toBe('error');
+    // Its VM is still running, but nothing of it is left on the user's computer.
+    expect(vm.running).toBe(true);
+    expect(own.forwards).toBeUndefined();
+    expect(vm.unpublishPort.mock.calls).toEqual(forwards.map((forward) => ['vm-own', forward.hostPort, forward.port]));
   });
 
   it('closes the forwards of a sandbox stopped outside Lonca, which doesn’t start it', async () => {

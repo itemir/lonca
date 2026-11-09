@@ -20,12 +20,12 @@ const allocation = new KeyedQueue();
 
 type ReadyListener = (workspace: Workspace) => void;
 type TeardownListener = (workspace: Workspace) => Promise<void>;
-type StartListener = (workspace: Workspace) => Promise<void>;
+type SandboxListener = (workspace: Workspace) => Promise<void>;
 type ScriptStarter = (workspace: Workspace, script: string) => Promise<void>;
 
 const readyListeners: ReadyListener[] = [];
 const teardownListeners: TeardownListener[] = [];
-const startListeners: StartListener[] = [];
+const sandboxListeners: SandboxListener[] = [];
 let startSetupScript: ScriptStarter = async () => {};
 
 /** Called when a workspace can accept work, to start any messages sent while it was booting. */
@@ -38,9 +38,16 @@ export function onWorkspaceTeardown(listener: TeardownListener): void {
   teardownListeners.push(listener);
 }
 
-/** Called before Lonca starts a workspace's sandbox, to clear what its last run left. */
-export function onWorkspaceStarting(listener: StartListener): void {
-  startListeners.push(listener);
+/**
+ * Called before Lonca starts, stops or removes a workspace's sandbox, ahead of teardown listeners,
+ * which can fail, to undo what sbx would keep from one run to the next. It mustn't throw.
+ */
+export function onSandboxChange(listener: SandboxListener): void {
+  sandboxListeners.push(listener);
+}
+
+async function beforeSandboxChange(workspace: Workspace): Promise<void> {
+  for (const listener of sandboxListeners) await listener(workspace);
 }
 
 export function setSetupScriptStarter(starter: ScriptStarter): void {
@@ -147,7 +154,7 @@ function ensureWorkspaceSandbox(workspace: Workspace, project: Project, options:
 
 /** Starts a workspace's sandbox for it to take work, clearing first what sbx would bring back of its last run. */
 async function startWorkspaceSandbox(workspace: Workspace, project: Project): Promise<string> {
-  for (const listener of startListeners) await listener(workspace);
+  await beforeSandboxChange(workspace);
   return ensureWorkspaceSandbox(workspace, project);
 }
 
@@ -484,6 +491,7 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
           && await sandboxState(workspace.sandboxName) === 'stopped') {
           await startWorkspaceSandbox(workspace, projectOf(workspace));
         }
+        await beforeSandboxChange(workspace);
         if (hasSandbox) for (const listener of teardownListeners) await listener(workspace);
         if (operation === 'stop') {
           await stopSandbox(workspace.sandboxName);

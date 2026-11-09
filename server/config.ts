@@ -14,8 +14,11 @@ export const WEB_DIST = path.join(REPO_ROOT, 'dist', 'web');
 /** What the template new workspaces start from is made of. */
 export const TEMPLATE_DIR = path.join(REPO_ROOT, 'template');
 
-export const HTTP_PORT = Number(process.env.PORT ?? 4700);
+export const DEFAULT_HTTP_PORT = 4700;
+export const HTTP_PORT = Number(process.env.PORT ?? DEFAULT_HTTP_PORT);
 export const DEV_MODE = process.env.LONCA_DEV === '1';
+/** Where Vite serves the web app in development, passing the API on to the server. */
+export const DEV_PORT = 5173;
 
 /** Keeps a second instance, such as a test run, from touching this one's sandboxes. */
 export const INSTANCE = process.env.LONCA_INSTANCE ?? '';

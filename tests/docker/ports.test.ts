@@ -9,7 +9,7 @@ import { type MockLlm, startMockLlm } from '../support/mock-llm.ts';
 // to servers running in its workspace, which this test then opens from this computer as the user
 // would. It runs against the real sbx as well.
 
-const lonca = new Lonca({ port: 48461, instance: 'ports-test', firstWorkspacePort: 59600 });
+const lonca = new Lonca({ port: 48463, instance: 'ports-test', firstWorkspacePort: 59600 });
 let mock: MockLlm;
 let fixture: string;
 let project: Project;
@@ -160,6 +160,12 @@ describe('a Lead forwarding ports', () => {
     expect(forwarded.output).toContain('The forward stays in place meanwhile.');
     const hostPort = portOf(urlIn(forwarded.output));
     expect((await current()).forwards?.some((forward) => forward.port === port && forward.hostPort === hostPort)).toBe(true);
+    // Lonca doesn't bridge it, so the user really can't reach it.
+    await expect(page(`http://localhost:${hostPort}`)).rejects.toThrow();
+    // Restarted on 0.0.0.0, as the Lead is told, it can be reached through the same forward.
+    sandboxExec(workspace.sandboxName, `pkill -f 'http.server ${port} '; true`);
+    serve(port, '0.0.0.0');
+    expect(await until('the page', async () => page(`http://localhost:${hostPort}`))).toContain(`served from port ${port} in the VM`);
 
     // The button beside it in the workspace.
     await lonca.api('DELETE', `/workspaces/${workspace.id}/ports/${port}`);

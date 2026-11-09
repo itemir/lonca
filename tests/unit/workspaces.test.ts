@@ -83,7 +83,10 @@ describe('workspace allocation', () => {
     const removing = projectLifecycle.run(project.id, snapshot);
     await Promise.resolve();
     expect(snapshot).not.toHaveBeenCalled();
-    for (const ready of ports.pending) ready();
+    // A port is probed on several addresses in turn, and only the first probes were held.
+    const held = ports.pending;
+    ports.pending = null;
+    for (const ready of held) ready();
     const { workspace } = await creating;
     expect(await removing).toEqual([workspace]);
   });
