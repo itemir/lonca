@@ -20,6 +20,8 @@ export type PrKind =
   | 'behind'
   | 'checks-running'
   | 'blocked'
+  /** GitHub would merge it, but says a check isn't passing, though none it listed failed. */
+  | 'unstable'
   | 'not-pushed'
   /** The workspace's own checkout couldn't be read, so nobody can say what's in the pull request. */
   | 'local-unknown'
@@ -41,7 +43,13 @@ export interface PrStatusInput {
   known: PrSummary | null | undefined;
   workspace: Pick<Workspace, 'status' | 'createdAt' | 'pendingOperation'>;
   working: Working;
+  /** A merge request is running now. */
   merging: boolean;
+  /**
+   * GitHub accepted a merge that a read hasn't shown yet. Unlike a running request, it only shows
+   * while the pull request can be read, so a stopped workspace falls back to what's known.
+   */
+  awaitingMerge?: boolean;
 }
 
 export interface PrStatus {
@@ -68,9 +76,27 @@ export const NORMAL_REFRESH_MS = 30_000;
 const BUSY_REFRESH_MS = 15_000;
 const SETTLING_REFRESH_MS = 5_000;
 
+const MERGE_STATES = ['CLEAN', 'HAS_HOOKS', 'UNSTABLE', 'BLOCKED', 'BEHIND', 'DIRTY', 'DRAFT', 'UNKNOWN'];
 /** GitHub merges only these straight away. UNSTABLE is a failing check that isn't required. */
 const MERGEABLE_STATES = ['CLEAN', 'HAS_HOOKS', 'UNSTABLE'];
 const CAN_MERGE = ['ADMIN', 'MAINTAIN', 'WRITE'];
+
+/** GitHub's merge state, with anything missing or unfamiliar taken as UNKNOWN, which never reads as ready. */
+export function mergeState(value: unknown): string {
+  const state = typeof value === 'string' ? value.toUpperCase() : '';
+  return MERGE_STATES.includes(state) ? state : 'UNKNOWN';
+}
+
+/**
+ * Whether the base branch's merge queue would take it now. Such a branch reports BLOCKED until a
+ * pull request goes through the queue, so BLOCKED with no other reason known means it's ready.
+ */
+function readyForQueue(checks: Checks, pr: PullRequest): boolean {
+  const review = pr.reviewDecision || null;
+  return Boolean(checks.queue?.enabled) && !checks.queue?.queued && mergeState(pr.mergeStateStatus) === 'BLOCKED'
+    && pr.mergeable !== 'CONFLICTING' && review !== 'CHANGES_REQUESTED' && review !== 'REVIEW_REQUIRED'
+    && !checks.checks.some((check) => check.status === 'failure' || check.status === 'pending');
+}
 
 export const MERGE_METHODS: MergeMethod[] = ['squash', 'merge', 'rebase'];
 
@@ -135,13 +161,31 @@ export function mergeBlocker(checks: Checks): string | null {
   if (!pr) return 'There’s no pull request for this branch.';
   if (pr.state === 'MERGED') return `#${pr.number} is already merged.`;
   if (pr.state === 'CLOSED') return `#${pr.number} was closed.`;
-  if (pr.isDraft) return `#${pr.number} is a draft.`;
+  const state = mergeState(pr.mergeStateStatus);
+  if (pr.isDraft || state === 'DRAFT') return `#${pr.number} is a draft.`;
   if (pr.autoMergeRequest) return `Auto-merge is on for #${pr.number}, so GitHub merges it by itself.`;
   if (checks.queue?.queued) return `#${pr.number} is already in the merge queue.`;
-  if (!MERGEABLE_STATES.includes(pr.mergeStateStatus ?? '')) return `GitHub can’t merge #${pr.number} right now.`;
+  if (state === 'DIRTY' || pr.mergeable === 'CONFLICTING') return `#${pr.number} has conflicts with ${pr.baseRefName}.`;
   const permission = checks.repo?.viewerPermission;
   if (permission && !CAN_MERGE.includes(permission)) return `Your GitHub account can’t merge pull requests in this repository.`;
+  if (!MERGEABLE_STATES.includes(state) && !readyForQueue(checks, pr)) return `GitHub can’t merge #${pr.number} right now.`;
   return null;
+}
+
+/** How a merge that GitHub accepted, but hasn't shown as done, was left. */
+export interface PendingMerge {
+  outcome: string;
+  number: number;
+  head: string;
+  /** Given up on: GitHub usually catches up in seconds, and this stops waiting after a while. */
+  expired?: boolean;
+}
+
+/** Whether to keep showing a merge GitHub accepted as under way: until a read shows it done or changed, or it's given up on. */
+export function stillAwaiting(merge: PendingMerge | null, checks: Checks | null): boolean {
+  if (!merge || merge.outcome !== 'pending' || merge.expired) return false;
+  const pr = checks?.pr;
+  return !pr || (pr.state === 'OPEN' && pr.number === merge.number && pr.headRefOid === merge.head);
 }
 
 /** A count for the header, which has room for two digits. */
@@ -171,13 +215,13 @@ function openReasons(checks: Checks, pr: PullRequest, working: Working): Reason[
   const base = pr.baseRefName;
   const failing = checks.checks.filter((check) => check.status === 'failure').length;
   const pending = checks.checks.some((check) => check.status === 'pending');
-  const state = pr.mergeStateStatus ?? '';
+  const state = mergeState(pr.mergeStateStatus);
   const review = pr.reviewDecision || null;
   const local = checks.local;
   const reasons: Reason[] = [];
   const add = (kind: PrKind, tone: PrTone, label: string, detail: string) => reasons.push({ kind, tone, label, detail });
 
-  if (pr.isDraft) add('draft', 'muted', 'Draft', 'It’s a draft. Mark it ready for review on GitHub before merging it.');
+  if (pr.isDraft || state === 'DRAFT') add('draft', 'muted', 'Draft', 'It’s a draft. Mark it ready for review on GitHub before merging it.');
   if (checks.queue?.queued) add('queued', 'muted', 'Queued to merge', `It’s in ${base}’s merge queue, and GitHub merges it from there.`);
   else if (pr.autoMergeRequest) add('auto-merge', 'muted', 'Auto-merge on', 'Auto-merge is on, so GitHub merges it by itself once it can.');
   if (pr.mergeable === 'UNKNOWN' || state === 'UNKNOWN') add('checking', 'muted', 'Checking…', 'GitHub is still working out whether it can be merged.');
@@ -186,10 +230,15 @@ function openReasons(checks: Checks, pr: PullRequest, working: Working): Reason[
   if (review === 'CHANGES_REQUESTED') add('changes-requested', 'blocked', 'Changes requested', 'A reviewer asked for changes.');
   if (state === 'BLOCKED' && review === 'REVIEW_REQUIRED') add('needs-review', 'waiting', 'Needs review', `${base}’s rules need an approving review before it can be merged.`);
   if (state === 'BEHIND') add('behind', 'waiting', 'Out of date', `Behind ${base}, and ${base}’s rules need branches to be up to date.`);
-  // A protected branch reports BLOCKED while its required checks run, which isn't a rule to look up.
+  // A protected branch reports BLOCKED while its required checks run, which isn't a rule to look up,
+  // and so does one with a merge queue until the pull request goes through it.
   if (state === 'BLOCKED' && review !== 'REVIEW_REQUIRED') {
     if (pending) add('checks-running', 'waiting', 'Checks running', `Checks are still running, and ${base}’s rules wait for them.`);
-    else add('blocked', 'waiting', 'Blocked', `A rule on ${base} blocks merging. GitHub shows which.`);
+    else if (!readyForQueue(checks, pr)) add('blocked', 'waiting', 'Blocked', `A rule on ${base} blocks merging. GitHub shows which.`);
+  }
+  // Ready needs GitHub to say so. This one would merge, but not every check passed.
+  if (state === 'UNSTABLE' && failing === 0 && !pending) {
+    add('unstable', 'waiting', 'Checks not passing', 'GitHub says not every check passed, though it would still merge it.');
   }
   // Lonca's own reasons: a merge takes only what's in the pull request, and archiving loses the rest.
   // Labels stay short enough to sit beside Merge in the panel. The tooltip and the card say it in full.
@@ -255,7 +304,7 @@ export function mergeWarnings(snapshot: MergeSnapshot): string[] {
 /** Sooner while GitHub is still settling something, which it usually does in seconds. */
 export function refreshInterval(checks: Checks | null, merging: boolean): number {
   const pr = checks?.pr;
-  if (merging || (pr?.state === 'OPEN' && (pr.mergeable === 'UNKNOWN' || pr.mergeStateStatus === 'UNKNOWN'))) return SETTLING_REFRESH_MS;
+  if (merging || (pr?.state === 'OPEN' && (pr.mergeable === 'UNKNOWN' || mergeState(pr.mergeStateStatus) === 'UNKNOWN'))) return SETTLING_REFRESH_MS;
   if (pr?.state === 'OPEN' && (checks!.queue?.queued || pr.autoMergeRequest || checks!.checks.some((check) => check.status === 'pending'))) {
     return BUSY_REFRESH_MS;
   }
@@ -271,7 +320,7 @@ function staleNote(status: Workspace['status']): string {
 /** The pull request's state for a workspace's header and Checks tab. */
 export function prStatus(input: PrStatusInput): PrStatus {
   const { checks, workspace, working } = input;
-  const refreshMs = refreshInterval(checks, input.merging);
+  const refreshMs = refreshInterval(checks, input.merging || Boolean(input.awaitingMerge));
   const status = (fields: Omit<PrStatus, 'refreshSoon' | 'refreshMs' | 'archive' | 'merge' | 'stale'> & Partial<PrStatus>): PrStatus => ({
     merge: null,
     archive: false,
@@ -284,11 +333,11 @@ export function prStatus(input: PrStatusInput): PrStatus {
   const fresh = checks?.github === 'connected' && checks.pr && !predates(checks.pr, workspace.createdAt) ? checks.pr : null;
   const known = input.known ?? null;
 
+  const merging = (pr: PrSummary | null) => status({
+    kind: 'merging', tone: 'muted', label: 'Merging…', detail: 'Merging the pull request.', reasons: ['Merging the pull request.'], pr,
+  });
   // What the user asked for comes first, even if GitHub can't be reached while it happens.
-  if (input.merging) {
-    const pr = fresh ? summarize(fresh, checks!.checkedAt) : known;
-    return status({ kind: 'merging', tone: 'muted', label: 'Merging…', detail: 'Merging the pull request.', reasons: ['Merging the pull request.'], pr });
-  }
+  if (input.merging) return merging(fresh ? summarize(fresh, checks!.checkedAt) : known);
   if (checks?.github === 'not-github' || checks?.github === 'missing-token') return none;
 
   if (workspace.status !== 'ready' || !checks || checks.github === 'error') {
@@ -322,6 +371,8 @@ export function prStatus(input: PrStatusInput): PrStatus {
   if (pr.state === 'CLOSED') {
     return status({ kind: 'closed', tone: 'muted', label: 'Closed', detail: 'Closed without merging.', reasons: ['Closed without merging.'], pr: summary });
   }
+  // GitHub took the merge and is finishing it, so offering Merge again would only confuse.
+  if (input.awaitingMerge) return merging(summary);
 
   const reasons = openReasons(checks, pr, working);
   const merge = mergeBlocker(checks) === null && workspace.status === 'ready';

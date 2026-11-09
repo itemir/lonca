@@ -43,13 +43,13 @@ describe('the repository a project’s pull requests are in', () => {
     expect(parseGithubOwner('git@github.com:octocat/Hello-World.git')).toBe('octocat');
   });
 
-  it('names it in the view command, so a checkout’s remotes can’t redirect it', () => {
-    expect(prViewArgs('itemir/salzburg', 'itemir/lonca')).toEqual([
-      'gh', 'pr', 'view', 'itemir/salzburg', '--repo', 'itemir/lonca', '--json',
+  it('names it in the view command, host and all, so neither the checkout nor GH_HOST can redirect it', () => {
+    expect(prViewArgs('itemir/salzburg', { owner: 'itemir', name: 'lonca' })).toEqual([
+      'gh', 'pr', 'view', 'itemir/salzburg', '--repo', 'github.com/itemir/lonca', '--json',
       'number,title,url,state,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,headRefOid,baseRefName,createdAt,mergedAt,closedAt,autoMergeRequest',
     ]);
     const query = mergeSettingsArgs('123', '2048', 7);
-    expect(query.slice(0, 3)).toEqual(['gh', 'api', 'graphql']);
+    expect(query.slice(0, 5)).toEqual(['gh', 'api', 'graphql', '--hostname', 'github.com']);
     expect(query).toContain('owner=123');
     expect(query[query.indexOf('owner=123') - 1]).toBe('-f');
     expect(query.slice(-2)).toEqual(['-F', 'number=7']);
@@ -68,6 +68,10 @@ describe('what GitHub says', () => {
     expect(parsePullRequest({ ...pr(), autoMergeRequest: null })?.pr.autoMergeRequest).toBe(false);
     expect(parsePullRequest({ ...pr(), headRefOid: '--upload-pack=x' })?.pr.headRefOid).toBe('');
     expect(parsePullRequest({ ...pr(), state: 'WEIRD' })).toBeNull();
+    // A merge state that's missing or new to Lonca is taken as one GitHub is still working out.
+    expect(parsePullRequest({ ...pr(), mergeStateStatus: undefined })?.pr.mergeStateStatus).toBe('UNKNOWN');
+    expect(parsePullRequest({ ...pr(), mergeStateStatus: 'SOMETHING_NEW' })?.pr.mergeStateStatus).toBe('UNKNOWN');
+    expect(parsePullRequest({ ...pr(), mergeStateStatus: 'has_hooks' })?.pr.mergeStateStatus).toBe('HAS_HOOKS');
     expect(parsePullRequest({ number: '7' })).toBeNull();
     expect(parsePullRequest(null)).toBeNull();
   });
@@ -105,8 +109,8 @@ describe('merging', () => {
 
   it('runs gh with the repository, the method and the head the user saw, and nothing that goes around the rules', () => {
     for (const method of ['squash', 'merge', 'rebase'] as const) {
-      const args = mergeArgs('itemir/lonca', { ...request, method });
-      expect(args).toEqual(['gh', 'pr', 'merge', '7', '--repo', 'itemir/lonca', `--${method}`, '--match-head-commit', HEAD]);
+      const args = mergeArgs({ owner: 'itemir', name: 'lonca' }, { ...request, method });
+      expect(args).toEqual(['gh', 'pr', 'merge', '7', '--repo', 'github.com/itemir/lonca', `--${method}`, '--match-head-commit', HEAD]);
       for (const forbidden of ['--delete-branch', '-d', '--admin', '--auto', '--subject', '--body', '-t', '-b']) expect(args).not.toContain(forbidden);
     }
   });
@@ -127,8 +131,28 @@ describe('merging', () => {
     // A merge queue decides the method itself.
     expect(checkBeforeMerge(read({}, { queue: { enabled: true, queued: false } }), { ...request, method: 'rebase' })).toEqual({ action: 'merge' });
     expect(checkBeforeMerge(read({ mergeStateStatus: 'DIRTY' }), request)).toMatchObject({ action: 'refuse', status: 409 });
+    expect(checkBeforeMerge(read({ mergeStateStatus: null }), request)).toMatchObject({ action: 'refuse', status: 409 });
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'SOMETHING_NEW' }), request)).toMatchObject({ action: 'refuse', status: 409 });
     expect(checkBeforeMerge(read({ isDraft: true }), request)).toMatchObject({ action: 'refuse', status: 409 });
     expect(checkBeforeMerge({ ...read(), github: 'error', error: 'HTTP 502', pr: null }, request)).toMatchObject({ action: 'refuse', status: 502 });
+  });
+
+  it('adds one to a merge queue, which GitHub reports as BLOCKED until it goes through', () => {
+    const queue = { queue: { enabled: true, queued: false } };
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED' }, queue), request)).toEqual({ action: 'merge' });
+    // Whatever else is known to block it still does.
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED' }, { ...queue, checks: [{ name: 'ci', status: 'failure' }] }), request))
+      .toMatchObject({ action: 'refuse', status: 409 });
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED' }, { ...queue, checks: [{ name: 'ci', status: 'pending' }] }), request))
+      .toMatchObject({ action: 'refuse', status: 409 });
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED', reviewDecision: 'REVIEW_REQUIRED' }, queue), request)).toMatchObject({ action: 'refuse' });
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED', reviewDecision: 'CHANGES_REQUESTED' }, queue), request)).toMatchObject({ action: 'refuse' });
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED', mergeable: 'CONFLICTING' }, queue), request)).toMatchObject({ action: 'refuse' });
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'BEHIND' }, queue), request)).toMatchObject({ action: 'refuse' });
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED', isDraft: true }, queue), request)).toMatchObject({ action: 'refuse' });
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED' }, { queue: { enabled: true, queued: true } }), request)).toMatchObject({ action: 'refuse' });
+    // Without a queue, BLOCKED is a rule that stands in the way.
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED' }), request)).toMatchObject({ action: 'refuse', status: 409 });
   });
 
   const ok: GhResult = { code: 0, timedOut: false, output: '' };

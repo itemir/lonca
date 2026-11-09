@@ -131,11 +131,12 @@ describe('reading a pull request', () => {
     });
     const [viewCall, queryCall] = calls();
     expect(viewCall).toEqual([
-      'pr', 'view', workspace.branch, '--repo', REPO, '--json',
+      'pr', 'view', workspace.branch, '--repo', `github.com/${REPO}`, '--json',
       'number,title,url,state,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,headRefOid,baseRefName,createdAt,mergedAt,closedAt,autoMergeRequest',
     ]);
-    expect(queryCall.slice(0, 4)).toEqual(['api', 'graphql', '-f', expect.stringMatching(/^query=query\(/)]);
-    expect(queryCall.slice(4)).toEqual(['-f', 'owner=lonca-test', '-f', 'name=merge-fixture', '-F', 'number=7']);
+    // github.com is named every time, so a project's GH_HOST can't send any of it elsewhere.
+    expect(queryCall.slice(0, 6)).toEqual(['api', 'graphql', '--hostname', 'github.com', '-f', expect.stringMatching(/^query=query\(/)]);
+    expect(queryCall.slice(6)).toEqual(['-f', 'owner=lonca-test', '-f', 'name=merge-fixture', '-F', 'number=7']);
     expect(queryCall.join(' ')).not.toMatch(/mutation/);
     expect((await lonca.workspace(workspace.id)).pr).toMatchObject({ number: 7, state: 'OPEN', headRefOid: head, baseRefName: 'main' });
   });
@@ -184,7 +185,7 @@ describe('merging', () => {
     answer({ 'after-view.json': merged() });
     const reply = await post(request());
     expect(reply).toMatchObject({ status: 200, body: { outcome: 'merged', checks: { pr: { state: 'MERGED' } } } });
-    expect(merges()).toEqual([['pr', 'merge', '7', '--repo', REPO, '--squash', '--match-head-commit', head]]);
+    expect(merges()).toEqual([['pr', 'merge', '7', '--repo', `github.com/${REPO}`, '--squash', '--match-head-commit', head]]);
     for (const forbidden of ['--delete-branch', '-d', '--admin', '--auto', '--subject', '--body']) expect(calls().flat()).not.toContain(forbidden);
     expect((await lonca.workspace(workspace.id)).pr).toMatchObject({ state: 'MERGED' });
   });
@@ -240,6 +241,23 @@ describe('merging', () => {
     expect(await lonca.workspace(workspace.id)).toMatchObject({ status: 'stopped' });
     expect(await post(request())).toMatchObject({ status: 409, body: { error: expect.stringContaining('stopped') } });
     expect(sandboxRunning(workspace.sandboxName)).toBe(false);
+  });
+
+  it('adds one to a merge queue that GitHub reports as BLOCKED, as such a branch does until it goes through', async () => {
+    answer({
+      'view.json': view({ mergeStateStatus: 'BLOCKED' }),
+      'graphql.json': graphql({ isInMergeQueue: false, isMergeQueueEnabled: true }),
+      'after-graphql.json': graphql({ isInMergeQueue: true, isMergeQueueEnabled: true }),
+    });
+    const before = await lonca.api<Checks>('GET', `/workspaces/${workspace.id}/checks`);
+    expect(before).toMatchObject({ pr: { mergeStateStatus: 'BLOCKED' }, queue: { enabled: true, queued: false } });
+    // A queue picks its own method, so one the repository doesn't allow for a direct merge is no reason to refuse.
+    expect(await post(request({ method: 'rebase' }))).toMatchObject({ status: 200, body: { outcome: 'queued', message: 'GitHub will merge #7 when it’s ready.' } });
+    expect(merges()).toEqual([['pr', 'merge', '7', '--repo', `github.com/${REPO}`, '--rebase', '--match-head-commit', head]]);
+    // Without the queue, BLOCKED is a rule in the way, and nothing is tried.
+    answer({ 'graphql.json': graphql(), 'after-graphql.json': null });
+    expect(await post(request())).toMatchObject({ status: 409 });
+    expect(merges()).toHaveLength(1);
   });
 
   it('tells a queued merge from one GitHub hasn’t finished', async () => {

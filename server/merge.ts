@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { allowedMethods, mergeBlocker } from '../shared/pr.ts';
 import type { Checks, MergeMethod, MergeOutcome, MergeReply, Workspace } from '../shared/types.ts';
 import { execEnv } from './env.ts';
-import { getChecks } from './inspect.ts';
+import { getChecks, repoArg } from './inspect.ts';
 import { parseGithubRepo } from './projects.ts';
 import { exec } from './sandbox.ts';
 import { getProject } from './store.ts';
@@ -29,11 +29,12 @@ const MERGE_TIMEOUT_MS = 60_000;
 const METHOD_NAMES: Record<MergeMethod, string> = { squash: 'squash merging', merge: 'merge commits', rebase: 'rebase merging' };
 
 /**
- * With a number and `--repo`, gh does no git work in the checkout. It never deletes a branch,
- * which would take the one the agents are on, and never goes around the repository's rules.
+ * With a number and `--repo`, gh does no git work in the checkout, and with the host in `--repo`,
+ * a project's GH_HOST can't send it elsewhere. It never deletes a branch, which would take the one
+ * the agents are on, and never goes around the repository's rules.
  */
-export function mergeArgs(repo: string, request: MergeRequest): string[] {
-  return ['gh', 'pr', 'merge', String(request.number), '--repo', repo, `--${request.method}`, '--match-head-commit', request.headOid];
+export function mergeArgs(repo: { owner: string; name: string }, request: MergeRequest): string[] {
+  return ['gh', 'pr', 'merge', String(request.number), '--repo', repoArg(repo), `--${request.method}`, '--match-head-commit', request.headOid];
 }
 
 /** gh's message without its advice, which is about flags Lonca never passes or commands that don't apply. */
@@ -129,7 +130,7 @@ export async function mergePullRequest(workspace: Workspace, request: MergeReque
       const sandbox = await runningSandbox(workspace);
       let gh: GhResult;
       try {
-        const result = await exec(sandbox, mergeArgs(`${repo.owner}/${repo.name}`, request), {
+        const result = await exec(sandbox, mergeArgs(repo, request), {
           workdir: workspace.path,
           env: [...execEnv(project), 'GH_PROMPT_DISABLED=1'],
           timeoutMs: MERGE_TIMEOUT_MS,

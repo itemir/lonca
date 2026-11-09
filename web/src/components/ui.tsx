@@ -108,6 +108,11 @@ const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([t
 // Dialogs open on top of each other now and then. Only the top one keeps focus to itself.
 const openDialogs: HTMLElement[] = [];
 
+/** The dialog on top, if one is open. */
+export function topDialog(): HTMLElement | undefined {
+  return openDialogs.at(-1);
+}
+
 /** Where Tab can go in a dialog. A radio group is one stop, at its chosen radio. */
 function tabStops(dialog: HTMLElement): HTMLElement[] {
   return [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((element) => {

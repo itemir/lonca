@@ -83,6 +83,11 @@ const GRAPHQL = {
   },
 };
 
+/** GraphQL's answer for a base branch with a merge queue. */
+const queueGraphql = (queued: boolean) => ({
+  data: { repository: { ...GRAPHQL.data.repository, pullRequest: { isInMergeQueue: queued, isMergeQueueEnabled: true } } },
+});
+
 const opened = (workspace: Workspace) => `${lonca.url}/w/${workspace.id}?token=${lonca.token}`;
 const header = (page: Page) => page.locator('.right-header');
 const named = (label: string) => `Pull request #7: ${/[.…]$/.test(label) ? label : `${label}.`} Opens GitHub.`;
@@ -127,6 +132,7 @@ async function routeWorking(page: Page, sessionIds: string[]): Promise<void> {
 }
 
 const TEXT_3 = 'rgb(138, 134, 129)';
+const TEXT_2 = 'rgb(180, 177, 172)';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -238,6 +244,10 @@ test('keeps the last known state when GitHub can’t be reached, or the workspac
   await expect(status(page).locator('.pr-icon')).toHaveCSS('color', TEXT_3);
   await expect(status(page).locator('.pr-number')).toHaveCSS('color', TEXT_3);
   await page.screenshot({ path: path.join(SHOTS, 'pr-header-unreachable.png'), clip: { x: 1440 - 340, y: 0, width: 340, height: 60 } });
+  // The hover fill is lighter, so the label lightens with it to stay readable.
+  await status(page).hover();
+  await expect(status(page).locator('.pr-label')).toHaveCSS('color', TEXT_2);
+  await page.mouse.move(0, 0);
 
   await lonca.api('POST', `/workspaces/${ready.workspace.id}/stop`);
   await expect(page.locator('.workspace-banner')).toContainText('is stopped');
@@ -326,6 +336,8 @@ test('merges from a dialog that waits for a decision, then offers to archive', a
   await dialog.getByRole('button', { name: 'Squash and merge' }).click();
   await expect(dialog.getByRole('button', { name: 'Merging…' })).toBeDisabled();
   await expect(dialog.getByRole('button', { name: 'Merging…' })).toBeFocused();
+  // Dimmed, but readable: it's the only word of progress in the dialog.
+  await expect(dialog.getByRole('button', { name: 'Merging…' })).toHaveCSS('opacity', '0.55');
   // The spinner on a white button turns in the button's own dark ink.
   await expect(dialog.locator('.button-primary .spinner-arc')).toHaveCSS('stroke', 'rgb(27, 25, 23)');
   await expect(dialog.locator('.button-primary .spinner-track')).toHaveCSS('stroke', 'rgba(27, 25, 23, 0.25)');
@@ -449,7 +461,7 @@ test('warns in the merge dialog of everything the header would, while it still o
   expect(merges(ready)).toBe(0);
 });
 
-test('fits every label that sits beside Merge in the default panel without cutting it short', async ({ page }) => {
+test('fits every label that sits beside Merge without cutting it short, hiding the number first where it must', async ({ page }) => {
   const ready = await create();
   const own = await lonca.api<{ id: string }>('POST', `/workspaces/${ready.workspace.id}/sessions`, {});
   const lead = (await lonca.api<{ sessions: { id: string; workspaceId: string; role?: string }[] }>('GET', '/state')).sessions
@@ -460,6 +472,7 @@ test('fits every label that sits beside Merge in the default panel without cutti
   const cases: [Record<string, unknown>, Partial<Checks>, string][] = [
     [{}, {}, 'Ready to merge'],
     [{ mergeStateStatus: 'UNSTABLE' }, { checks: [{ name: 'a', status: 'failure' }, { name: 'b', status: 'failure' }] }, '2 checks failing'],
+    [{ mergeStateStatus: 'UNSTABLE' }, {}, 'Checks not passing'],
     [{ reviewDecision: 'CHANGES_REQUESTED' }, {}, 'Changes requested'],
     [{}, { local: { head: 'e'.repeat(40), unpushed: 12, uncommitted: 0 } }, '12 not pushed'],
     [{}, { local: null }, 'Local work unknown'],
@@ -467,24 +480,159 @@ test('fits every label that sits beside Merge in the default panel without cutti
     [{}, { local: { head: ready.head, unpushed: 0, uncommitted: 250 } }, '99+ not committed'],
     [{}, { checks: [{ name: 'e2e', status: 'pending' }] }, 'Checks running'],
   ];
-  await page.goto(opened(ready.workspace));
-  for (const [pr, extra, label] of cases) {
-    current.checks = scripted(ready, pr, extra);
-    await refresh(page);
-    await expect(status(page)).toHaveAccessibleName(named(label));
-    await expect(header(page).getByRole('button', { name: 'Merge pull request #7' })).toBeVisible();
-    expect(await cut(), label).toBe(false);
-  }
-  current.checks = scripted(ready, {});
-  for (const [sessions, label] of [[[lead.id], 'Lead is working'], [[own.id], 'An agent is working']] as const) {
+  // The default width, and either side of where the number goes: the last with it, the first without.
+  for (const [width, numbered] of [[340, true], [332, true], [331, false]] as const) {
     await page.unroute('**/api/state');
-    await routeWorking(page, [...sessions]);
+    await page.goto(opened(ready.workspace));
+    // The link's token is only kept once the page has connected, and a reload before then would lose it.
+    await expect(page.getByRole('tab', { name: 'Checks' })).toBeVisible();
+    await page.evaluate(`localStorage.setItem('lonca.size.right', '${width}')`);
     await page.reload();
-    await expect(status(page)).toHaveAccessibleName(named(label));
-    await expect(header(page).getByRole('button', { name: 'Merge pull request #7' })).toBeVisible();
-    expect(await cut(), label).toBe(false);
-    await page.screenshot({ path: path.join(SHOTS, `pr-header-${label.toLowerCase().replaceAll(' ', '-')}.png`), clip: { x: 1440 - 340, y: 0, width: 340, height: 60 } });
+    for (const [pr, extra, label] of cases) {
+      current.checks = scripted(ready, pr, extra);
+      await refresh(page);
+      await expect(status(page)).toHaveAccessibleName(named(label));
+      await expect(header(page).getByRole('button', { name: 'Merge pull request #7' })).toBeVisible();
+      await expect(status(page).locator('.pr-number')).toBeVisible({ visible: numbered });
+      expect(await cut(), `${label} at ${width}px`).toBe(false);
+    }
+    current.checks = scripted(ready, {});
+    for (const [sessions, label] of [[[lead.id], 'Lead is working'], [[own.id], 'An agent is working']] as const) {
+      await page.unroute('**/api/state');
+      await routeWorking(page, [...sessions]);
+      await page.reload();
+      await expect(status(page)).toHaveAccessibleName(named(label));
+      await expect(header(page).getByRole('button', { name: 'Merge pull request #7' })).toBeVisible();
+      expect(await cut(), `${label} at ${width}px`).toBe(false);
+      if (width === 340) {
+        await page.screenshot({ path: path.join(SHOTS, `pr-header-${label.toLowerCase().replaceAll(' ', '-')}.png`), clip: { x: 1440 - 340, y: 0, width: 340, height: 60 } });
+      }
+    }
   }
+});
+
+test('leaves focus where the user moved it while a merge finished', async ({ page }) => {
+  const ready = await create();
+  answer(ready, {
+    'view.json': view(ready),
+    'graphql.json': GRAPHQL,
+    'merge.sleep': '3',
+    'after-view.json': view(ready, { state: 'MERGED', mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }),
+  });
+  await page.goto(opened(ready.workspace));
+  await header(page).getByRole('button', { name: 'Merge pull request #7' }).click();
+  await page.getByRole('dialog', { name: 'Merge #7 into main?' }).getByRole('button', { name: 'Squash and merge' }).click();
+  // Search, opened over the merge dialog while it merges, keeps focus when the merge is done.
+  await page.keyboard.press('Control+k');
+  const search = page.getByRole('textbox', { name: 'Search workspaces, projects and files' });
+  await expect(search).toBeFocused();
+  await expect(page.locator('.toast').filter({ hasText: 'Merged #7 into main.' })).toBeVisible({ timeout: 30000 });
+  await expect(header(page).getByRole('button', { name: 'Archive this workspace' })).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(search).toBeFocused();
+});
+
+test('gives focus to the pull request’s link when the Merge that opened the dialog has gone', async ({ page }) => {
+  const ready = await create();
+  // A base branch with a merge queue reports BLOCKED until a pull request goes through it.
+  answer(ready, {
+    'view.json': view(ready, { mergeStateStatus: 'BLOCKED' }),
+    'graphql.json': queueGraphql(false),
+    'after-graphql.json': queueGraphql(true),
+  });
+  await page.goto(opened(ready.workspace));
+  await expect(status(page)).toHaveAccessibleName(named('Ready to merge'));
+  const merge = header(page).getByRole('button', { name: 'Merge pull request #7' });
+  await merge.click();
+  const dialog = page.getByRole('dialog', { name: 'Merge #7 into main?' });
+  await expect(dialog).toContainText('main uses a merge queue, so GitHub merges #7 from it when it’s ready.');
+  await expect(dialog.getByRole('radiogroup')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Add to merge queue' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('.toast').filter({ hasText: 'GitHub will merge #7 when it’s ready.' })).toBeVisible();
+  await expect(status(page)).toHaveAccessibleName(named('Queued to merge'));
+  await expect(status(page)).toBeFocused();
+
+  // Merged elsewhere, by an agent perhaps, while the dialog was open.
+  answer(ready, { 'view.json': view(ready), 'graphql.json': GRAPHQL, 'after-graphql.json': null });
+  await refresh(page);
+  await expect(status(page)).toHaveAccessibleName(named('Ready to merge'));
+  await merge.click();
+  await expect(dialog).toBeVisible();
+  answer(ready, { 'view.json': view(ready, { state: 'MERGED', mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }) });
+  // Coming back to the window reads it again.
+  await page.waitForTimeout(2500);
+  await page.evaluate('window.dispatchEvent(new Event("focus"))');
+  await expect(status(page)).toHaveAccessibleName(named('Merged'));
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(status(page)).toBeFocused();
+  expect(merges(ready)).toBe(1);
+});
+
+test('stops showing a merge as under way once the workspace stops, or once it’s given up on', async ({ page }) => {
+  const ready = await create();
+  answer(ready, { 'view.json': view(ready), 'graphql.json': GRAPHQL });
+  // Time runs as usual, and can be moved on.
+  await page.clock.install();
+  await page.goto(opened(ready.workspace));
+  // gh finishes, but GitHub still says it's open.
+  const mergeLeftPending = async () => {
+    await header(page).getByRole('button', { name: 'Merge pull request #7' }).click();
+    await page.getByRole('dialog', { name: 'Merge #7 into main?' }).getByRole('button', { name: 'Squash and merge' }).click();
+    await expect(page.locator('.toast').filter({ hasText: 'GitHub accepted the merge, but #7 isn’t merged yet. Lonca keeps checking.' }).first()).toBeVisible();
+    await expect(status(page)).toHaveAccessibleName(named('Merging…'));
+  };
+  await mergeLeftPending();
+  // GitHub usually shows it in seconds. After two minutes, Lonca stops waiting for it.
+  await page.clock.fastForward('02:01');
+  await expect(status(page)).toHaveAccessibleName(named('Ready to merge'));
+
+  await mergeLeftPending();
+  await lonca.api('POST', `/workspaces/${ready.workspace.id}/stop`);
+  await expect(page.locator('.workspace-banner')).toContainText('is stopped');
+  await expect(status(page)).toHaveAccessibleName(named('Open'));
+  await expect(status(page)).toHaveClass(/is-stale/);
+});
+
+test('reads only while the page is visible, and once for a return that brings both focus and visibility', async ({ page }) => {
+  const ready = await create();
+  answer(ready, { 'view.json': view(ready), 'graphql.json': GRAPHQL });
+  // The page starts hidden, as one opened in a background tab is.
+  await page.addInitScript(`
+    let hidden = true;
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (hidden ? 'hidden' : 'visible') });
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+    window.setHidden = (value) => {
+      hidden = value;
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+  `);
+  let reads = 0;
+  page.on('request', (request) => {
+    if (request.url().endsWith(`/api/workspaces/${ready.workspace.id}/checks`)) reads++;
+  });
+  await page.goto(opened(ready.workspace));
+  await expect(page.locator('[data-step="sandbox"]')).toContainText('Running in its own virtual machine');
+  await page.waitForTimeout(3000);
+  expect(reads).toBe(0);
+
+  await page.evaluate('window.setHidden(false)');
+  await expect(status(page)).toHaveAccessibleName(named('Ready to merge'));
+  expect(reads).toBe(1);
+  // Coming back to a window usually brings both events together. They read it once between them.
+  await page.waitForTimeout(2500);
+  await page.evaluate('window.dispatchEvent(new Event("focus")); document.dispatchEvent(new Event("visibilitychange"))');
+  await page.waitForTimeout(1500);
+  expect(reads).toBe(2);
+  // Even when the second comes once the first one's read is done.
+  await page.waitForTimeout(1500);
+  await page.evaluate('window.dispatchEvent(new Event("focus"))');
+  await expect.poll(() => reads).toBe(3);
+  await page.waitForTimeout(600);
+  await page.evaluate('document.dispatchEvent(new Event("visibilitychange"))');
+  await page.waitForTimeout(1000);
+  expect(reads).toBe(3);
 });
 
 test.describe('on a phone', () => {
@@ -499,9 +647,26 @@ test.describe('on a phone', () => {
     await expect(toggle.locator('.panel-dot')).toBeVisible();
     await toggle.tap();
     const merge = header(page).getByRole('button', { name: 'Merge pull request #7' });
-    // Left of the corner that the panel button's touch area reaches into.
-    const box = (await merge.boundingBox())!;
-    expect(box.x + box.width).toBeLessThan(390 - 60);
+    // Below the touch areas of the header's buttons, which reach down into the panel, at either width.
+    const clearance = () => page.evaluate(`(() => {
+      const merge = document.querySelector('.right-header button[aria-label="Merge pull request #7"]').getBoundingClientRect();
+      const reach = [...document.querySelectorAll('.workspace-header button')].map((button) => {
+        const box = button.getBoundingClientRect();
+        if (box.width === 0) return 0;
+        const after = getComputedStyle(button, '::after');
+        const below = after.content !== 'none' && after.position === 'absolute' ? Math.max(0, -parseFloat(after.bottom) || 0) : 0;
+        return box.bottom + below;
+      });
+      return { top: merge.top, reach: Math.max(...reach), buttons: reach.filter((bottom) => bottom > 0).length };
+    })()`) as Promise<{ top: number; reach: number; buttons: number }>;
+    for (const width of [390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect(merge).toBeVisible();
+      const { top, reach, buttons } = await clearance();
+      expect(buttons, `header buttons at ${width}px`).toBeGreaterThan(2);
+      expect(top, `Merge at ${width}px`).toBeGreaterThanOrEqual(reach);
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
     await merge.tap();
 
     const dialog = page.getByRole('dialog', { name: 'Merge #7 into main?' });
@@ -518,6 +683,22 @@ test.describe('on a phone', () => {
     await dialog.getByRole('button', { name: 'Cancel' }).tap();
     await expect(dialog).toBeHidden();
     expect(merges(ready)).toBe(0);
+  });
+
+  test('keeps a long base branch’s name inside the merge sheet', async ({ page }) => {
+    const ready = await create();
+    // One long word, with nowhere a browser would break it by itself.
+    const base = 'release_candidate_for_the_customer_integration_environment_20261109';
+    await routeChecks(page, ready, { checks: scripted(ready, { baseRefName: base }) });
+    await page.goto(opened(ready.workspace));
+    await page.getByRole('button', { name: 'Show the side panel. #7 is ready to merge.' }).tap();
+    await header(page).getByRole('button', { name: 'Merge pull request #7' }).tap();
+    const dialog = page.getByRole('dialog', { name: `Merge #7 into ${base}?` });
+    await expect(dialog).toBeVisible();
+    const close = (await dialog.locator('.modal-header').getByRole('button', { name: 'Close' }).boundingBox())!;
+    expect(close.x + close.width).toBeLessThanOrEqual(390);
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: path.join(SHOTS, 'pr-merge-sheet-long-base.png') });
   });
 
   test('a double tap on Merge can’t land on what opens under it', async ({ page }) => {

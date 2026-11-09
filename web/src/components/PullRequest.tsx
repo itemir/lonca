@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Archive, CircleCheck, CircleDashed, CircleX, Crown, ExternalLink, FileDiff, FilePen, FileQuestionMark, GitCompare, GitCompareArrows, GitMerge,
+  Archive, CircleAlert, CircleCheck, CircleDashed, CircleX, Crown, ExternalLink, FileDiff, FilePen, FileQuestionMark, GitCompare, GitCompareArrows, GitMerge,
   GitMergeConflict, GitPullRequest, GitPullRequestArrow, GitPullRequestClosed, GitPullRequestDraft, Lock, TriangleAlert, Upload, UserRoundSearch, Users,
   type LucideIcon,
 } from 'lucide-react';
@@ -10,7 +10,7 @@ import { safeUrl } from '../format.ts';
 import { currentPrStatus, mergePr, prEntry, refreshPr, setMergeDialogOpen, usePrStatus, usePrStore } from '../pr.ts';
 import { useStore } from '../store.ts';
 import { CloseWorkspaceDialog } from './CloseWorkspaceDialog.tsx';
-import { Modal, Spinner } from './ui.tsx';
+import { Modal, Spinner, topDialog } from './ui.tsx';
 
 // Every state has an icon and a word of its own: green and red are hard to tell apart for many people.
 const ICONS: Record<PrKind, LucideIcon> = {
@@ -30,6 +30,7 @@ const ICONS: Record<PrKind, LucideIcon> = {
   behind: GitCompareArrows,
   'checks-running': CircleDashed,
   blocked: Lock,
+  unstable: CircleAlert,
   'not-pushed': Upload,
   'local-unknown': FileQuestionMark,
   differs: GitCompare,
@@ -114,13 +115,19 @@ const METHOD_LABELS: Record<MergeMethod, string> = { squash: 'Squash', merge: 'M
 const CONFIRM_LABELS: Record<MergeMethod, string> = { squash: 'Squash and merge', merge: 'Create a merge commit', rebase: 'Rebase and merge' };
 
 
-function MergeDialog({ workspace, snapshot, onClose }: { workspace: Workspace; snapshot: MergeSnapshot; onClose: (merged: boolean) => void }) {
+function MergeDialog({ workspace, snapshot, onClose }: {
+  workspace: Workspace;
+  snapshot: MergeSnapshot;
+  /** `toArchive` when focus should go on to Archive: it's merged, and the user is still here in the dialog. */
+  onClose: (toArchive: boolean) => void;
+}) {
   const { pr } = snapshot;
   const methods = allowedMethods(snapshot.repo);
   const [method, setMethod] = useState<MergeMethod>(() => defaultMethod(snapshot.repo));
   const [failure, setFailure] = useState<string | null>(null);
   const merging = usePrStore((store) => store.entries[workspace.id]?.merging ?? false);
   const open = useRef(true);
+  const body = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setMergeDialogOpen(workspace.id, true);
@@ -135,8 +142,14 @@ function MergeDialog({ workspace, snapshot, onClose }: { workspace: Workspace; s
     const attempt = await mergePr(workspace, { number: pr.number, headOid: pr.headRefOid, base: pr.baseRefName, method });
     // Closed while it merged: the toast and the header say how it went.
     if (!open.current) return;
-    if (attempt.outcome === 'failed' || attempt.outcome === 'unknown') setFailure(attempt.message ?? 'Nothing was merged.');
-    else onClose(attempt.outcome === 'merged');
+    if (attempt.outcome === 'failed' || attempt.outcome === 'unknown') {
+      setFailure(attempt.message ?? 'Nothing was merged.');
+      return;
+    }
+    // Only if focus is still here, with nothing opened over the dialog, such as Search, while it merged.
+    const dialog = body.current?.closest('[role="dialog"]');
+    const here = Boolean(dialog) && dialog === topDialog() && dialog!.contains(document.activeElement);
+    onClose(attempt.outcome === 'merged' && here);
   };
 
   const base = pr.baseRefName;
@@ -146,7 +159,7 @@ function MergeDialog({ workspace, snapshot, onClose }: { workspace: Workspace; s
         <span>{pr.title}</span>
         <code>{workspace.branch} → {base}</code>
       </div>
-      <div className="confirm-body merge-body">
+      <div className="confirm-body merge-body" ref={body}>
         <p>{checksSummary(snapshot.checks)}</p>
         {snapshot.queue ? (
           <p>{base} uses a merge queue, so GitHub merges #{pr.number} from it when it’s ready.</p>
@@ -204,6 +217,7 @@ export function PrHeader({ workspace, project, hasWork, onCreatePr }: {
   const [merging, setMerging] = useState<MergeSnapshot | null>(null);
   const [archiving, setArchiving] = useState(false);
   const archive = useRef<HTMLButtonElement>(null);
+  const link = useRef<HTMLAnchorElement>(null);
   const toast = useStore((store) => store.toast);
 
   const openMerge = async () => {
@@ -226,10 +240,18 @@ export function PrHeader({ workspace, project, hasWork, onCreatePr }: {
     }
   };
 
-  const closeMerge = (merged: boolean) => {
+  const closeMerge = (toArchive: boolean) => {
     setMerging(null);
-    // Only straight after the user's own merge, with this workspace in front of them.
-    if (merged) requestAnimationFrame(() => archive.current?.focus());
+    requestAnimationFrame(() => {
+      // Only straight after the user's own merge, with this workspace in front of them.
+      if (toArchive && archive.current) {
+        archive.current.focus();
+        return;
+      }
+      // The dialog gives focus back to Merge, but Merge goes once it's queued or merged by someone
+      // else. The pull request's link stays. Focus that went somewhere else went there on purpose.
+      if (!document.activeElement || document.activeElement === document.body) link.current?.focus();
+    });
   };
 
   if (status.kind === 'none' || !status.pr) {
@@ -245,6 +267,7 @@ export function PrHeader({ workspace, project, hasWork, onCreatePr }: {
   return (
     <>
       <a
+        ref={link}
         className={`pr-status pr-tone-${status.tone} ${status.stale ? 'is-stale' : ''}`}
         href={safeUrl(pr.url)}
         target="_blank"

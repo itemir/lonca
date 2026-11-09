@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  allowedMethods, defaultMethod, latestKnown, mergeBlocker, type MergeSnapshot, mergeWarnings, prStatus, type PrStatusInput, whoIsWorking,
+  allowedMethods, defaultMethod, latestKnown, mergeBlocker, type MergeSnapshot, mergeWarnings, prStatus, type PrStatusInput, refreshInterval,
+  stillAwaiting, whoIsWorking,
 } from '../../shared/pr.ts';
 import type { CheckRun, Checks, MergeSettings, PrSummary, PullRequest, Session } from '../../shared/types.ts';
 
@@ -228,6 +229,94 @@ describe('the header’s pull request status', () => {
       // The longest are "An agent is working", "Differs from the PR" and "99+ checks failing".
       expect(result.label.length).toBeLessThanOrEqual(19);
     }
+  });
+});
+
+describe('evidence for ready', () => {
+  it('takes a merge state that’s missing or new to Lonca as one GitHub is still working out', () => {
+    for (const mergeStateStatus of [null, '', 'SOMETHING_NEW', 'clean-ish']) {
+      expect(status({ checks: checks({ mergeStateStatus }) }), String(mergeStateStatus)).toMatchObject({ kind: 'checking', label: 'Checking…', merge: null });
+    }
+    expect(status({ checks: checks({ mergeStateStatus: 'clean' }) })).toMatchObject({ kind: 'ready', merge: 'primary' });
+  });
+
+  it('doesn’t call it ready when GitHub says a check isn’t passing, even with none listed as failing', () => {
+    expect(status({ checks: checks({ mergeStateStatus: 'UNSTABLE' }) })).toMatchObject({
+      kind: 'unstable', label: 'Checks not passing', tone: 'waiting', merge: 'plain',
+      detail: 'GitHub says not every check passed, though it would still merge it.',
+    });
+  });
+
+  it('treats a merge state of DRAFT as a draft', () => {
+    expect(status({ checks: checks({ mergeStateStatus: 'DRAFT', isDraft: false }) })).toMatchObject({ kind: 'draft', merge: null });
+  });
+});
+
+describe('a base branch with a merge queue', () => {
+  const queue = { queue: { enabled: true, queued: false } };
+
+  it('is ready for the queue when GitHub reports BLOCKED and nothing else is known to stand in the way', () => {
+    const ready = status({ checks: checks({ mergeStateStatus: 'BLOCKED' }, queue) });
+    expect(ready).toMatchObject({ kind: 'ready', label: 'Ready to merge', merge: 'primary' });
+    expect(mergeBlocker(checks({ mergeStateStatus: 'BLOCKED' }, queue))).toBeNull();
+  });
+
+  it('keeps the reasons that would hold it out of the queue', () => {
+    const blocked = (pr: Partial<PullRequest>, extra: Partial<Checks> = {}) => status({ checks: checks({ mergeStateStatus: 'BLOCKED', ...pr }, { ...queue, ...extra }) });
+    expect(blocked({}, { checks: [run('failure')] })).toMatchObject({ kind: 'failing', merge: null });
+    expect(blocked({}, { checks: [run('pending')] })).toMatchObject({ kind: 'checks-running', merge: null });
+    expect(blocked({ reviewDecision: 'REVIEW_REQUIRED' })).toMatchObject({ kind: 'needs-review', merge: null });
+    expect(blocked({ reviewDecision: 'CHANGES_REQUESTED' })).toMatchObject({ kind: 'changes-requested', merge: null });
+    expect(blocked({ mergeable: 'CONFLICTING' })).toMatchObject({ kind: 'conflicts', merge: null });
+    expect(blocked({ isDraft: true })).toMatchObject({ kind: 'draft', merge: null });
+    expect(blocked({ autoMergeRequest: true })).toMatchObject({ kind: 'auto-merge', merge: null });
+    expect(status({ checks: checks({ mergeStateStatus: 'BEHIND' }, queue) })).toMatchObject({ kind: 'behind', merge: null });
+    expect(status({ checks: checks({ mergeStateStatus: 'BLOCKED' }, { queue: { enabled: true, queued: true } }) })).toMatchObject({ kind: 'queued', merge: null });
+    expect(status({ checks: checks({ mergeStateStatus: 'BLOCKED' }, { ...queue, repo: { ...repo, viewerPermission: 'READ' } }) }).merge).toBeNull();
+    // Lonca's own reasons still apply, and still leave Merge on offer.
+    expect(status({ checks: checks({ mergeStateStatus: 'BLOCKED' }, { ...queue, local: { head: HEAD, unpushed: 0, uncommitted: 2 } }) }))
+      .toMatchObject({ kind: 'not-committed', merge: 'plain' });
+  });
+
+  it('is blocked by a rule when there’s no queue', () => {
+    expect(status({ checks: checks({ mergeStateStatus: 'BLOCKED' }) })).toMatchObject({ kind: 'blocked', merge: null });
+  });
+});
+
+describe('a merge GitHub accepted but hasn’t shown yet', () => {
+  const pending = { outcome: 'pending', number: 7, head: HEAD };
+
+  it('keeps waiting until a read shows it done or changed, or it’s given up on', () => {
+    expect(stillAwaiting(pending, checks())).toBe(true);
+    expect(stillAwaiting(pending, null)).toBe(true);
+    expect(stillAwaiting({ ...pending, expired: true }, checks())).toBe(false);
+    expect(stillAwaiting(pending, checks({ state: 'MERGED' }))).toBe(false);
+    expect(stillAwaiting(pending, checks({ headRefOid: 'c'.repeat(40) }))).toBe(false);
+    expect(stillAwaiting({ ...pending, outcome: 'queued' }, checks())).toBe(false);
+    expect(stillAwaiting(null, checks())).toBe(false);
+  });
+
+  it('shows as merging only while the pull request can be read', () => {
+    expect(status({ awaitingMerge: true })).toMatchObject({ kind: 'merging', merge: null, refreshMs: 5000 });
+    // Stopped: what's known, rather than a merge that seems to go on for ever.
+    expect(status({ awaitingMerge: true, known: known(), workspace: { status: 'stopped', createdAt: CREATED } }))
+      .toMatchObject({ kind: 'open', label: 'Open', stale: { why: 'stopped' } });
+    expect(status({ awaitingMerge: true, checks: checks({ state: 'MERGED' }) })).toMatchObject({ kind: 'merged', archive: true });
+  });
+});
+
+describe('how often it’s read', () => {
+  it('reads every 5 seconds while GitHub settles something, every 15 while checks or a queue run, and every 30 otherwise', () => {
+    expect(refreshInterval(checks(), false)).toBe(30000);
+    expect(refreshInterval(null, false)).toBe(30000);
+    expect(refreshInterval(checks({ state: 'MERGED', mergeStateStatus: 'UNKNOWN' }), false)).toBe(30000);
+    expect(refreshInterval(checks(), true)).toBe(5000);
+    expect(refreshInterval(checks({ mergeable: 'UNKNOWN' }), false)).toBe(5000);
+    expect(refreshInterval(checks({ mergeStateStatus: 'UNKNOWN' }), false)).toBe(5000);
+    expect(refreshInterval(checks({ mergeStateStatus: null }), false)).toBe(5000);
+    expect(refreshInterval(checks({}, { checks: [run('pending')] }), false)).toBe(15000);
+    expect(refreshInterval(checks({}, { queue: { enabled: true, queued: true } }), false)).toBe(15000);
+    expect(refreshInterval(checks({ autoMergeRequest: true }), false)).toBe(15000);
   });
 });
 

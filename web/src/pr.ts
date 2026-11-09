@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { create } from 'zustand';
-import { latestKnown, prStatus, refreshInterval, whoIsWorking, type PrStatus } from '../../shared/pr.ts';
+import { latestKnown, prStatus, refreshInterval, stillAwaiting, whoIsWorking, type PrStatus } from '../../shared/pr.ts';
 import type { Checks, MergeMethod, MergeOutcome, Workspace } from '../../shared/types.ts';
 import { ApiError, api } from './api.ts';
 import { useStore } from './store.ts';
@@ -14,6 +14,8 @@ export interface MergeAttempt {
   number: number;
   head: string;
   at: number;
+  /** For a merge GitHub accepted but hasn't shown done: waiting for it has been given up. */
+  expired?: boolean;
 }
 
 export interface PrEntry {
@@ -80,15 +82,10 @@ export async function refreshPr(id: string, options: { force?: boolean } = {}): 
   update(id, (entry) => ({ inFlight: entry.inFlight - 1, ...shown(entry, request, checks) }));
 }
 
-// GitHub has said it'll merge, so offering Merge again would only confuse. It usually catches up in seconds.
+// GitHub has said it'll merge, which it usually shows within seconds. After this long, stop waiting.
 const PENDING_MS = 2 * 60 * 1000;
 
-function awaitingMerge(entry: PrEntry): boolean {
-  const last = entry.lastMerge;
-  if (!last || last.outcome !== 'pending' || Date.now() - last.at > PENDING_MS) return false;
-  const pr = entry.checks?.pr;
-  return !pr || (pr.state === 'OPEN' && pr.number === last.number && pr.headRefOid === last.head);
-}
+const awaitingMerge = (entry: PrEntry) => stillAwaiting(entry.lastMerge, entry.checks);
 
 function statusOf(workspace: Workspace, entry: PrEntry, working: ReturnType<typeof whoIsWorking>): PrStatus {
   return prStatus({
@@ -96,7 +93,8 @@ function statusOf(workspace: Workspace, entry: PrEntry, working: ReturnType<type
     known: latestKnown(entry.good, workspace.pr),
     workspace,
     working,
-    merging: entry.merging || awaitingMerge(entry),
+    merging: entry.merging,
+    awaitingMerge: awaitingMerge(entry),
   });
 }
 
@@ -146,6 +144,10 @@ export async function mergePr(workspace: Workspace, choice: MergeChoice): Promis
   // Counted as sent now, so that a read which started before this answer can't replace it.
   const request = ++sequence;
   update(id, (entry) => ({ merging: false, lastMerge: attempt, ...(checks ? shown(entry, request, checks) : {}) }));
+  // A change of state, so whatever shows it notices, even with nothing being read by then.
+  if (attempt.outcome === 'pending') {
+    setTimeout(() => update(id, (entry) => (entry.lastMerge === attempt ? { lastMerge: { ...attempt, expired: true } } : null)), PENDING_MS);
+  }
   const { toast } = useStore.getState();
   if (attempt.outcome === 'merged') toast(`Merged #${choice.number} into ${choice.base}.`);
   else if (attempt.outcome === 'queued' || attempt.outcome === 'pending' || !prEntry(id).dialogOpen) toast(attempt.message ?? '');
@@ -157,7 +159,12 @@ const BEAT_MS = 1000;
 // Focus and visibility can both fire for one return to the page.
 const SETTLE_MS = 2000;
 
-/** Keeps the pull request of the workspace on screen up to date. No other workspace is read. */
+const visible = () => document.visibilityState === 'visible';
+
+/**
+ * Keeps the pull request of the workspace on screen up to date. No other workspace is read, and
+ * nothing is read while the page is hidden: coming back to it reads it again.
+ */
 export function usePrPolling(id: string | undefined, running: boolean): void {
   const githubToken = useStore((store) => store.secrets.githubToken);
   const working = useStore((store) => (id ? whoIsWorking(store.sessions, id) : null));
@@ -165,14 +172,13 @@ export function usePrPolling(id: string | undefined, running: boolean): void {
 
   // A turn that just ended may have pushed.
   useEffect(() => {
-    if (id && running && wasWorking.current && !working) void refreshPr(id);
+    if (id && running && wasWorking.current && !working && visible()) void refreshPr(id);
     wasWorking.current = working;
   }, [id, running, working]);
 
   useEffect(() => {
     if (!id || !running) return;
-    const visible = () => document.visibilityState === 'visible';
-    void refreshPr(id, { force: true });
+    if (visible()) void refreshPr(id, { force: true });
     const beat = setInterval(() => {
       const entry = prEntry(id);
       const due = refreshInterval(entry.checks, entry.merging || awaitingMerge(entry));

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { predates, summarize } from '../shared/pr.ts';
+import { mergeState, predates, summarize } from '../shared/pr.ts';
 import type {
   ChangeSet, ChangedFile, CheckRun, Checks, DiffStat, FileContent, FileEntry, LocalState, MergeSettings, PrSummary, PullRequest, SearchHit, Workspace,
 } from '../shared/types.ts';
@@ -284,9 +284,17 @@ const PR_FIELDS = [
   'headRefOid', 'baseRefName', 'createdAt', 'mergedAt', 'closedAt', 'autoMergeRequest',
 ].join(',');
 
+// Every gh call names github.com, so neither the checkout nor a project's GH_HOST can send it elsewhere.
+export const GITHUB_HOST = 'github.com';
+
+/** The repository as gh takes it, host included. */
+export function repoArg(repo: { owner: string; name: string }): string {
+  return `${GITHUB_HOST}/${repo.owner}/${repo.name}`;
+}
+
 /** The view command, which names the repository so that nothing an agent set in the checkout can redirect it. */
-export function prViewArgs(branch: string, repo: string): string[] {
-  return ['gh', 'pr', 'view', branch, '--repo', repo, '--json', PR_FIELDS];
+export function prViewArgs(branch: string, repo: { owner: string; name: string }): string[] {
+  return ['gh', 'pr', 'view', branch, '--repo', repoArg(repo), '--json', PR_FIELDS];
 }
 
 // A query, never a mutation. `gh pr view` doesn't say whether the base branch has a merge queue.
@@ -299,7 +307,10 @@ const MERGE_SETTINGS_QUERY = `query($owner: String!, $name: String!, $number: In
 
 export function mergeSettingsArgs(owner: string, name: string, number: number): string[] {
   // -f sends the names as strings even when they look like numbers, which -F wouldn't.
-  return ['gh', 'api', 'graphql', '-f', `query=${MERGE_SETTINGS_QUERY}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${number}`];
+  return [
+    'gh', 'api', 'graphql', '--hostname', GITHUB_HOST,
+    '-f', `query=${MERGE_SETTINGS_QUERY}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${number}`,
+  ];
 }
 
 // Polled in the background too, so it must never take locks an agent's git commands need.
@@ -336,7 +347,7 @@ export function parsePullRequest(raw: any): { pr: PullRequest; checks: CheckRun[
     isDraft: raw.isDraft === true,
     reviewDecision: optional(raw.reviewDecision),
     mergeable: optional(raw.mergeable),
-    mergeStateStatus: optional(raw.mergeStateStatus),
+    mergeStateStatus: mergeState(raw.mergeStateStatus),
     headRefOid: SHA.test(text(raw.headRefOid)) ? raw.headRefOid : '',
     baseRefName: text(raw.baseRefName),
     createdAt: text(raw.createdAt),
@@ -381,9 +392,11 @@ function emptyChecks(github: Checks['github'], checkedAt: number, error?: string
   return { github, ...(error ? { error } : {}), pr: null, checks: [], repo: null, queue: null, local: null, checkedAt };
 }
 
-// When each workspace's saved pull request was read. A slow read that began before a newer one
-// was saved, such as a poll that overlapped a merge, must not put back what it saw.
-const prReadAt = new Map<string, number>();
+// Reads are numbered as they begin, before any of them waits on anything. Two that begin in the
+// same millisecond still have an order, so a slow read that began first, such as a poll that
+// overlapped a merge, can't put back what it saw over a newer one. Times are only for showing.
+let reads = 0;
+const latestRead = new Map<string, number>();
 
 function sameSummary(a: PrSummary | null, b: PrSummary | null): boolean {
   if (!a || !b) return a === b;
@@ -392,10 +405,10 @@ function sameSummary(a: PrSummary | null, b: PrSummary | null): boolean {
 }
 
 /** Keeps the latest read on the workspace, for when GitHub or its virtual machine can't be asked. */
-function rememberPr(workspace: Workspace, pr: PullRequest | null, startedAt: number): void {
+function rememberPr(workspace: Workspace, pr: PullRequest | null, read: number, startedAt: number): void {
   // Publishing a workspace that's since been deleted would bring it back on every page.
-  if (getWorkspace(workspace.id) !== workspace || (prReadAt.get(workspace.id) ?? 0) > startedAt) return;
-  prReadAt.set(workspace.id, startedAt);
+  if (getWorkspace(workspace.id) !== workspace || (latestRead.get(workspace.id) ?? 0) > read) return;
+  latestRead.set(workspace.id, read);
   const next = pr ? summarize(pr, startedAt) : null;
   const current = workspace.pr ?? null;
   if (sameSummary(current, next)) {
@@ -409,6 +422,7 @@ function rememberPr(workspace: Workspace, pr: PullRequest | null, startedAt: num
 }
 
 export async function getChecks(workspace: Workspace): Promise<Checks> {
+  const read = ++reads;
   const startedAt = Date.now();
   const project = getProject(workspace.projectId);
   const repo = parseGithubRepo(project?.remoteUrl ?? null);
@@ -417,11 +431,11 @@ export async function getChecks(workspace: Workspace): Promise<Checks> {
   const sandbox = await runningSandbox(workspace);
   const env = execEnv(project);
   try {
-    const result = await exec(sandbox, prViewArgs(workspace.branch, `${repo.owner}/${repo.name}`), { workdir: workspace.path, env, timeoutMs: 30000 });
+    const result = await exec(sandbox, prViewArgs(workspace.branch, repo), { workdir: workspace.path, env, timeoutMs: 30000 });
     if (result.code !== 0) {
       const message = result.stderr.toString('utf8').trim();
       if (/no pull requests found/i.test(message)) {
-        rememberPr(workspace, null, startedAt);
+        rememberPr(workspace, null, read, startedAt);
         return emptyChecks('connected', startedAt);
       }
       // Not the same as having no pull request, which would offer to open another.
@@ -437,7 +451,7 @@ export async function getChecks(workspace: Workspace): Promise<Checks> {
     const { pr, checks } = parsed;
     // A branch name can come back after its workspace is deleted, and with it that workspace's pull request.
     if (predates(pr, workspace.createdAt)) {
-      rememberPr(workspace, null, startedAt);
+      rememberPr(workspace, null, read, startedAt);
       return emptyChecks('connected', startedAt);
     }
     const [settings, local] = await Promise.all([
@@ -448,7 +462,7 @@ export async function getChecks(workspace: Workspace): Promise<Checks> {
       exec(sandbox, ['bash', '-c', LOCAL_STATE_SCRIPT, 'lonca-pr-local', pr.headRefOid], { workdir: workspace.path, timeoutMs: 30000 })
         .then((answer) => (answer.code === 0 ? parseLocalState(answer.stdout.toString('utf8')) : null), () => null),
     ]);
-    rememberPr(workspace, pr, startedAt);
+    rememberPr(workspace, pr, read, startedAt);
     return {
       github: 'connected',
       pr,

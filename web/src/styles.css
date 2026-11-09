@@ -202,8 +202,9 @@ code { font-family: var(--mono); font-size: 0.93em; }
 
 .button:hover:not(:disabled, [aria-disabled='true']) { background: var(--hover); }
 /* aria-disabled for a button that has to keep focus while it can't be pressed, such as Merge while it merges. */
-.button:disabled, .button[aria-disabled='true'] { opacity: 0.5; }
-.button[aria-disabled='true'] { cursor: default; }
+.button:disabled { opacity: 0.5; }
+/* A little stronger, since "Merging…" is the only word of progress there is: 5:1 on the panel. */
+.button[aria-disabled='true'] { opacity: 0.55; cursor: default; }
 .button-small { height: 26px; padding: 0 9px; font-size: 12.5px; border-radius: 6px; }
 .button-primary { background: var(--text); border-color: var(--text); color: #1b1917; }
 .button-primary:hover:not(:disabled, [aria-disabled='true']) { background: #fff; }
@@ -308,7 +309,8 @@ code { font-family: var(--mono); font-size: 0.93em; }
   padding: 12px 12px 12px 18px;
 }
 
-.modal-header h2 { font-size: 14.5px; font-weight: 600; }
+/* A title can name a branch, which can be one long word. It wraps rather than push Close away. */
+.modal-header h2 { min-width: 0; font-size: 14.5px; font-weight: 600; overflow-wrap: anywhere; }
 .modal-body { padding: 0 18px 18px; overflow: auto; }
 .confirm-body { color: var(--text-2); }
 
@@ -337,7 +339,7 @@ code { font-family: var(--mono); font-size: 0.93em; }
 @keyframes tap-guard { from { pointer-events: none; } }
 .sheet-dialog .modal-actions { animation: tap-guard 0s 350ms backwards; }
 
-.merge-body { display: flex; flex-direction: column; gap: 10px; }
+.merge-body { display: flex; flex-direction: column; gap: 10px; overflow-wrap: anywhere; }
 .merge-body .form-error { margin: 0; }
 
 /* Forms */
@@ -1459,11 +1461,13 @@ a.crumb:hover { color: var(--text); }
 .pr-tone-muted .pr-icon { color: var(--text-3); }
 /* Dimmed by colour rather than opacity, which would take the number below what's readable. */
 .pr-status.is-stale .pr-label, .pr-status.is-stale .pr-icon { color: var(--text-3); }
+/* The hover fill is lighter, and grey on it would be too faint to read. */
+.pr-status.is-stale:hover .pr-label { color: var(--text-2); }
 
 /* Labels are short, but a narrow panel still needs the room. The link's name keeps the number. */
 .pr-action { flex: none; margin-left: auto; }
 
-@container pr-header (max-width: 290px) {
+@container pr-header (max-width: 310px) {
   .pr-status .pr-number, .pr-action > svg:not(.spinner) { display: none; }
 }
 
@@ -2303,6 +2307,12 @@ a.home-row:hover { background: var(--panel); }
   .banner-actions .button, .add-sign-in { min-height: 44px; }
   .sign-in-switch { min-height: 44px; align-items: center; padding-bottom: 6px; }
   .sign-in-menu .menu-trigger { width: 44px; height: 44px; }
+}
+
+/* The floating panel starts right under the header, whose buttons' touch areas below reach into it.
+   Its first row starts below them, so a tap meant for one of those can't land on Merge. */
+@media (max-width: 1000px) and (hover: none), (max-width: 1000px) and (pointer: coarse) {
+  .right-header { height: calc(var(--header) + 8px); padding-top: 8px; }
 }
 
 /* Fingers need bigger targets than the dense layout gives them. */
