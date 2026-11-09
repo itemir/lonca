@@ -493,6 +493,15 @@ test('warns in the merge dialog of everything the header would, while it still o
   ]);
   await page.screenshot({ path: path.join(SHOTS, 'pr-merge-dialog-warnings.png') });
   await dialog.getByRole('button', { name: 'Cancel' }).click();
+
+  // GitHub says a check isn't passing, though the one it listed passed.
+  current.checks = scripted(ready, { mergeStateStatus: 'UNSTABLE' });
+  await refresh(page);
+  await expect(status(page)).toHaveAccessibleName(named('Checks not passing'));
+  await header(page).getByRole('button', { name: 'Merge pull request #7' }).click();
+  await expect(dialog).toContainText('1 check passed');
+  await expect(dialog.locator('.close-warning')).toHaveText(['GitHub says not every check passed, though it would still merge it.']);
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
   expect(merges(ready)).toBe(0);
 });
 

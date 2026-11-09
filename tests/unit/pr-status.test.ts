@@ -140,10 +140,30 @@ describe('the header’s pull request status', () => {
     ['the Lead working', { working: 'lead' }, { kind: 'lead-working', label: 'Lead is working', merge: 'plain' }],
     ['an agent working', { working: 'agent' }, { kind: 'agent-working', label: 'An agent is working' }],
     ['hooks to run', { checks: checks({ mergeStateStatus: 'HAS_HOOKS' }) }, { kind: 'ready', merge: 'primary' }],
+    ['a check GitHub says isn’t passing, with none listed failing', { checks: checks({ mergeStateStatus: 'UNSTABLE' }) }, {
+      kind: 'unstable', label: 'Checks not passing', merge: 'plain',
+    }],
+    ['mergeability still being worked out, with the merge state known', { checks: checks({ mergeable: 'UNKNOWN' }) }, {
+      kind: 'checking', label: 'Checking…', refreshMs: 5000, merge: 'plain',
+    }],
   ];
 
   it.each(rows)('handles %s', (_name, input, expected) => {
     expect(status(input)).toMatchObject(expected);
+  });
+
+  // One reason a row. Wherever the header offers Merge beside one, the merge dialog has to say it too.
+  it('leaves nothing out of the merge dialog that it says beside Merge', () => {
+    const offered = rows.filter(([, input]) => {
+      const shown = status(input);
+      return shown.merge !== null && shown.kind !== 'ready';
+    });
+    const calmer = offered.filter(([, input]) => {
+      const read = input.checks ?? checks();
+      return mergeWarnings({ pr: read.pr!, checks: read.checks, repo: read.repo, local: read.local, working: input.working ?? null }).length === 0;
+    });
+    expect(offered.length).toBeGreaterThan(10);
+    expect(calmer.map(([name]) => name)).toEqual([]);
   });
 
   it('never says ready without a local comparison', () => {
@@ -318,6 +338,14 @@ describe('the merge dialog’s warnings', () => {
   it('says when changes were requested and no rule stops the merge', () => {
     expect(mergeWarnings(snapshot({}, { reviewDecision: 'CHANGES_REQUESTED' }))).toEqual(['Changes were requested on #7.']);
     expect(status({ checks: checks({ reviewDecision: 'CHANGES_REQUESTED' }) })).toMatchObject({ kind: 'changes-requested', merge: 'plain' });
+  });
+
+  it('says when GitHub hasn’t settled whether it can merge, or says a check it didn’t list isn’t passing', () => {
+    expect(mergeWarnings(snapshot({}, { mergeable: 'UNKNOWN' }))).toEqual(['GitHub is still working out whether it can be merged.']);
+    expect(mergeWarnings(snapshot({}, { mergeStateStatus: 'UNSTABLE' }))).toEqual(['GitHub says not every check passed, though it would still merge it.']);
+    // A check it listed as failing or running already says why.
+    expect(mergeWarnings(snapshot({ checks: [run('failure')] }, { mergeStateStatus: 'UNSTABLE' }))).toEqual(['1 check is failing.']);
+    expect(mergeWarnings(snapshot({ checks: [run('pending')] }, { mergeStateStatus: 'UNSTABLE' }))).toEqual(['1 check is still running.']);
   });
 
   it('says when the workspace couldn’t be read', () => {

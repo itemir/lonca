@@ -261,6 +261,7 @@ export interface MergeSnapshot {
 export function mergeWarnings(snapshot: MergeSnapshot): string[] {
   const { pr, local, checks } = snapshot;
   const base = pr.baseRefName;
+  const state = mergeState(pr.mergeStateStatus);
   const lines: string[] = [];
   if (snapshot.working === 'lead') lines.push(`The Lead is still working. Anything it pushes after this won’t be in ${base}.`);
   if (snapshot.working === 'agent') lines.push(`An agent is still working. Anything it pushes after this won’t be in ${base}.`);
@@ -274,10 +275,12 @@ export function mergeWarnings(snapshot: MergeSnapshot): string[] {
   if (local && local.uncommitted > 0) {
     lines.push(count(local.uncommitted, '1 uncommitted change isn’t in the pull request.', '% uncommitted changes aren’t in the pull request.'));
   }
+  if (pr.mergeable === 'UNKNOWN' || state === 'UNKNOWN') lines.push('GitHub is still working out whether it can be merged.');
   const failing = checks.filter((check) => check.status === 'failure').length;
   if (failing > 0) lines.push(count(failing, '1 check is failing.', '% checks are failing.'));
   const running = checks.filter((check) => check.status === 'pending').length;
   if (running > 0) lines.push(count(running, '1 check is still running.', '% checks are still running.'));
+  if (state === 'UNSTABLE' && failing === 0 && running === 0) lines.push('GitHub says not every check passed, though it would still merge it.');
   if (pr.reviewDecision === 'CHANGES_REQUESTED') lines.push(`Changes were requested on #${pr.number}.`);
   return lines;
 }
