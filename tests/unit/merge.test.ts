@@ -11,7 +11,7 @@ function pr(overrides: Partial<PullRequest> = {}): PullRequest {
   return {
     number: 7, title: 'T', url: 'https://github.com/o/r/pull/7', state: 'OPEN', isDraft: false, reviewDecision: '', mergeable: 'MERGEABLE',
     mergeStateStatus: 'CLEAN', headRefOid: HEAD, baseRefName: 'main', createdAt: '2026-11-02T10:00:00Z', mergedAt: null, closedAt: null,
-    autoMergeRequest: false, ...overrides,
+    ...overrides,
   };
 }
 
@@ -19,7 +19,6 @@ function read(overrides: Partial<PullRequest> = {}, extra: Partial<Checks> = {})
   return {
     github: 'connected', pr: pr(overrides), checks: [], local: { head: HEAD, unpushed: 0, uncommitted: 0 }, checkedAt: 1,
     repo: { mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: false, viewerDefaultMergeMethod: 'SQUASH', viewerPermission: 'WRITE' },
-    queue: { enabled: false, queued: false },
     ...extra,
   };
 }
@@ -46,26 +45,25 @@ describe('the repository a project’s pull requests are in', () => {
   it('names it in the view command, host and all, so neither the checkout nor GH_HOST can redirect it', () => {
     expect(prViewArgs('itemir/salzburg', { owner: 'itemir', name: 'lonca' })).toEqual([
       'gh', 'pr', 'view', 'itemir/salzburg', '--repo', 'github.com/itemir/lonca', '--json',
-      'number,title,url,state,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,headRefOid,baseRefName,createdAt,mergedAt,closedAt,autoMergeRequest',
+      'number,title,url,state,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,headRefOid,baseRefName,createdAt,mergedAt,closedAt',
     ]);
-    const query = mergeSettingsArgs('123', '2048', 7);
+    const query = mergeSettingsArgs('123', '2048');
     expect(query.slice(0, 5)).toEqual(['gh', 'api', 'graphql', '--hostname', 'github.com']);
     expect(query).toContain('owner=123');
     expect(query[query.indexOf('owner=123') - 1]).toBe('-f');
-    expect(query.slice(-2)).toEqual(['-F', 'number=7']);
+    expect(query.slice(-2)).toEqual(['-f', 'name=2048']);
     expect(query.join(' ')).not.toMatch(/mutation/);
   });
 });
 
 describe('what GitHub says', () => {
-  it('reads a pull request, with booleans where gh sends objects or empty strings', () => {
+  it('reads a pull request, with nulls where gh sends empty strings', () => {
     const parsed = parsePullRequest({
-      ...pr(), reviewDecision: '', mergedAt: '', autoMergeRequest: { mergeMethod: 'SQUASH' },
+      ...pr(), reviewDecision: '', mergedAt: '',
       statusCheckRollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'FAILURE' }],
     });
-    expect(parsed?.pr).toMatchObject({ reviewDecision: null, mergedAt: null, autoMergeRequest: true, state: 'OPEN' });
+    expect(parsed?.pr).toMatchObject({ reviewDecision: null, mergedAt: null, state: 'OPEN' });
     expect(parsed?.checks).toEqual([{ name: 'ci', status: 'failure', url: undefined }]);
-    expect(parsePullRequest({ ...pr(), autoMergeRequest: null })?.pr.autoMergeRequest).toBe(false);
     expect(parsePullRequest({ ...pr(), headRefOid: '--upload-pack=x' })?.pr.headRefOid).toBe('');
     expect(parsePullRequest({ ...pr(), state: 'WEIRD' })).toBeNull();
     // A merge state that's missing or new to Lonca is taken as one GitHub is still working out.
@@ -76,14 +74,12 @@ describe('what GitHub says', () => {
     expect(parsePullRequest(null)).toBeNull();
   });
 
-  it('reads merge settings and the merge queue', () => {
+  it('reads merge settings', () => {
     const output = JSON.stringify({ data: { repository: {
       mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: false, viewerDefaultMergeMethod: 'SQUASH', viewerPermission: 'ADMIN',
-      pullRequest: { isInMergeQueue: false, isMergeQueueEnabled: true },
     } } });
     expect(parseMergeSettings(output)).toEqual({
-      repo: { mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: false, viewerDefaultMergeMethod: 'SQUASH', viewerPermission: 'ADMIN' },
-      queue: { enabled: true, queued: false },
+      mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: false, viewerDefaultMergeMethod: 'SQUASH', viewerPermission: 'ADMIN',
     });
     expect(parseMergeSettings('{"data":{"repository":null}}')).toBeNull();
     expect(parseMergeSettings('not json')).toBeNull();
@@ -128,8 +124,6 @@ describe('merging', () => {
     expect(checkBeforeMerge(read({ number: 8 }), request)).toMatchObject({ action: 'refuse', status: 409 });
     expect(checkBeforeMerge({ ...read(), pr: null }, request)).toMatchObject({ action: 'refuse', status: 409 });
     expect(checkBeforeMerge(read(), { ...request, method: 'rebase' })).toEqual({ action: 'refuse', status: 400, message: 'This repository doesn’t allow rebase merging.' });
-    // A merge queue decides the method itself.
-    expect(checkBeforeMerge(read({}, { queue: { enabled: true, queued: false } }), { ...request, method: 'rebase' })).toEqual({ action: 'merge' });
     expect(checkBeforeMerge(read({ mergeStateStatus: 'DIRTY' }), request)).toMatchObject({ action: 'refuse', status: 409 });
     expect(checkBeforeMerge(read({ mergeStateStatus: null }), request)).toMatchObject({ action: 'refuse', status: 409 });
     expect(checkBeforeMerge(read({ mergeStateStatus: 'SOMETHING_NEW' }), request)).toMatchObject({ action: 'refuse', status: 409 });
@@ -137,22 +131,11 @@ describe('merging', () => {
     expect(checkBeforeMerge({ ...read(), github: 'error', error: 'HTTP 502', pr: null }, request)).toMatchObject({ action: 'refuse', status: 502 });
   });
 
-  it('adds one to a merge queue, which GitHub reports as BLOCKED until it goes through', () => {
-    const queue = { queue: { enabled: true, queued: false } };
-    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED' }, queue), request)).toEqual({ action: 'merge' });
-    // Whatever else is known to block it still does.
-    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED' }, { ...queue, checks: [{ name: 'ci', status: 'failure' }] }), request))
-      .toMatchObject({ action: 'refuse', status: 409 });
-    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED' }, { ...queue, checks: [{ name: 'ci', status: 'pending' }] }), request))
-      .toMatchObject({ action: 'refuse', status: 409 });
-    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED', reviewDecision: 'REVIEW_REQUIRED' }, queue), request)).toMatchObject({ action: 'refuse' });
-    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED', reviewDecision: 'CHANGES_REQUESTED' }, queue), request)).toMatchObject({ action: 'refuse' });
-    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED', mergeable: 'CONFLICTING' }, queue), request)).toMatchObject({ action: 'refuse' });
-    expect(checkBeforeMerge(read({ mergeStateStatus: 'BEHIND' }, queue), request)).toMatchObject({ action: 'refuse' });
-    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED', isDraft: true }, queue), request)).toMatchObject({ action: 'refuse' });
-    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED' }, { queue: { enabled: true, queued: true } }), request)).toMatchObject({ action: 'refuse' });
-    // Without a queue, BLOCKED is a rule that stands in the way.
+  it('leaves a rule that blocks merging to GitHub, and waits for checks the base branch requires', () => {
     expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED' }), request)).toMatchObject({ action: 'refuse', status: 409 });
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'BLOCKED' }, { checks: [{ name: 'ci', status: 'pending' }] }), request))
+      .toMatchObject({ action: 'refuse', status: 409 });
+    expect(checkBeforeMerge(read({ mergeStateStatus: 'BEHIND' }), request)).toMatchObject({ action: 'refuse', status: 409 });
   });
 
   const ok: GhResult = { code: 0, timedOut: false, output: '' };
@@ -162,8 +145,6 @@ describe('merging', () => {
   it.each([
     ['merged, whatever gh said', read({ state: 'MERGED' }), failed, { outcome: 'merged' }],
     ['merged after gh timed out', read({ state: 'MERGED' }), timedOut, { outcome: 'merged' }],
-    ['queued', read({}, { queue: { enabled: true, queued: true } }), ok, { outcome: 'queued', message: 'GitHub will merge #7 when it’s ready.' }],
-    ['auto-merge', read({ autoMergeRequest: true }), ok, { outcome: 'queued' }],
     ['open after gh succeeded', read(), ok, { outcome: 'pending', message: 'GitHub accepted the merge, but #7 isn’t merged yet. Lonca keeps checking.' }],
     ['open after gh failed', read(), failed, { outcome: 'failed', message: 'Pull request is not mergeable' }],
     ['closed', read({ state: 'CLOSED' }), ok, { outcome: 'failed', message: '#7 was closed, so nothing was merged.' }],
@@ -171,7 +152,14 @@ describe('merging', () => {
     ['a read that failed', { ...read(), github: 'error' as const, pr: null }, ok, { outcome: 'unknown' }],
     ['a different pull request', read({ number: 8, state: 'MERGED' }), ok, { outcome: 'unknown' }],
   ])('takes the outcome from the read after gh: %s', (_name, after, gh, expected) => {
-    expect(mergeOutcome(after, gh, 7)).toMatchObject(expected);
+    expect(mergeOutcome(after, gh, request)).toMatchObject(expected);
+  });
+
+  it('says so when it was merged into another base than the one confirmed', () => {
+    const message = '#7 was merged into release, not main.';
+    expect(mergeOutcome(read({ state: 'MERGED', baseRefName: 'release' }), ok, request)).toEqual({ outcome: 'merged', message });
+    expect(checkBeforeMerge(read({ state: 'MERGED', baseRefName: 'release' }), request)).toEqual({ action: 'reply', outcome: 'merged', message });
+    expect(mergeOutcome(read({ state: 'MERGED' }), ok, request)).toEqual({ outcome: 'merged' });
   });
 
   it('cleans up gh’s messages', () => {

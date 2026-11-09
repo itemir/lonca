@@ -281,7 +281,7 @@ export function normalizeCheck(raw: any): CheckRun {
 
 const PR_FIELDS = [
   'number', 'title', 'url', 'state', 'isDraft', 'reviewDecision', 'mergeable', 'mergeStateStatus', 'statusCheckRollup',
-  'headRefOid', 'baseRefName', 'createdAt', 'mergedAt', 'closedAt', 'autoMergeRequest',
+  'headRefOid', 'baseRefName', 'createdAt', 'mergedAt', 'closedAt',
 ].join(',');
 
 // Every gh call names github.com, so neither the checkout nor a project's GH_HOST can send it elsewhere.
@@ -297,20 +297,16 @@ export function prViewArgs(branch: string, repo: { owner: string; name: string }
   return ['gh', 'pr', 'view', branch, '--repo', repoArg(repo), '--json', PR_FIELDS];
 }
 
-// A query, never a mutation. `gh pr view` doesn't say whether the base branch has a merge queue.
-const MERGE_SETTINGS_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
+// A query, never a mutation. `gh pr view` doesn't say how the repository lets this user merge.
+const MERGE_SETTINGS_QUERY = `query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerDefaultMergeMethod viewerPermission
-    pullRequest(number: $number) { isInMergeQueue isMergeQueueEnabled }
   }
 }`;
 
-export function mergeSettingsArgs(owner: string, name: string, number: number): string[] {
+export function mergeSettingsArgs(owner: string, name: string): string[] {
   // -f sends the names as strings even when they look like numbers, which -F wouldn't.
-  return [
-    'gh', 'api', 'graphql', '--hostname', GITHUB_HOST,
-    '-f', `query=${MERGE_SETTINGS_QUERY}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${number}`,
-  ];
+  return ['gh', 'api', 'graphql', '--hostname', GITHUB_HOST, '-f', `query=${MERGE_SETTINGS_QUERY}`, '-f', `owner=${owner}`, '-f', `name=${name}`];
 }
 
 // Polled in the background too, so it must never take locks an agent's git commands need.
@@ -319,7 +315,8 @@ set -o pipefail
 export GIT_OPTIONAL_LOCKS=0
 pr_head="$1"
 head=$(git rev-parse --verify --quiet HEAD) || exit 1
-uncommitted=$(git status --porcelain | wc -l) || exit 1
+# Named outright, since the checkout's own config can hide untracked files and submodules.
+uncommitted=$(git status --porcelain --untracked-files=normal --ignore-submodules=none | wc -l) || exit 1
 if [ "$head" = "$pr_head" ]; then
   unpushed=0
 elif [ -n "$pr_head" ] && git cat-file -e "$pr_head^{commit}" 2>/dev/null; then
@@ -353,29 +350,22 @@ export function parsePullRequest(raw: any): { pr: PullRequest; checks: CheckRun[
     createdAt: text(raw.createdAt),
     mergedAt: optional(raw.mergedAt),
     closedAt: optional(raw.closedAt),
-    autoMergeRequest: Boolean(raw.autoMergeRequest),
   };
   const rollup: unknown[] = Array.isArray(raw.statusCheckRollup) ? raw.statusCheckRollup : [];
   return { pr, checks: rollup.map(normalizeCheck) };
 }
 
-export function parseMergeSettings(output: string): { repo: MergeSettings; queue: { enabled: boolean; queued: boolean } } | null {
+export function parseMergeSettings(output: string): MergeSettings | null {
   try {
     const repository = JSON.parse(output)?.data?.repository;
     if (!repository || typeof repository !== 'object') return null;
     const method = String(repository.viewerDefaultMergeMethod ?? '').toUpperCase();
     return {
-      repo: {
-        mergeCommitAllowed: repository.mergeCommitAllowed === true,
-        squashMergeAllowed: repository.squashMergeAllowed === true,
-        rebaseMergeAllowed: repository.rebaseMergeAllowed === true,
-        viewerDefaultMergeMethod: method === 'MERGE' || method === 'SQUASH' || method === 'REBASE' ? method : null,
-        viewerPermission: typeof repository.viewerPermission === 'string' ? repository.viewerPermission.toUpperCase() : null,
-      },
-      queue: {
-        enabled: repository.pullRequest?.isMergeQueueEnabled === true,
-        queued: repository.pullRequest?.isInMergeQueue === true,
-      },
+      mergeCommitAllowed: repository.mergeCommitAllowed === true,
+      squashMergeAllowed: repository.squashMergeAllowed === true,
+      rebaseMergeAllowed: repository.rebaseMergeAllowed === true,
+      viewerDefaultMergeMethod: method === 'MERGE' || method === 'SQUASH' || method === 'REBASE' ? method : null,
+      viewerPermission: typeof repository.viewerPermission === 'string' ? repository.viewerPermission.toUpperCase() : null,
     };
   } catch {
     return null;
@@ -389,7 +379,7 @@ export function parseLocalState(output: string): LocalState | null {
 }
 
 function emptyChecks(github: Checks['github'], checkedAt: number, error?: string): Checks {
-  return { github, ...(error ? { error } : {}), pr: null, checks: [], repo: null, queue: null, local: null, checkedAt };
+  return { github, ...(error ? { error } : {}), pr: null, checks: [], repo: null, local: null, checkedAt };
 }
 
 // Reads are numbered as they begin, before any of them waits on anything. Two that begin in the
@@ -454,9 +444,11 @@ export async function getChecks(workspace: Workspace): Promise<Checks> {
       rememberPr(workspace, null, read, startedAt);
       return emptyChecks('connected', startedAt);
     }
+    // Stop may have begun while GitHub answered, and `sbx exec` would start the VM again.
+    if (workspace.status !== 'ready') throw new HttpError(409, `${workspace.name} is ${workspace.status}`);
     const [settings, local] = await Promise.all([
       pr.state === 'OPEN'
-        ? exec(sandbox, mergeSettingsArgs(repo.owner, repo.name, pr.number), { workdir: workspace.path, env, timeoutMs: 30000 })
+        ? exec(sandbox, mergeSettingsArgs(repo.owner, repo.name), { workdir: workspace.path, env, timeoutMs: 30000 })
           .then((answer) => (answer.code === 0 ? parseMergeSettings(answer.stdout.toString('utf8')) : null), () => null)
         : null,
       exec(sandbox, ['bash', '-c', LOCAL_STATE_SCRIPT, 'lonca-pr-local', pr.headRefOid], { workdir: workspace.path, timeoutMs: 30000 })
@@ -467,8 +459,7 @@ export async function getChecks(workspace: Workspace): Promise<Checks> {
       github: 'connected',
       pr,
       checks,
-      repo: settings?.repo ?? null,
-      queue: settings?.queue ?? null,
+      repo: settings ?? null,
       local,
       checkedAt: startedAt,
     };

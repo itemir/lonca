@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Archive, CircleAlert, CircleCheck, CircleDashed, CircleX, Crown, ExternalLink, FileDiff, FilePen, FileQuestionMark, GitCompare, GitCompareArrows, GitMerge,
-  GitMergeConflict, GitPullRequest, GitPullRequestArrow, GitPullRequestClosed, GitPullRequestDraft, Lock, TriangleAlert, Upload, UserRoundSearch, Users,
+  GitMergeConflict, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Lock, TriangleAlert, Upload, UserRoundSearch, Users,
   type LucideIcon,
 } from 'lucide-react';
 import { allowedMethods, defaultMethod, type MergeSnapshot, mergeWarnings, type PrKind, type PrStatus, whoIsWorking } from '../../../shared/pr.ts';
@@ -9,7 +9,7 @@ import type { CheckRun, MergeMethod, Project, Workspace } from '../../../shared/
 import { safeUrl } from '../format.ts';
 import { currentPrStatus, mergePr, prEntry, refreshPr, setMergeDialogOpen, usePrStatus, usePrStore } from '../pr.ts';
 import { useStore } from '../store.ts';
-import { CloseWorkspaceDialog } from './CloseWorkspaceDialog.tsx';
+import { useCloseWorkspace } from './CloseWorkspaceDialog.tsx';
 import { Modal, Spinner, topDialog } from './ui.tsx';
 
 // Every state has an icon and a word of its own: green and red are hard to tell apart for many people.
@@ -20,8 +20,6 @@ const ICONS: Record<PrKind, LucideIcon> = {
   closed: GitPullRequestClosed,
   open: GitPullRequest,
   draft: GitPullRequestDraft,
-  queued: GitPullRequestArrow,
-  'auto-merge': GitPullRequestArrow,
   checking: CircleDashed,
   conflicts: GitMergeConflict,
   failing: CircleX,
@@ -161,9 +159,7 @@ function MergeDialog({ workspace, snapshot, onClose }: {
       </div>
       <div className="confirm-body merge-body" ref={body}>
         <p>{checksSummary(snapshot.checks)}</p>
-        {snapshot.queue ? (
-          <p>{base} uses a merge queue, so GitHub merges #{pr.number} from it when it’s ready.</p>
-        ) : methods.length > 1 && (
+        {methods.length > 1 && (
           <div className="segmented merge-methods" role="radiogroup" aria-label="How to merge">
             {methods.map((option) => (
               <label key={option} className={method === option ? 'active' : ''}>
@@ -195,7 +191,7 @@ function MergeDialog({ workspace, snapshot, onClose }: {
             if (!merging) void confirm();
           }}
         >
-          {merging ? <><Spinner size={13} /> Merging…</> : snapshot.queue ? 'Add to merge queue' : CONFIRM_LABELS[method]}
+          {merging ? <><Spinner size={13} /> Merging…</> : CONFIRM_LABELS[method]}
         </button>
       </div>
     </Modal>
@@ -215,7 +211,8 @@ export function PrHeader({ workspace, project, hasWork, onCreatePr }: {
   const status = usePrStatus(workspace);
   const [preparing, setPreparing] = useState(false);
   const [merging, setMerging] = useState<MergeSnapshot | null>(null);
-  const [archiving, setArchiving] = useState(false);
+  // The same as the trash icon's Archive, so it asks, or doesn't, in the same cases.
+  const close = useCloseWorkspace(workspace);
   const archive = useRef<HTMLButtonElement>(null);
   const link = useRef<HTMLAnchorElement>(null);
   const toast = useStore((store) => store.toast);
@@ -230,7 +227,7 @@ export function PrHeader({ workspace, project, hasWork, onCreatePr }: {
     const number = status.pr?.number;
     if (latest.merge && read?.pr) {
       setMerging({
-        pr: read.pr, checks: read.checks, repo: read.repo, queue: Boolean(read.queue?.enabled), local: read.local,
+        pr: read.pr, checks: read.checks, repo: read.repo, local: read.local,
         working: whoIsWorking(useStore.getState().sessions, workspace.id),
       });
     } else if (latest.kind === 'merged') {
@@ -248,8 +245,8 @@ export function PrHeader({ workspace, project, hasWork, onCreatePr }: {
         archive.current.focus();
         return;
       }
-      // The dialog gives focus back to Merge, but Merge goes once it's queued or merged by someone
-      // else. The pull request's link stays. Focus that went somewhere else went there on purpose.
+      // The dialog gives focus back to Merge, but Merge goes once it's merged by someone else. The
+      // pull request's link stays. Focus that went somewhere else went there on purpose.
       if (!document.activeElement || document.activeElement === document.body) link.current?.focus();
     });
   };
@@ -297,12 +294,12 @@ export function PrHeader({ workspace, project, hasWork, onCreatePr }: {
         </button>
       )}
       {status.archive && (
-        <button key="archive" ref={archive} type="button" className="button button-small button-primary pr-action" aria-label="Archive this workspace" onClick={() => setArchiving(true)}>
-          <Archive size={13} aria-hidden="true" /> Archive
+        <button key="archive" ref={archive} type="button" className="button button-small button-primary pr-action" aria-label="Archive this workspace" onClick={close.press}>
+          {close.checking ? <Spinner size={13} /> : <Archive size={13} aria-hidden="true" />} Archive
         </button>
       )}
       {merging && <MergeDialog workspace={workspace} snapshot={merging} onClose={closeMerge} />}
-      {archiving && <CloseWorkspaceDialog workspace={workspace} onClose={() => setArchiving(false)} />}
+      {close.dialog}
     </>
   );
 }

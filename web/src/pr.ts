@@ -56,7 +56,7 @@ const update = (id: string, change: (entry: PrEntry) => Partial<PrEntry> | null)
 let sequence = 0;
 
 function unanswered(message: string): Checks {
-  return { github: 'error', error: message, pr: null, checks: [], repo: null, queue: null, local: null, checkedAt: Date.now() };
+  return { github: 'error', error: message, pr: null, checks: [], repo: null, local: null, checkedAt: Date.now() };
 }
 
 /** What an answer changes, unless an answer to a later request is already shown. */
@@ -149,8 +149,9 @@ export async function mergePr(workspace: Workspace, choice: MergeChoice): Promis
     setTimeout(() => update(id, (entry) => (entry.lastMerge === attempt ? { lastMerge: { ...attempt, expired: true } } : null)), PENDING_MS);
   }
   const { toast } = useStore.getState();
-  if (attempt.outcome === 'merged') toast(`Merged #${choice.number} into ${choice.base}.`);
-  else if (attempt.outcome === 'queued' || attempt.outcome === 'pending' || !prEntry(id).dialogOpen) toast(attempt.message ?? '');
+  // Into another base than the one confirmed, if an agent changed it at the last moment: the message says which.
+  if (attempt.outcome === 'merged') toast(attempt.message ?? `Merged #${choice.number} into ${choice.base}.`);
+  else if (attempt.outcome === 'pending' || !prEntry(id).dialogOpen) toast(attempt.message ?? '');
   return attempt;
 }
 

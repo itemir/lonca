@@ -10,8 +10,6 @@ export type PrKind =
   /** Last known to be open, while it can't be checked. Never "ready", since that can't be known. */
   | 'open'
   | 'draft'
-  | 'queued'
-  | 'auto-merge'
   | 'checking'
   | 'conflicts'
   | 'failing'
@@ -87,17 +85,6 @@ export function mergeState(value: unknown): string {
   return MERGE_STATES.includes(state) ? state : 'UNKNOWN';
 }
 
-/**
- * Whether the base branch's merge queue would take it now. Such a branch reports BLOCKED until a
- * pull request goes through the queue, so BLOCKED with no other reason known means it's ready.
- */
-function readyForQueue(checks: Checks, pr: PullRequest): boolean {
-  const review = pr.reviewDecision || null;
-  return Boolean(checks.queue?.enabled) && !checks.queue?.queued && mergeState(pr.mergeStateStatus) === 'BLOCKED'
-    && pr.mergeable !== 'CONFLICTING' && review !== 'CHANGES_REQUESTED' && review !== 'REVIEW_REQUIRED'
-    && !checks.checks.some((check) => check.status === 'failure' || check.status === 'pending');
-}
-
 export const MERGE_METHODS: MergeMethod[] = ['squash', 'merge', 'rebase'];
 
 /** The methods the repository allows, or all of them when GitHub didn't say, so it can refuse. */
@@ -163,12 +150,10 @@ export function mergeBlocker(checks: Checks): string | null {
   if (pr.state === 'CLOSED') return `#${pr.number} was closed.`;
   const state = mergeState(pr.mergeStateStatus);
   if (pr.isDraft || state === 'DRAFT') return `#${pr.number} is a draft.`;
-  if (pr.autoMergeRequest) return `Auto-merge is on for #${pr.number}, so GitHub merges it by itself.`;
-  if (checks.queue?.queued) return `#${pr.number} is already in the merge queue.`;
   if (state === 'DIRTY' || pr.mergeable === 'CONFLICTING') return `#${pr.number} has conflicts with ${pr.baseRefName}.`;
   const permission = checks.repo?.viewerPermission;
   if (permission && !CAN_MERGE.includes(permission)) return `Your GitHub account can’t merge pull requests in this repository.`;
-  if (!MERGEABLE_STATES.includes(state) && !readyForQueue(checks, pr)) return `GitHub can’t merge #${pr.number} right now.`;
+  if (!MERGEABLE_STATES.includes(state)) return `GitHub can’t merge #${pr.number} right now.`;
   return null;
 }
 
@@ -222,19 +207,16 @@ function openReasons(checks: Checks, pr: PullRequest, working: Working): Reason[
   const add = (kind: PrKind, tone: PrTone, label: string, detail: string) => reasons.push({ kind, tone, label, detail });
 
   if (pr.isDraft || state === 'DRAFT') add('draft', 'muted', 'Draft', 'It’s a draft. Mark it ready for review on GitHub before merging it.');
-  if (checks.queue?.queued) add('queued', 'muted', 'Queued to merge', `It’s in ${base}’s merge queue, and GitHub merges it from there.`);
-  else if (pr.autoMergeRequest) add('auto-merge', 'muted', 'Auto-merge on', 'Auto-merge is on, so GitHub merges it by itself once it can.');
   if (pr.mergeable === 'UNKNOWN' || state === 'UNKNOWN') add('checking', 'muted', 'Checking…', 'GitHub is still working out whether it can be merged.');
   if (state === 'DIRTY' || pr.mergeable === 'CONFLICTING') add('conflicts', 'blocked', 'Has conflicts', `Conflicts with ${base}.`);
   if (failing > 0) add('failing', 'blocked', short(failing, failing === 1 ? 'check failing' : 'checks failing'), count(failing, '1 check is failing.', '% checks are failing.'));
   if (review === 'CHANGES_REQUESTED') add('changes-requested', 'blocked', 'Changes requested', 'A reviewer asked for changes.');
   if (state === 'BLOCKED' && review === 'REVIEW_REQUIRED') add('needs-review', 'waiting', 'Needs review', `${base}’s rules need an approving review before it can be merged.`);
   if (state === 'BEHIND') add('behind', 'waiting', 'Out of date', `Behind ${base}, and ${base}’s rules need branches to be up to date.`);
-  // A protected branch reports BLOCKED while its required checks run, which isn't a rule to look up,
-  // and so does one with a merge queue until the pull request goes through it.
+  // A protected branch reports BLOCKED while its required checks run, which isn't a rule to look up.
   if (state === 'BLOCKED' && review !== 'REVIEW_REQUIRED') {
     if (pending) add('checks-running', 'waiting', 'Checks running', `Checks are still running, and ${base}’s rules wait for them.`);
-    else if (!readyForQueue(checks, pr)) add('blocked', 'waiting', 'Blocked', `A rule on ${base} blocks merging. GitHub shows which.`);
+    else add('blocked', 'waiting', 'Blocked', `A rule on ${base} blocks merging. GitHub shows which.`);
   }
   // Ready needs GitHub to say so. This one would merge, but not every check passed.
   if (state === 'UNSTABLE' && failing === 0 && !pending) {
@@ -268,7 +250,6 @@ export interface MergeSnapshot {
   pr: PullRequest;
   checks: CheckRun[];
   repo: MergeSettings | null;
-  queue: boolean;
   local: LocalState | null;
   working: Working;
 }
@@ -305,9 +286,7 @@ export function mergeWarnings(snapshot: MergeSnapshot): string[] {
 export function refreshInterval(checks: Checks | null, merging: boolean): number {
   const pr = checks?.pr;
   if (merging || (pr?.state === 'OPEN' && (pr.mergeable === 'UNKNOWN' || mergeState(pr.mergeStateStatus) === 'UNKNOWN'))) return SETTLING_REFRESH_MS;
-  if (pr?.state === 'OPEN' && (checks!.queue?.queued || pr.autoMergeRequest || checks!.checks.some((check) => check.status === 'pending'))) {
-    return BUSY_REFRESH_MS;
-  }
+  if (pr?.state === 'OPEN' && checks!.checks.some((check) => check.status === 'pending')) return BUSY_REFRESH_MS;
   return NORMAL_REFRESH_MS;
 }
 

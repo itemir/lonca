@@ -50,17 +50,14 @@ function view(overrides: Record<string, unknown> = {}) {
     createdAt: new Date(workspace.createdAt + 60_000).toISOString(),
     mergedAt: null,
     closedAt: null,
-    autoMergeRequest: null,
     ...overrides,
   };
 }
 
-function graphql(pullRequest = { isInMergeQueue: false, isMergeQueueEnabled: false }) {
+function graphql() {
   return {
     data: {
-      repository: {
-        mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: false, viewerDefaultMergeMethod: 'SQUASH', viewerPermission: 'WRITE', pullRequest,
-      },
+      repository: { mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: false, viewerDefaultMergeMethod: 'SQUASH', viewerPermission: 'WRITE' },
     },
   };
 }
@@ -123,20 +120,19 @@ describe('reading a pull request', () => {
     const checks = await lonca.api<Checks>('GET', `/workspaces/${workspace.id}/checks`);
     expect(checks).toMatchObject({
       github: 'connected',
-      pr: { number: 7, state: 'OPEN', headRefOid: head, baseRefName: 'main', autoMergeRequest: false, reviewDecision: null },
+      pr: { number: 7, state: 'OPEN', headRefOid: head, baseRefName: 'main', reviewDecision: null },
       checks: [{ name: 'test', status: 'success' }],
       repo: { squashMergeAllowed: true, rebaseMergeAllowed: false, viewerDefaultMergeMethod: 'SQUASH', viewerPermission: 'WRITE' },
-      queue: { enabled: false, queued: false },
       local: { head, unpushed: 0, uncommitted: 0 },
     });
     const [viewCall, queryCall] = calls();
     expect(viewCall).toEqual([
       'pr', 'view', workspace.branch, '--repo', `github.com/${REPO}`, '--json',
-      'number,title,url,state,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,headRefOid,baseRefName,createdAt,mergedAt,closedAt,autoMergeRequest',
+      'number,title,url,state,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,headRefOid,baseRefName,createdAt,mergedAt,closedAt',
     ]);
     // github.com is named every time, so a project's GH_HOST can't send any of it elsewhere.
     expect(queryCall.slice(0, 6)).toEqual(['api', 'graphql', '--hostname', 'github.com', '-f', expect.stringMatching(/^query=query\(/)]);
-    expect(queryCall.slice(6)).toEqual(['-f', 'owner=lonca-test', '-f', 'name=merge-fixture', '-F', 'number=7']);
+    expect(queryCall.slice(6)).toEqual(['-f', 'owner=lonca-test', '-f', 'name=merge-fixture']);
     expect(queryCall.join(' ')).not.toMatch(/mutation/);
     expect((await lonca.workspace(workspace.id)).pr).toMatchObject({ number: 7, state: 'OPEN', headRefOid: head, baseRefName: 'main' });
   });
@@ -152,6 +148,15 @@ describe('reading a pull request', () => {
       expect((await lonca.api<Checks>('GET', `/workspaces/${workspace.id}/checks`)).local).toMatchObject({ unpushed: null });
     } finally {
       sandboxExec(workspace.sandboxName, `cd ${quote(workspace.path)} && git reset -q --hard ${head} && rm -f loose.txt`);
+    }
+  });
+
+  it('counts changes the checkout’s own config would hide from git status', async () => {
+    sandboxExec(workspace.sandboxName, `cd ${quote(workspace.path)} && git config status.showUntrackedFiles no && echo hidden > hidden.txt`);
+    try {
+      expect((await lonca.api<Checks>('GET', `/workspaces/${workspace.id}/checks`)).local).toMatchObject({ unpushed: 0, uncommitted: 1 });
+    } finally {
+      sandboxExec(workspace.sandboxName, `cd ${quote(workspace.path)} && git config --unset status.showUntrackedFiles; rm -f hidden.txt`);
     }
   });
 
@@ -243,27 +248,13 @@ describe('merging', () => {
     expect(sandboxRunning(workspace.sandboxName)).toBe(false);
   });
 
-  it('adds one to a merge queue that GitHub reports as BLOCKED, as such a branch does until it goes through', async () => {
-    answer({
-      'view.json': view({ mergeStateStatus: 'BLOCKED' }),
-      'graphql.json': graphql({ isInMergeQueue: false, isMergeQueueEnabled: true }),
-      'after-graphql.json': graphql({ isInMergeQueue: true, isMergeQueueEnabled: true }),
-    });
-    const before = await lonca.api<Checks>('GET', `/workspaces/${workspace.id}/checks`);
-    expect(before).toMatchObject({ pr: { mergeStateStatus: 'BLOCKED' }, queue: { enabled: true, queued: false } });
-    // A queue picks its own method, so one the repository doesn't allow for a direct merge is no reason to refuse.
-    expect(await post(request({ method: 'rebase' }))).toMatchObject({ status: 200, body: { outcome: 'queued', message: 'GitHub will merge #7 when it’s ready.' } });
-    expect(merges()).toEqual([['pr', 'merge', '7', '--repo', `github.com/${REPO}`, '--rebase', '--match-head-commit', head]]);
-    // Without the queue, BLOCKED is a rule in the way, and nothing is tried.
-    answer({ 'graphql.json': graphql(), 'after-graphql.json': null });
+  it('leaves a rule that blocks merging to GitHub, trying nothing', async () => {
+    answer({ 'view.json': view({ mergeStateStatus: 'BLOCKED' }) });
     expect(await post(request())).toMatchObject({ status: 409 });
-    expect(merges()).toHaveLength(1);
+    expect(merges()).toEqual([]);
   });
 
-  it('tells a queued merge from one GitHub hasn’t finished', async () => {
-    answer({ 'after-graphql.json': graphql({ isInMergeQueue: true, isMergeQueueEnabled: true }) });
-    expect(await post(request())).toMatchObject({ status: 200, body: { outcome: 'queued', message: 'GitHub will merge #7 when it’s ready.' } });
-    answer({ 'view.json': view(), 'graphql.json': graphql(), 'after-graphql.json': null });
+  it('says so when GitHub accepted a merge it doesn’t show yet', async () => {
     expect(await post(request())).toMatchObject({ status: 200, body: { outcome: 'pending' } });
   });
 

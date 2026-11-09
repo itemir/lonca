@@ -518,8 +518,6 @@ export interface PullRequest {
   createdAt: string;
   mergedAt: string | null;
   closedAt: string | null;
-  /** Someone turned on auto-merge, so GitHub merges it by itself once it can. */
-  autoMergeRequest: boolean;
 }
 
 export type MergeMethod = 'squash' | 'merge' | 'rebase';
@@ -549,7 +547,6 @@ export interface Checks {
   checks: CheckRun[];
   /** Null when GitHub couldn't say, which leaves every method to try. */
   repo: MergeSettings | null;
-  queue: { enabled: boolean; queued: boolean } | null;
   local: LocalState | null;
   checkedAt: number;
 }
@@ -566,7 +563,7 @@ export interface PrSummary {
   checkedAt: number;
 }
 
-export type MergeOutcome = 'merged' | 'queued' | 'pending' | 'failed' | 'unknown';
+export type MergeOutcome = 'merged' | 'pending' | 'failed' | 'unknown';
 
 export interface MergeReply {
   outcome: MergeOutcome;

@@ -30,14 +30,16 @@ const answer = (stdout: string, code = 0) => ({ code, stdout: Buffer.from(stdout
 const view = (state: string) => JSON.stringify({
   number: 7, title: 'T', url: 'https://github.com/itemir/lonca/pull/7', state, isDraft: false, reviewDecision: '', mergeable: 'MERGEABLE',
   mergeStateStatus: state === 'OPEN' ? 'CLEAN' : 'UNKNOWN', statusCheckRollup: [], headRefOid: HEAD, baseRefName: 'main',
-  createdAt: '2026-11-02T10:00:00Z', mergedAt: null, closedAt: null, autoMergeRequest: null,
+  createdAt: '2026-11-02T10:00:00Z', mergedAt: null, closedAt: null,
 });
 
 describe('reads that overlap', () => {
   let workspace: Workspace;
 
   beforeEach(() => {
-    workspace = { id: 'w', name: 'salzburg', branch: 'itemir/salzburg', path: '/w', createdAt: Date.parse('2026-11-01T00:00:00Z'), pr: null } as Workspace;
+    workspace = {
+      id: 'w', name: 'salzburg', branch: 'itemir/salzburg', path: '/w', status: 'ready', createdAt: Date.parse('2026-11-01T00:00:00Z'), pr: null,
+    } as Workspace;
     workspaces.splice(0, workspaces.length, workspace);
     published.length = 0;
     // Both reads begin in the same millisecond, which a comparison of times can't put in order.
@@ -75,6 +77,16 @@ describe('reads that overlap', () => {
     expect((await older).pr?.state).toBe('OPEN');
     expect(workspace.pr?.state).toBe('MERGED');
     expect(published).toEqual(['MERGED']);
+  });
+
+  it('starts nothing more in the VM once Stop has begun, since that would start it again', async () => {
+    exec.mockImplementation(async (_sandbox: string, cmd: string[]) => {
+      // Stop begins while GitHub answers.
+      if (cmd[1] === 'pr' && cmd[2] === 'view') workspace.status = 'stopping';
+      return answer(cmd[1] === 'pr' ? view('OPEN') : `${HEAD} 0 0\n`);
+    });
+    expect(await getChecks(workspace)).toMatchObject({ github: 'error', error: 'salzburg is stopping' });
+    expect(exec).toHaveBeenCalledTimes(1);
   });
 
   it('still takes a newer read over an older one that finished first', async () => {

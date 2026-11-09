@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { allowedMethods, mergeBlocker } from '../shared/pr.ts';
-import type { Checks, MergeMethod, MergeOutcome, MergeReply, Workspace } from '../shared/types.ts';
+import type { Checks, MergeMethod, MergeOutcome, MergeReply, PullRequest, Workspace } from '../shared/types.ts';
 import { execEnv } from './env.ts';
 import { getChecks, repoArg } from './inspect.ts';
 import { parseGithubRepo } from './projects.ts';
@@ -53,6 +53,16 @@ export function cleanMergeError(output: string, number: number): string {
   return text || `GitHub didn’t merge #${number}.`;
 }
 
+/**
+ * A merge into another base than the one confirmed. GitHub can only be told which head to merge, so an
+ * agent that retargets the pull request at the last moment, or merged it first, can't be stopped. It
+ * can be said, though.
+ */
+function merged(pr: PullRequest, request: Pick<MergeRequest, 'number' | 'base'>): { outcome: 'merged'; message?: string } {
+  if (pr.baseRefName === request.base) return { outcome: 'merged' };
+  return { outcome: 'merged', message: `#${request.number} was merged into ${pr.baseRefName}, not ${request.base}.` };
+}
+
 export type MergeCheck =
   | { action: 'merge' }
   | { action: 'reply'; outcome: MergeOutcome; message?: string }
@@ -67,14 +77,13 @@ export function checkBeforeMerge(checks: Checks, request: MergeRequest): MergeCh
   const pr = checks.pr;
   if (!pr || pr.number !== number) return refuse(409, `#${number} isn’t this workspace’s pull request any more, so nothing was merged.`);
   // Someone, an agent perhaps, got there first. That's what the user wanted.
-  if (pr.state === 'MERGED') return { action: 'reply', outcome: 'merged' };
+  if (pr.state === 'MERGED') return { action: 'reply', ...merged(pr, request) };
   if (pr.state === 'CLOSED') return { action: 'reply', outcome: 'failed', message: `#${number} was closed, so nothing was merged.` };
   if (pr.headRefOid !== request.headOid) return refuse(409, 'New commits were pushed after you looked, so nothing was merged. Check them, then merge again.');
   if (pr.baseRefName !== request.base) {
     return refuse(409, `#${number} now targets ${pr.baseRefName}, not ${request.base}, so nothing was merged. Check it, then merge again.`);
   }
-  // A merge queue picks the method itself.
-  if (!checks.queue?.enabled && !allowedMethods(checks.repo).includes(request.method)) {
+  if (!allowedMethods(checks.repo).includes(request.method)) {
     return refuse(400, `This repository doesn’t allow ${METHOD_NAMES[request.method]}.`);
   }
   const blocker = mergeBlocker(checks);
@@ -90,23 +99,23 @@ export interface GhResult {
 }
 
 /**
- * The outcome comes from a read after gh finished, whatever gh said: it exits 0 both when the pull
- * request was already merged and when it only joined a merge queue.
+ * The outcome comes from a read after gh finished, whatever gh said: it exits 0 when the pull
+ * request was already merged, too.
  */
-export function mergeOutcome(after: Checks, gh: GhResult, number: number): { outcome: MergeOutcome; message?: string } {
+export function mergeOutcome(after: Checks, gh: GhResult, request: Pick<MergeRequest, 'number' | 'base'>): { outcome: MergeOutcome; message?: string } {
+  const { number } = request;
   const unknown = { outcome: 'unknown' as const, message: `Lonca couldn’t confirm the merge. Check #${number} on GitHub before trying again.` };
   const pr = after.github === 'connected' ? after.pr : null;
   if (!pr || pr.number !== number) return unknown;
-  if (pr.state === 'MERGED') return { outcome: 'merged' };
+  if (pr.state === 'MERGED') return merged(pr, request);
   if (pr.state === 'CLOSED') return { outcome: 'failed', message: `#${number} was closed, so nothing was merged.` };
-  if (after.queue?.queued || pr.autoMergeRequest) return { outcome: 'queued', message: `GitHub will merge #${number} when it’s ready.` };
   if (gh.timedOut) return unknown;
   if (gh.code === 0) return { outcome: 'pending', message: `GitHub accepted the merge, but #${number} isn’t merged yet. Lonca keeps checking.` };
   return { outcome: 'failed', message: cleanMergeError(gh.output, number) };
 }
 
 function unreadable(error: unknown): Checks {
-  return { github: 'error', error: errorMessage(error), pr: null, checks: [], repo: null, queue: null, local: null, checkedAt: Date.now() };
+  return { github: 'error', error: errorMessage(error), pr: null, checks: [], repo: null, local: null, checkedAt: Date.now() };
 }
 
 const merging = new Set<string>();
@@ -141,7 +150,7 @@ export async function mergePullRequest(workspace: Workspace, request: MergeReque
         gh = { code: null, timedOut: true, output: errorMessage(error) };
       }
       const after = await getChecks(workspace).catch(unreadable);
-      return { ...mergeOutcome(after, gh, request.number), checks: after };
+      return { ...mergeOutcome(after, gh, request), checks: after };
     });
   } finally {
     merging.delete(workspace.id);

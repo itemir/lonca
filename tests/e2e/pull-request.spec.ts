@@ -69,7 +69,6 @@ function view({ workspace, head }: Ready, overrides: Record<string, unknown> = {
     createdAt: new Date(workspace.createdAt + 60_000).toISOString(),
     mergedAt: null,
     closedAt: null,
-    autoMergeRequest: null,
     ...overrides,
   };
 }
@@ -78,15 +77,9 @@ const GRAPHQL = {
   data: {
     repository: {
       mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true, viewerDefaultMergeMethod: 'SQUASH', viewerPermission: 'ADMIN',
-      pullRequest: { isInMergeQueue: false, isMergeQueueEnabled: false },
     },
   },
 };
-
-/** GraphQL's answer for a base branch with a merge queue. */
-const queueGraphql = (queued: boolean) => ({
-  data: { repository: { ...GRAPHQL.data.repository, pullRequest: { isInMergeQueue: queued, isMergeQueueEnabled: true } } },
-});
 
 const opened = (workspace: Workspace) => `${lonca.url}/w/${workspace.id}?token=${lonca.token}`;
 const header = (page: Page) => page.locator('.right-header');
@@ -100,11 +93,10 @@ function scripted({ workspace, head }: Ready, pr: Record<string, unknown> | null
     pr: pr && {
       number: 7, title: 'Name terminals after the project and branch', url: `https://github.com/${REPO}/pull/7`, state: 'OPEN', isDraft: false,
       reviewDecision: null, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefOid: head, baseRefName: 'main',
-      createdAt: new Date(workspace.createdAt + 60_000).toISOString(), mergedAt: null, closedAt: null, autoMergeRequest: false, ...pr,
+      createdAt: new Date(workspace.createdAt + 60_000).toISOString(), mergedAt: null, closedAt: null, ...pr,
     } as Checks['pr'],
     checks: [{ name: 'test', status: 'success' }],
     repo: GRAPHQL.data.repository,
-    queue: { enabled: false, queued: false },
     local: { head, unpushed: 0, uncommitted: 0 },
     checkedAt: Date.now(),
     ...extra,
@@ -363,6 +355,32 @@ test('merges from a dialog that waits for a decision, then offers to archive', a
   await expect(header(page).getByRole('button')).toHaveCount(0);
 });
 
+test('archives from the panel as the trash icon does, without asking once told not to unless there’s something to lose', async ({ page }) => {
+  const ready = await create();
+  answer(ready, { 'view.json': view(ready, { state: 'MERGED', mergedAt: new Date().toISOString(), mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }) });
+  const loose = quote(path.join(ready.workspace.path, 'loose.txt'));
+  sandboxExec(ready.workspace.sandboxName, `echo loose > ${loose}`);
+  await lonca.api('PATCH', '/settings', { confirmArchive: false });
+  try {
+    await page.goto(opened(ready.workspace));
+    await expect(status(page)).toHaveAccessibleName(named('Merged'));
+    const archive = header(page).getByRole('button', { name: 'Archive this workspace' });
+    // An uncommitted change would be lost, so it asks anyway.
+    await archive.click();
+    const closing = page.getByRole('dialog', { name: 'Archive this workspace?' });
+    await expect(closing).toContainText('1 uncommitted change is lost.');
+    await closing.getByRole('button', { name: 'Cancel' }).click();
+    await expect(closing).toBeHidden();
+    sandboxExec(ready.workspace.sandboxName, `rm ${loose}`);
+    await archive.click();
+    await expect(page.locator('.workspace-banner')).toContainText('archived', { timeout: 60000 });
+    await expect(closing).toHaveCount(0);
+  } finally {
+    // The other tests here expect to be asked.
+    await lonca.api('PATCH', '/settings', { confirmArchive: true });
+  }
+});
+
 test('keeps a merge going when its dialog is closed, and says how it went', async ({ page }) => {
   const ready = await create();
   answer(ready, {
@@ -534,29 +552,13 @@ test('leaves focus where the user moved it while a merge finished', async ({ pag
 
 test('gives focus to the pull request’s link when the Merge that opened the dialog has gone', async ({ page }) => {
   const ready = await create();
-  // A base branch with a merge queue reports BLOCKED until a pull request goes through it.
-  answer(ready, {
-    'view.json': view(ready, { mergeStateStatus: 'BLOCKED' }),
-    'graphql.json': queueGraphql(false),
-    'after-graphql.json': queueGraphql(true),
-  });
+  answer(ready, { 'view.json': view(ready), 'graphql.json': GRAPHQL });
   await page.goto(opened(ready.workspace));
   await expect(status(page)).toHaveAccessibleName(named('Ready to merge'));
   const merge = header(page).getByRole('button', { name: 'Merge pull request #7' });
-  await merge.click();
   const dialog = page.getByRole('dialog', { name: 'Merge #7 into main?' });
-  await expect(dialog).toContainText('main uses a merge queue, so GitHub merges #7 from it when it’s ready.');
-  await expect(dialog.getByRole('radiogroup')).toHaveCount(0);
-  await dialog.getByRole('button', { name: 'Add to merge queue' }).click();
-  await expect(dialog).toBeHidden();
-  await expect(page.locator('.toast').filter({ hasText: 'GitHub will merge #7 when it’s ready.' })).toBeVisible();
-  await expect(status(page)).toHaveAccessibleName(named('Queued to merge'));
-  await expect(status(page)).toBeFocused();
 
   // Merged elsewhere, by an agent perhaps, while the dialog was open.
-  answer(ready, { 'view.json': view(ready), 'graphql.json': GRAPHQL, 'after-graphql.json': null });
-  await refresh(page);
-  await expect(status(page)).toHaveAccessibleName(named('Ready to merge'));
   await merge.click();
   await expect(dialog).toBeVisible();
   answer(ready, { 'view.json': view(ready, { state: 'MERGED', mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }) });
@@ -567,7 +569,7 @@ test('gives focus to the pull request’s link when the Merge that opened the di
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(dialog).toBeHidden();
   await expect(status(page)).toBeFocused();
-  expect(merges(ready)).toBe(1);
+  expect(merges(ready)).toBe(0);
 });
 
 test('stops showing a merge as under way once the workspace stops, or once it’s given up on', async ({ page }) => {

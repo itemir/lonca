@@ -23,7 +23,6 @@ function pr(overrides: Partial<PullRequest> = {}): PullRequest {
     createdAt: '2026-11-02T10:00:00Z',
     mergedAt: null,
     closedAt: null,
-    autoMergeRequest: false,
     ...overrides,
   };
 }
@@ -38,7 +37,6 @@ function checks(overrides: Partial<PullRequest> = {}, extra: Partial<Checks> = {
     pr: pr(overrides),
     checks: [{ name: 'test', status: 'success' }],
     repo,
-    queue: { enabled: false, queued: false },
     local: { head: HEAD, unpushed: 0, uncommitted: 0 },
     checkedAt: Date.parse('2026-11-03T14:02:00Z'),
     ...extra,
@@ -112,8 +110,6 @@ describe('the header’s pull request status', () => {
 
   const rows: [string, Partial<PrStatusInput>, Partial<ReturnType<typeof status>>][] = [
     ['draft', { checks: checks({ isDraft: true, mergeStateStatus: 'DRAFT' }) }, { kind: 'draft', label: 'Draft', tone: 'muted', merge: null }],
-    ['queued', { checks: checks({}, { queue: { enabled: true, queued: true } }) }, { kind: 'queued', label: 'Queued to merge', tone: 'muted', refreshSoon: true, merge: null }],
-    ['auto-merge', { checks: checks({ autoMergeRequest: true, mergeStateStatus: 'BLOCKED' }) }, { kind: 'auto-merge', label: 'Auto-merge on', refreshSoon: true, merge: null }],
     ['unknown mergeability', { checks: checks({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }) }, { kind: 'checking', label: 'Checking…', refreshMs: 5000, merge: null }],
     ['conflicts', { checks: checks({ mergeStateStatus: 'DIRTY', mergeable: 'CONFLICTING' }) }, { kind: 'conflicts', tone: 'blocked', merge: null }],
     ['one failing check, which is required', { checks: checks({ mergeStateStatus: 'BLOCKED' }, { checks: [run('failure')] }) }, { kind: 'failing', label: '1 check failing', tone: 'blocked', merge: null }],
@@ -164,7 +160,6 @@ describe('the header’s pull request status', () => {
   it('offers Merge only where GitHub would take it, from someone allowed to', () => {
     expect(status({ checks: checks({}, { repo: { ...repo, viewerPermission: 'READ' } }) }).merge).toBeNull();
     expect(status({ checks: checks({}, { repo: null }) }).merge).toBe('primary');
-    expect(status({ checks: checks({ autoMergeRequest: true }) }).merge).toBeNull();
     expect(status({ checks: checks({ mergeStateStatus: 'BEHIND' }) }).merge).toBeNull();
     expect(status({ checks: checks({ mergeStateStatus: 'DIRTY' }) }).merge).toBeNull();
     expect(status({ merging: true }).merge).toBeNull();
@@ -252,37 +247,6 @@ describe('evidence for ready', () => {
   });
 });
 
-describe('a base branch with a merge queue', () => {
-  const queue = { queue: { enabled: true, queued: false } };
-
-  it('is ready for the queue when GitHub reports BLOCKED and nothing else is known to stand in the way', () => {
-    const ready = status({ checks: checks({ mergeStateStatus: 'BLOCKED' }, queue) });
-    expect(ready).toMatchObject({ kind: 'ready', label: 'Ready to merge', merge: 'primary' });
-    expect(mergeBlocker(checks({ mergeStateStatus: 'BLOCKED' }, queue))).toBeNull();
-  });
-
-  it('keeps the reasons that would hold it out of the queue', () => {
-    const blocked = (pr: Partial<PullRequest>, extra: Partial<Checks> = {}) => status({ checks: checks({ mergeStateStatus: 'BLOCKED', ...pr }, { ...queue, ...extra }) });
-    expect(blocked({}, { checks: [run('failure')] })).toMatchObject({ kind: 'failing', merge: null });
-    expect(blocked({}, { checks: [run('pending')] })).toMatchObject({ kind: 'checks-running', merge: null });
-    expect(blocked({ reviewDecision: 'REVIEW_REQUIRED' })).toMatchObject({ kind: 'needs-review', merge: null });
-    expect(blocked({ reviewDecision: 'CHANGES_REQUESTED' })).toMatchObject({ kind: 'changes-requested', merge: null });
-    expect(blocked({ mergeable: 'CONFLICTING' })).toMatchObject({ kind: 'conflicts', merge: null });
-    expect(blocked({ isDraft: true })).toMatchObject({ kind: 'draft', merge: null });
-    expect(blocked({ autoMergeRequest: true })).toMatchObject({ kind: 'auto-merge', merge: null });
-    expect(status({ checks: checks({ mergeStateStatus: 'BEHIND' }, queue) })).toMatchObject({ kind: 'behind', merge: null });
-    expect(status({ checks: checks({ mergeStateStatus: 'BLOCKED' }, { queue: { enabled: true, queued: true } }) })).toMatchObject({ kind: 'queued', merge: null });
-    expect(status({ checks: checks({ mergeStateStatus: 'BLOCKED' }, { ...queue, repo: { ...repo, viewerPermission: 'READ' } }) }).merge).toBeNull();
-    // Lonca's own reasons still apply, and still leave Merge on offer.
-    expect(status({ checks: checks({ mergeStateStatus: 'BLOCKED' }, { ...queue, local: { head: HEAD, unpushed: 0, uncommitted: 2 } }) }))
-      .toMatchObject({ kind: 'not-committed', merge: 'plain' });
-  });
-
-  it('is blocked by a rule when there’s no queue', () => {
-    expect(status({ checks: checks({ mergeStateStatus: 'BLOCKED' }) })).toMatchObject({ kind: 'blocked', merge: null });
-  });
-});
-
 describe('a merge GitHub accepted but hasn’t shown yet', () => {
   const pending = { outcome: 'pending', number: 7, head: HEAD };
 
@@ -292,7 +256,7 @@ describe('a merge GitHub accepted but hasn’t shown yet', () => {
     expect(stillAwaiting({ ...pending, expired: true }, checks())).toBe(false);
     expect(stillAwaiting(pending, checks({ state: 'MERGED' }))).toBe(false);
     expect(stillAwaiting(pending, checks({ headRefOid: 'c'.repeat(40) }))).toBe(false);
-    expect(stillAwaiting({ ...pending, outcome: 'queued' }, checks())).toBe(false);
+    expect(stillAwaiting({ ...pending, outcome: 'merged' }, checks())).toBe(false);
     expect(stillAwaiting(null, checks())).toBe(false);
   });
 
@@ -306,7 +270,7 @@ describe('a merge GitHub accepted but hasn’t shown yet', () => {
 });
 
 describe('how often it’s read', () => {
-  it('reads every 5 seconds while GitHub settles something, every 15 while checks or a queue run, and every 30 otherwise', () => {
+  it('reads every 5 seconds while GitHub settles something, every 15 while checks run, and every 30 otherwise', () => {
     expect(refreshInterval(checks(), false)).toBe(30000);
     expect(refreshInterval(null, false)).toBe(30000);
     expect(refreshInterval(checks({ state: 'MERGED', mergeStateStatus: 'UNKNOWN' }), false)).toBe(30000);
@@ -315,8 +279,6 @@ describe('how often it’s read', () => {
     expect(refreshInterval(checks({ mergeStateStatus: 'UNKNOWN' }), false)).toBe(5000);
     expect(refreshInterval(checks({ mergeStateStatus: null }), false)).toBe(5000);
     expect(refreshInterval(checks({}, { checks: [run('pending')] }), false)).toBe(15000);
-    expect(refreshInterval(checks({}, { queue: { enabled: true, queued: true } }), false)).toBe(15000);
-    expect(refreshInterval(checks({ autoMergeRequest: true }), false)).toBe(15000);
   });
 });
 
@@ -325,7 +287,6 @@ describe('the merge dialog’s warnings', () => {
     pr: { ...checks().pr!, ...prOverrides },
     checks: [run('success')],
     repo,
-    queue: false,
     local: { head: HEAD, unpushed: 0, uncommitted: 0 },
     working: null,
     ...overrides,
@@ -391,7 +352,6 @@ describe('merge settings', () => {
     expect(mergeBlocker(checks())).toBeNull();
     expect(mergeBlocker(checks({ mergeStateStatus: 'UNSTABLE' }))).toBeNull();
     expect(mergeBlocker(checks({ isDraft: true }))).toMatch(/draft/);
-    expect(mergeBlocker(checks({}, { queue: { enabled: true, queued: true } }))).toMatch(/merge queue/);
     expect(mergeBlocker(checks({ state: 'MERGED' }))).toMatch(/already merged/);
   });
 });
