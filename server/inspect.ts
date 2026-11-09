@@ -185,7 +185,7 @@ git ls-files --others --exclude-standard -z | head -c 262144 | while IFS= read -
   if [ -f "$file" ] && [ "$(stat -c %s -- "$file")" -lt 1048576 ]; then lines=$(wc -l < "$file"); fi
   printf '%s\t%s\0' "$lines" "$file"
 done; sep
-git status --porcelain | wc -l; sep
+status=$(git status --porcelain --untracked-files=normal --ignore-submodules=none) && printf '%s' "$status" | grep -c .; sep
 git rev-list --count "$mb..HEAD"
 `;
 
@@ -216,12 +216,14 @@ export async function getChanges(workspace: Workspace): Promise<ChangeSet> {
   const added = files.reduce((sum, file) => sum + file.added, 0);
   const removed = files.reduce((sum, file) => sum + file.removed, 0);
   updateDiffStat(workspace, { added, removed, files: files.length });
+  // Missing when git status failed, which mustn't read as nothing to lose.
+  const uncommittedCount = Number.parseInt(uncommitted ?? '', 10);
   return {
     base: `origin/${workspace.baseBranch}`,
     files,
     added,
     removed,
-    uncommitted: Number(uncommitted ?? 0) || 0,
+    uncommitted: Number.isNaN(uncommittedCount) ? null : uncommittedCount,
     ahead: Number(ahead ?? 0) || 0,
   };
 }

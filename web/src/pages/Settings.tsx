@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Check, MoreHorizontal, PanelLeft, Plus } from 'lucide-react';
 import { isReady, profileName, profileStatus, profilesOf } from '../../../shared/profiles.ts';
 import type { AgentId, AppSettings, Profile } from '../../../shared/types.ts';
@@ -222,6 +222,25 @@ function GithubCard() {
   );
 }
 
+/**
+ * A setting that's on or off. The switch is named after its title, so that two of them don't sound
+ * the same, and its name stays put while its state changes.
+ */
+function SettingSwitch({ title, note, on, onChange }: { title: string; note: string; on: boolean; onChange: (on: boolean) => void }) {
+  const titleId = useId();
+  return (
+    <div className="settings-row">
+      <div className="settings-row-text">
+        <strong id={titleId}>{title}</strong>
+        <span className="settings-note">{note}</span>
+      </div>
+      <button type="button" className="button" role="switch" aria-checked={on} aria-labelledby={titleId} onClick={() => onChange(!on)}>
+        {on ? 'Turn off' : 'Turn on'}
+      </button>
+    </div>
+  );
+}
+
 const SANDBOX_DOCS = 'https://docs.docker.com/ai/sandboxes/';
 
 function SignOutWarning() {
@@ -348,15 +367,12 @@ function LeadSettings() {
           {[1, 2, 3, 4, 5, 6, 7, 8].map((count) => <option key={count} value={count}>{count}</option>)}
         </select>
       </div>
-      <div className="settings-row">
-        <div className="settings-row-text">
-          <strong>Notifications</strong>
-          <span className="settings-note">Tell this computer when a Lead needs you and you aren’t looking at Lonca.</span>
-        </div>
-        <button type="button" className="button" role="switch" aria-checked={settings.notifications} onClick={() => void attempt(() => api.updateSettings({ notifications: !settings.notifications }))}>
-          {settings.notifications ? 'Turn off' : 'Turn on'}
-        </button>
-      </div>
+      <SettingSwitch
+        title="Notifications"
+        note="Tell this computer when a Lead needs you and you aren’t looking at Lonca."
+        on={settings.notifications}
+        onChange={(notifications) => void attempt(() => api.updateSettings({ notifications }))}
+      />
       <div className="settings-block">
         <div className="settings-row">
           <div className="settings-row-text">
@@ -431,6 +447,15 @@ export function Settings() {
             <input className="input input-mono" value={form.branchPrefix} onChange={(event) => updateField('branchPrefix', event.target.value)} onBlur={() => void saveField('branchPrefix')} />
           </label>
           <p className="field-help">New workspaces branch as {form.branchPrefix ? `${form.branchPrefix}/` : ''}city-name.</p>
+        </section>
+        <section className="settings-section">
+          <h2>Workspaces</h2>
+          <SettingSwitch
+            title="Ask before archiving"
+            note="Show what’s lost before the trash icon archives a workspace. Even with this off, it asks when an agent is working or there may be uncommitted changes. Deleting one for good always asks."
+            on={settings.confirmArchive}
+            onChange={(confirmArchive) => void attempt(() => api.updateSettings({ confirmArchive }))}
+          />
         </section>
         <section className="settings-section">
           <h2>Isolation</h2>

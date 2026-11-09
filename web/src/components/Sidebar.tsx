@@ -9,7 +9,7 @@ import { api } from '../api.ts';
 import { compactNumber } from '../format.ts';
 import { useLayout } from '../layout.ts';
 import { attempt, useStore } from '../store.ts';
-import { canClose, closeVerb, CloseWorkspaceDialog } from './CloseWorkspaceDialog.tsx';
+import { canClose, closeVerb, useCloseWorkspace } from './CloseWorkspaceDialog.tsx';
 import { Avatar, ConfirmDialog, type ConfirmOptions, IconButton, Menu, Spinner } from './ui.tsx';
 
 function DiffBadge({ workspace }: { workspace: Workspace }) {
@@ -36,7 +36,7 @@ function WorkspaceIcon({ workspace }: { workspace: Workspace }) {
 }
 
 function WorkspaceRow({ workspace, active }: { workspace: Workspace; active: boolean }) {
-  const [closing, setClosing] = useState(false);
+  const close = useCloseWorkspace(workspace);
   // Two rows can share a title, and only the name tells them apart.
   const name = workspace.title ? `“${workspace.title}” (${workspace.name})` : workspace.name;
   return (
@@ -47,11 +47,11 @@ function WorkspaceRow({ workspace, active }: { workspace: Workspace; active: boo
         <DiffBadge workspace={workspace} />
       </Link>
       {canClose(workspace) && (
-        <IconButton className="icon-button-danger workspace-close" label={`${closeVerb(workspace)} ${name}`} onClick={() => setClosing(true)}>
-          <Trash2 size={14} />
+        <IconButton className="icon-button-danger workspace-close" label={`${closeVerb(workspace)} ${name}`} onClick={close.press}>
+          {close.checking ? <Spinner size={13} /> : <Trash2 size={14} />}
         </IconButton>
       )}
-      {closing && <CloseWorkspaceDialog workspace={workspace} onClose={() => setClosing(false)} />}
+      {close.dialog}
     </div>
   );
 }

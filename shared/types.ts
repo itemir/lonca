@@ -407,6 +407,8 @@ export interface AppSettings {
   leadMaxAgents: number;
   /** Tell the computer's notification center when a Lead needs the user. */
   notifications: boolean;
+  /** Ask before the trash icon archives a workspace. Deleting one for good always asks. */
+  confirmArchive: boolean;
 }
 
 /** Instructions for Leads, from a project's file, the global file or the shipped template. */
@@ -484,7 +486,8 @@ export interface ChangeSet {
   files: ChangedFile[];
   added: number;
   removed: number;
-  uncommitted: number;
+  /** Null when git couldn't count them. */
+  uncommitted: number | null;
   ahead: number;
 }
 

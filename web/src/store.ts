@@ -153,6 +153,7 @@ export const useStore = create<Store>((set, get) => ({
   settings: {
     branchPrefix: '', gitName: '', gitEmail: '', defaultAgent: 'claude', defaultModel: 'claude-opus-5-5', defaultEffort: 'high',
     leadDefault: { agent: 'claude', model: 'claude-opus-5-5', effort: 'high' }, leadMaxAgents: 4, notifications: true,
+    confirmArchive: true,
   },
   secrets: { claudeToken: null, githubToken: null },
   transcripts: {},

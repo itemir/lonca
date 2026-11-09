@@ -602,12 +602,50 @@ async function teardown(workspace: Workspace, project: Project, deleteBranch: bo
   await removeTree(workspace.path);
 }
 
-/** Removes the sandbox and checkout but keeps the branch and chat history. */
-export function archiveWorkspace(workspace: Workspace): Promise<void> {
+/**
+ * Removes the sandbox and checkout but keeps the branch and chat history. When the user wasn't
+ * asked first, it can refuse, and returns false to say they need asking after all.
+ */
+export function archiveWorkspace(workspace: Workspace, { asked = true } = {}): Promise<boolean> {
   return lifecycle.run(workspace.id, async () => {
-    if (workspace.status === 'archived') return;
+    if (workspace.status === 'archived') return true;
+    // Checked again after counting, since an agent can start meanwhile.
+    if (!asked && (mustAsk(workspace) || await mayHaveChanges(workspace) || mustAsk(workspace))) return false;
     await performOperation(workspace, 'archive');
+    return true;
   });
+}
+
+/**
+ * Even someone who said not to be asked before archiving is asked while an agent is working there,
+ * and while it isn't running, since its uncommitted changes can't be counted then.
+ */
+function mustAsk(workspace: Workspace): boolean {
+  return state.settings.confirmArchive || workspace.status !== 'ready' || agentWorkingIn(workspace);
+}
+
+export function agentWorkingIn(workspace: Workspace): boolean {
+  return state.sessions.some((session) => session.workspaceId === workspace.id && session.status === 'running');
+}
+
+// A busy sandbox can be slow to answer, and then the user is asked instead.
+const UNASKED_COUNT_MS = 3000;
+
+/**
+ * New files and changes in submodules count whatever the repository's settings say, and git failing
+ * or taking too long isn't taken to mean there are none.
+ */
+async function mayHaveChanges(workspace: Workspace): Promise<boolean> {
+  try {
+    const command = ['git', '--no-optional-locks', 'status', '--porcelain', '--untracked-files=normal', '--ignore-submodules=none'];
+    const status = await exec(await runningSandbox(workspace), command, {
+      workdir: workspace.path,
+      timeoutMs: UNASKED_COUNT_MS,
+    });
+    return status.code !== 0 || status.stdout.length > 0;
+  } catch {
+    return true;
+  }
 }
 
 /** Removes every trace of the workspace, including its branch. */

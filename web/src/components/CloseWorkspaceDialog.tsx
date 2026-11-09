@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { useMatch, useNavigate } from 'react-router-dom';
 import type { Workspace } from '../../../shared/types.ts';
 import { api } from '../api.ts';
@@ -25,17 +25,52 @@ export function closeVerb(workspace: Workspace): string {
   return deletes(workspace) ? 'Delete' : 'Archive';
 }
 
-function uncommittedLine(count: number | null): string {
-  if (count === null) return 'Any uncommitted changes are lost.';
+function agentWorkingIn(workspaceId: string): boolean {
+  return useStore.getState().sessions.some((session) => session.workspaceId === workspaceId && session.status === 'running');
+}
+
+/**
+ * What pressing the trash icon does, whether it's waiting to hear if it can archive without asking,
+ * and the dialog it opens. Someone who said not to be asked is asked anyway when an agent is working
+ * or there may be uncommitted changes. The page can be out of date, so the server has the last word.
+ */
+export function useCloseWorkspace(workspace: Workspace): { press: () => void; checking: boolean; dialog: ReactNode } {
+  const [asking, setAsking] = useState<{ agentWorking?: boolean } | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const press = () => {
+    if (checking) return;
+    if (deletes(workspace) || useStore.getState().settings.confirmArchive || workspace.status !== 'ready' || agentWorkingIn(workspace.id)) {
+      setAsking({});
+      return;
+    }
+    setChecking(true);
+    void attempt(() => api.archiveUnasked(workspace.id)).then((outcome) => {
+      setChecking(false);
+      if (outcome?.ask) setAsking({ agentWorking: outcome.agentWorking });
+    });
+  };
+
+  const dialog = asking && <CloseWorkspaceDialog workspace={workspace} agentWorking={asking.agentWorking} onClose={() => setAsking(null)} />;
+  // Once it's archiving, its row and banner show that instead.
+  return { press, checking: checking && workspace.status === 'ready', dialog };
+}
+
+function uncommittedLine(count: number | null, running: boolean): string {
+  if (count === null) return running ? 'Any uncommitted changes are lost.' : 'Any uncommitted changes are lost. They can’t be counted while it isn’t running.';
   if (count === 0) return 'No uncommitted changes.';
   return count === 1 ? '1 uncommitted change is lost.' : `${count} uncommitted changes are lost.`;
 }
 
-export function CloseWorkspaceDialog({ workspace, onClose }: { workspace: Workspace; onClose: () => void }) {
+/** `agentWorking` is the server saying so, which a page that's behind may not know yet. */
+export function CloseWorkspaceDialog({ workspace, agentWorking: serverSaysWorking, onClose }: { workspace: Workspace; agentWorking?: boolean; onClose: () => void }) {
   const navigate = useNavigate();
   const onScreen = useMatch('/w/:id')?.params.id === workspace.id;
-  const agentWorking = useStore((store) => store.sessions.some((session) => session.workspaceId === workspace.id && session.status === 'running'));
+  const agentWorking = useStore((store) => store.sessions.some((session) => session.workspaceId === workspace.id && session.status === 'running')) || serverSaysWorking;
+  // Once someone has said not to be asked, they're only asked when something is at stake, and the box has nothing left to do.
+  const asksEveryTime = useStore((store) => store.settings.confirmArchive);
   const [uncommitted, setUncommitted] = useState<number | null>(null);
+  const [stopAsking, setStopAsking] = useState(false);
   const ready = workspace.status === 'ready';
 
   // The dialog doesn't wait for this: a busy sandbox can be slow to answer, and a stopped one isn't woken just to ask.
@@ -44,8 +79,10 @@ export function CloseWorkspaceDialog({ workspace, onClose }: { workspace: Worksp
     api.changes(workspace.id).then((changes) => setUncommitted(changes.uncommitted), () => {});
   }, [ready, workspace.id]);
 
+  // Ticking the box and then cancelling leaves things as they were.
   const archive = () => {
     onClose();
+    if (stopAsking) void attempt(() => api.updateSettings({ confirmArchive: false }));
     void attempt(() => api.workspaceAction(workspace.id, 'archive'));
   };
 
@@ -71,13 +108,19 @@ export function CloseWorkspaceDialog({ workspace, onClose }: { workspace: Worksp
             <div>
               {agentWorking && <p className="close-warning">An agent is working here and will be stopped.</p>}
               <p>Its virtual machine and checkout are removed, along with any git-ignored files and attachments.</p>
-              <p className={uncommitted ? 'close-warning' : undefined}>{uncommittedLine(uncommitted)}</p>
+              <p className={uncommitted || !ready ? 'close-warning' : undefined}>{uncommittedLine(uncommitted, ready)}</p>
             </div>
             <p>Its branch and chat are kept, so you can restore it later or delete it for good from the archived list in the sidebar.</p>
           </>
         )}
       </div>
       <div className="modal-actions">
+        {!deletes(workspace) && asksEveryTime && (
+          <label className="close-stop-asking">
+            <input type="checkbox" checked={stopAsking} onChange={(event) => setStopAsking(event.target.checked)} />
+            Don’t ask again
+          </label>
+        )}
         <button type="button" className="button" autoFocus onClick={onClose}>Cancel</button>
         {deletes(workspace)
           ? <button type="button" className="button button-danger" onClick={remove}>Delete permanently</button>
