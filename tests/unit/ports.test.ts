@@ -11,6 +11,7 @@ import type { ToolCall } from '../../server/agents/process.ts';
 
 const vm = vi.hoisted(() => ({
   running: true,
+  exists: true,
   tables: '',
   publishPort: vi.fn(async (_name: string, _hostPort: number, _port: number) => {}),
   unpublishPort: vi.fn(async (_name: string, _hostPort: number, _port: number) => {}),
@@ -25,6 +26,7 @@ vi.mock('../../server/sandbox.ts', async (importOriginal) => {
   vm.ensureSandbox.mockImplementation(async (spec: { name: string }, options: { start?: boolean } = {}) => {
     if (options.start === false && !vm.running) throw new RuntimeStoppedError('The sandbox is stopped');
     vm.running = true;
+    vm.exists = true;
     return spec.name;
   });
   vm.execText.mockImplementation(async () => vm.tables);
@@ -32,7 +34,7 @@ vi.mock('../../server/sandbox.ts', async (importOriginal) => {
     ...original,
     ensureSandbox: vm.ensureSandbox,
     execText: vm.execText,
-    sandboxState: async () => (vm.running ? 'running' : 'stopped'),
+    sandboxState: async () => (!vm.exists ? 'missing' : vm.running ? 'running' : 'stopped'),
     isSandboxRunning: async () => vm.running,
     stopSandbox: async (name: string) => {
       await vm.stopSandbox(name);
@@ -40,6 +42,7 @@ vi.mock('../../server/sandbox.ts', async (importOriginal) => {
     },
     removeSandbox: async () => {
       vm.running = false;
+      vm.exists = false;
     },
     publishPort: vm.publishPort,
     unpublishPort: vm.unpublishPort,
@@ -91,6 +94,18 @@ function listen(port = 0): Promise<number> {
   });
 }
 
+/** A port held by a program listening on another address, as a dev server or Docker might. */
+function listenOn(host: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(0, host, () => {
+      servers.push(server);
+      resolve((server.address() as AddressInfo).port);
+    });
+  });
+}
+
 /** A port nothing on this computer is listening on, as far as anyone can know. */
 async function freePort(): Promise<number> {
   const port = await listen();
@@ -128,6 +143,7 @@ beforeAll(async () => {
 beforeEach(() => {
   vi.clearAllMocks();
   vm.running = true;
+  vm.exists = true;
   vm.tables = tables();
   own = makeWorkspace('own', OWN_PORT);
   other = makeWorkspace('other', OTHER_PORT);
@@ -172,6 +188,11 @@ describe('choosing the port on the user’s computer', () => {
 
   it.each([
     ['taken by something else', async () => listen()],
+    // On macOS, sbx publishing on 127.0.0.1 would take these programs' connections.
+    ['taken by something listening on 0.0.0.0', async () => listenOn('0.0.0.0')],
+    ['taken by something listening on ::', async () => listenOn('::')],
+    // Which would answer for localhost in place of the VM.
+    ['taken by something listening on ::1', async () => listenOn('::1')],
     ['below 1024', async () => 80],
     ['Lonca’s own', async () => HTTP_PORT],
     ['Codex’s sign-in port', async () => 1455],
@@ -210,6 +231,7 @@ describe('choosing the port on the user’s computer', () => {
       return 3456;
     }, 'is already forwarded to another workspace'],
     ['in use on this computer', async () => listen(), 'Something on the user\'s computer is already using'],
+    ['in use on every interface of this computer', async () => listenOn('0.0.0.0'), 'Something on the user\'s computer is already using'],
   ])('refuses a host_port that’s %s, and says why, without asking sbx', async (_why, take, reason) => {
     const hostPort = await take();
     const before = structuredClone(own.forwards);
@@ -424,27 +446,48 @@ describe('forwards when the workspace stops and starts', () => {
     expect(vm.unpublishPort).toHaveBeenCalledWith('vm-own', closed.hostPort, closed.port);
   });
 
-  it('leaves the forwards of a sandbox stopped outside Lonca alone, rather than start it to close them', async () => {
+  it('closes the forwards of a sandbox stopped outside Lonca, which doesn’t start it', async () => {
     const forwards = await forwardTwo();
     vm.running = false;
     await workspaces.stopWorkspace(own);
-    expect(vm.unpublishPort).not.toHaveBeenCalled();
-    expect(own.forwards).toEqual(forwards);
+    expect(vm.unpublishPort.mock.calls).toEqual(forwards.map((forward) => ['vm-own', forward.hostPort, forward.port]));
+    expect(own.forwards).toBeUndefined();
+    expect(vm.running).toBe(false);
   });
 
-  it('closes whatever sbx brought back when it starts, and forgets it even if that fails', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+  it('closes what’s left before it starts the sandbox, since sbx would publish it again or refuse to start', async () => {
     const forwards = await forwardTwo();
+    // As if it stopped some other way, with no chance to close them.
     own.status = 'stopped';
     vm.running = false;
-    vm.unpublishPort.mockRejectedValueOnce(new Error('error: no published port matches'));
     await workspaces.startWorkspace(own);
     expect(own.status).toBe('ready');
     expect(own.forwards).toBeUndefined();
     expect(vm.unpublishPort.mock.calls).toEqual(forwards.map((forward) => ['vm-own', forward.hostPort, forward.port]));
-    // Only after it started, because sbx publishes them again as it does.
     const started = vm.ensureSandbox.mock.invocationCallOrder.at(-1)!;
-    expect(Math.min(...vm.unpublishPort.mock.invocationCallOrder)).toBeGreaterThan(started);
+    expect(Math.max(...vm.unpublishPort.mock.invocationCallOrder)).toBeLessThan(started);
+  });
+
+  it('keeps one it couldn’t close before starting, since sbx publishes it again', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const [kept] = await forwardTwo();
+    own.status = 'stopped';
+    vm.running = false;
+    vm.unpublishPort.mockRejectedValueOnce(new Error('error: cannot connect to sandboxd'));
+    await workspaces.startWorkspace(own);
+    expect(own.status).toBe('ready');
+    expect(own.forwards).toEqual([kept]);
+  });
+
+  it('forgets the forwards of a sandbox removed outside Lonca, without asking sbx', async () => {
+    await forwardTwo();
+    own.status = 'stopped';
+    vm.running = false;
+    vm.exists = false;
+    await workspaces.startWorkspace(own);
+    expect(own.status).toBe('ready');
+    expect(own.forwards).toBeUndefined();
+    expect(vm.unpublishPort).not.toHaveBeenCalled();
   });
 
   it.each(['rebuild', 'archive'] as const)('forgets a forward it couldn’t close once %s has removed the sandbox', async (operation) => {
@@ -455,7 +498,7 @@ describe('forwards when the workspace stops and starts', () => {
     await (operation === 'rebuild' ? workspaces.rebuildWorkspace(own) : workspaces.archiveWorkspace(own));
     expect(own.status).toBe(operation === 'rebuild' ? 'ready' : 'archived');
     expect(own.forwards).toBeUndefined();
-    // A new sandbox never had it, so there's nothing to ask sbx.
+    // Once the sandbox has gone, there's nothing to ask sbx.
     expect(vm.unpublishPort).toHaveBeenCalledTimes(2);
   });
 

@@ -76,40 +76,36 @@ stop_relays() {
   docker ps -aq --filter "label=$relay_marker=$1" | xargs -r docker rm -f >/dev/null
 }
 
-# The real one asks for another port when one has been taken meanwhile, which it can't do here.
+# Like the real one, it won't start a sandbox when one of its ports has been taken meanwhile.
 start_relays() {
   local ip host port
   [ -f "$(ports_file "$1")" ] || return 0
   while read -r ip host port; do
     [ -n "$host" ] || continue
     if ! start_relay "$1" "$ip" "$host" "$port"; then
-      echo "error: port $ip:$host is already in use; choose another for sandbox $1" >&2
-      echo 'error: stdin is not a terminal; run this command in a terminal to answer the prompt' >&2
+      stop_relays "$1"
+      docker stop -t 1 "$1" >/dev/null
+      echo "error: cannot start sandbox: start runtime: request failed: 409 Conflict: republish port: port not available: mapping ports: failed to bind host port $ip:$host: address already in use" >&2
       return 1
     fi
   done < "$(ports_file "$1")"
 }
 
-# [HOST_IP:]HOST_PORT:SANDBOX_PORT[/PROTOCOL], or only SANDBOX_PORT to unpublish every port mapped to it.
+# [HOST_IP:]HOST_PORT:SANDBOX_PORT[/PROTOCOL]. Lonca always names the host port.
 parse_spec() {
   local parts=()
   IFS=: read -r -a parts <<< "${1%/*}"
   case ${#parts[@]} in
-    1) spec_ip=''; spec_host=''; spec_port=${parts[0]} ;;
     2) spec_ip=127.0.0.1; spec_host=${parts[0]}; spec_port=${parts[1]} ;;
     3) spec_ip=${parts[0]}; spec_host=${parts[1]}; spec_port=${parts[2]} ;;
-    *) echo "error: invalid port mapping: $1" >&2; exit 1 ;;
+    *) echo "error: the stand-in for sbx needs a host port: $1" >&2; exit 1 ;;
   esac
 }
 
 publish_port() {
   parse_spec "$2"
-  if [ -z "$spec_host" ]; then
-    echo 'error: the stand-in for sbx needs a host port' >&2
-    exit 1
-  fi
   if grep -qs "^[^ ]* $spec_host " "$(ports_file "$1")"; then
-    echo "error: port $spec_host is already published" >&2
+    echo "error: publish ports: request failed: 409 Conflict: port $spec_ip:$spec_host/tcp4 is already published" >&2
     exit 1
   fi
   # Like the real one, it starts a stopped sandbox.
@@ -119,75 +115,43 @@ publish_port() {
     start_relays "$1" || exit 1
   fi
   if ! start_relay "$1" "$spec_ip" "$spec_host" "$spec_port"; then
-    echo "error: port $spec_ip:$spec_host is already in use" >&2
+    echo "error: host $spec_ip:$spec_host is already in use; choose a different host port with --publish" >&2
     exit 1
   fi
   echo "$spec_ip $spec_host $spec_port" >> "$(ports_file "$1")"
   echo "ports $1 --publish $2" >> "$state/calls.log"
-  echo "Published $spec_ip:$spec_host -> $spec_port"
+  echo "Published $spec_ip:$spec_host -> $spec_port/tcp4"
 }
 
+# Like the real one, it doesn't start a stopped sandbox, and isn't bothered by a port that isn't published.
 unpublish_port() {
   parse_spec "$2"
-  local file kept=() found='' ip host port
+  local file kept=() ip host port
   file=$(ports_file "$1")
   while read -r ip host port; do
     [ -n "$host" ] || continue
-    if [ "$port" = "$spec_port" ] && { [ -z "$spec_host" ] || [ "$host" = "$spec_host" ]; } && { [ -z "$spec_ip" ] || [ "$ip" = "$spec_ip" ]; }; then
+    if [ "$ip $host $port" = "$spec_ip $spec_host $spec_port" ]; then
       docker rm -f "$(relay_name "$1" "$host")" >/dev/null 2>&1
-      found=1
     else
       kept+=("$ip $host $port")
     fi
   done < <(cat "$file" 2>/dev/null)
-  if [ -z "$found" ]; then
-    echo "error: no published port matches $2" >&2
-    exit 1
-  fi
   if [ ${#kept[@]} -gt 0 ]; then printf '%s\n' "${kept[@]}" > "$file"; else rm -f "$file"; fi
   echo "ports $1 --unpublish $2" >> "$state/calls.log"
-  echo "Unpublished $2"
+  echo "Unpublish requested for $spec_ip:$spec_host -> $spec_port"
 }
 
-# Those it was made with, which Docker keeps, then those published since.
-list_ports() {
-  local rows=() row ip host port separator=''
-  while read -r ip host port; do
-    [ -z "$host" ] || rows+=("$ip $host ${port%/*}")
-  done < <(docker inspect --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{range $bindings}}{{.HostIp}} {{.HostPort}} {{$port}}{{"\n"}}{{end}}{{end}}' "$1")
-  while read -r ip host port; do
-    [ -z "$host" ] || rows+=("$ip $host $port")
-  done < <(cat "$(ports_file "$1")" 2>/dev/null)
-  if [ "$2" = json ]; then
-    printf '['
-    for row in ${rows[@]+"${rows[@]}"}; do
-      read -r ip host port <<< "$row"
-      printf '%s{"host_ip":"%s","host_port":%s,"sandbox_port":%s,"protocol":"tcp4"}' "$separator" "$ip" "$host" "$port"
-      separator=','
-    done
-    printf ']\n'
-    return
-  fi
-  for row in ${rows[@]+"${rows[@]}"}; do
-    read -r ip host port <<< "$row"
-    printf '%s:%s->%s/tcp4\n' "$ip" "$host" "$port"
-  done
-}
-
+# Lonca doesn't list them, so neither does this.
 ports() {
   signed_in
-  local name=${1:-}
-  if ! docker inspect "$name" >/dev/null 2>&1; then
-    echo "error: sandbox $name not found" >&2
+  if ! docker inspect "${1:-}" >/dev/null 2>&1; then
+    echo "error: sandbox '${1:-}' not found" >&2
     exit 1
   fi
-  shift
-  case "${1:-}" in
-    --publish|-p) publish_port "$name" "${2:?}" ;;
-    --unpublish) unpublish_port "$name" "${2:?}" ;;
-    --json) list_ports "$name" json ;;
-    '') list_ports "$name" text ;;
-    *) echo "error: unknown flag: $1" >&2; exit 1 ;;
+  case "${2:-}" in
+    --publish|-p) publish_port "$1" "${3:?}" ;;
+    --unpublish) unpublish_port "$1" "${3:?}" ;;
+    *) echo "error: the stand-in for sbx only publishes and unpublishes ports" >&2; exit 1 ;;
   esac
 }
 

@@ -20,7 +20,7 @@ const allocation = new KeyedQueue();
 
 type ReadyListener = (workspace: Workspace) => void;
 type TeardownListener = (workspace: Workspace) => Promise<void>;
-type StartListener = (workspace: Workspace, sandbox: string) => Promise<void>;
+type StartListener = (workspace: Workspace) => Promise<void>;
 type ScriptStarter = (workspace: Workspace, script: string) => Promise<void>;
 
 const readyListeners: ReadyListener[] = [];
@@ -38,8 +38,8 @@ export function onWorkspaceTeardown(listener: TeardownListener): void {
   teardownListeners.push(listener);
 }
 
-/** Called when Lonca has started a workspace's sandbox, before it takes work, to clear what its last run left. */
-export function onWorkspaceStarted(listener: StartListener): void {
+/** Called before Lonca starts a workspace's sandbox, to clear what its last run left. */
+export function onWorkspaceStarting(listener: StartListener): void {
   startListeners.push(listener);
 }
 
@@ -62,13 +62,27 @@ function setStep(workspace: Workspace, id: StepId, status: WorkspaceStep['status
   publishWorkspace(workspace);
 }
 
-/** Whether nothing on this computer is listening on a port of its loopback. */
-export function isPortFree(port: number): Promise<boolean> {
+// sbx publishes on 127.0.0.1. On macOS that succeeds over a program listening on 0.0.0.0 or ::,
+// and takes its connections, and a program on ::1 would answer for localhost instead, so a port is
+// only free if it could be had on each.
+const LISTEN_ADDRESSES = ['127.0.0.1', '0.0.0.0', '::1', '::'];
+
+function canListen(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
     const server = net.createServer();
-    server.once('error', () => resolve(false));
-    server.listen(port, '127.0.0.1', () => server.close(() => resolve(true)));
+    // Without IPv6 there's nothing listening on it either.
+    server.once('error', (error: NodeJS.ErrnoException) => resolve(error.code === 'EADDRNOTAVAIL' || error.code === 'EAFNOSUPPORT'));
+    server.listen(port, host, () => server.close(() => resolve(true)));
   });
+}
+
+/** Whether nothing on this computer is listening on a port, on loopback or every interface. */
+export async function isPortFree(port: number): Promise<boolean> {
+  // One at a time, since two of these at once could be each other's conflict.
+  for (const host of LISTEN_ADDRESSES) {
+    if (!await canListen(port, host)) return false;
+  }
+  return true;
 }
 
 /** Ports on this computer go to one workspace or forward at a time, so that two can't be given the same one. */
@@ -131,11 +145,10 @@ function ensureWorkspaceSandbox(workspace: Workspace, project: Project, options:
   }, { start: options.start }));
 }
 
-/** Starts a workspace's sandbox for it to take work. sbx brings back what its last run had, which this clears. */
+/** Starts a workspace's sandbox for it to take work, clearing first what sbx would bring back of its last run. */
 async function startWorkspaceSandbox(workspace: Workspace, project: Project): Promise<string> {
-  const sandbox = await ensureWorkspaceSandbox(workspace, project);
-  for (const listener of startListeners) await listener(workspace, sandbox);
-  return sandbox;
+  for (const listener of startListeners) await listener(workspace);
+  return ensureWorkspaceSandbox(workspace, project);
 }
 
 function projectOf(workspace: Workspace): Project {
@@ -469,7 +482,7 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
         if (operation !== 'delete'
           && state.sessions.some((session) => session.workspaceId === workspace.id && session.activeRunId)
           && await sandboxState(workspace.sandboxName) === 'stopped') {
-          await ensureWorkspaceSandbox(workspace, projectOf(workspace));
+          await startWorkspaceSandbox(workspace, projectOf(workspace));
         }
         if (hasSandbox) for (const listener of teardownListeners) await listener(workspace);
         if (operation === 'stop') {
@@ -477,8 +490,6 @@ async function performOperation(workspace: Workspace, operation: WorkspaceOperat
           finishOperation(workspace, 'stopped');
         } else if (operation === 'rebuild') {
           await removeSandbox(workspace.sandboxName);
-          // Removing a sandbox lets go of every port it had, including any forward that couldn't be closed.
-          workspace.forwards = undefined;
           await startWorkspaceSandbox(workspace, projectOf(workspace));
           finishOperation(workspace, 'ready');
         } else {

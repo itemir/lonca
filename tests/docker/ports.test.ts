@@ -1,14 +1,13 @@
 import fs from 'node:fs';
 import net, { type AddressInfo } from 'node:net';
-import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AppState, ChatItem, Project, Session, ToolItem, Workspace } from '../../shared/types.ts';
-import { FAKE_SBX_DIR, Lonca, REAL_SANDBOX, makeFixtureRepo, sandboxExec, sbx, until } from '../support/harness.ts';
+import { Lonca, makeFixtureRepo, sandboxExec, sbx, until } from '../support/harness.ts';
 import { type MockLlm, startMockLlm } from '../support/mock-llm.ts';
 
 // A Lead forwarding ports with the real CLI, through the same MCP server and files as in real use,
 // to servers running in its workspace, which this test then opens from this computer as the user
-// would. Nothing here depends on how sbx lists ports, so it runs against the real one as well.
+// would. It runs against the real sbx as well.
 
 const lonca = new Lonca({ port: 48461, instance: 'ports-test', firstWorkspacePort: 59600 });
 let mock: MockLlm;
@@ -169,7 +168,7 @@ describe('a Lead forwarding ports', () => {
     await expect(lonca.api('DELETE', `/workspaces/${workspace.id}/ports/${port}`)).rejects.toThrow(/404.*isn't forwarded/);
   });
 
-  it('closes forwards when the workspace stops, and clears any that sbx brings back when it starts', async () => {
+  it('closes forwards when the workspace stops, and any a stop outside Lonca left before it starts again', async () => {
     const forwards = (await current()).forwards ?? [];
     expect(forwards.length).toBeGreaterThan(0);
     await lonca.api('POST', `/workspaces/${workspace.id}/stop`);
@@ -197,31 +196,23 @@ describe('a Lead forwarding ports', () => {
     expect(listed.output).toContain('Nothing else is forwarded.');
   });
 
-  // Signing out would sign this computer out of the real one.
-  it.skipIf(REAL_SANDBOX)('closes forwards before signing out of Docker, which stops every sandbox', async () => {
-    const port = await freePort();
-    const forwarded = await leadCalls('forward_port', { port });
+  it('starts a workspace that stopped outside Lonca after something else took a port it forwarded', async () => {
+    const forwarded = await leadCalls('forward_port', { port: await freePort() });
+    expect(forwarded.status, forwarded.output).toBe('done');
     const hostPort = portOf(urlIn(forwarded.output));
+    sbx('stop', workspace.sandboxName);
+    // sbx won't start a sandbox when a port it would publish again is taken.
     const squatter = net.createServer();
-    await lonca.api('POST', '/sandboxes/logout');
+    await new Promise<void>((resolve, reject) => {
+      squatter.once('error', reject);
+      squatter.listen(hostPort, '127.0.0.1', resolve);
+    });
     try {
-      expect((await current()).forwards).toBeUndefined();
-      await until('the workspace to be stopped', async () => (await current()).status === 'stopped', 10000);
-      // Something else takes the port meanwhile, which would stop the workspace starting if sbx still had it.
-      await new Promise<void>((resolve, reject) => {
-        squatter.once('error', reject);
-        squatter.listen(hostPort, '127.0.0.1', resolve);
-      });
-      await lonca.api('POST', '/sandboxes/login');
-      await until('the code', async () => (await lonca.api<AppState>('GET', '/state')).system.dockerLogin?.code, 10000);
-      fs.writeFileSync(path.join(FAKE_SBX_DIR, 'login-approve'), '');
-      await until('the sign-in to finish', async () => (await lonca.api<AppState>('GET', '/state')).system.dockerLogin?.phase === 'done', 20000);
       await lonca.api('POST', `/workspaces/${workspace.id}/start`);
       expect((await current()).status).toBe('ready');
+      expect((await current()).forwards).toBeUndefined();
     } finally {
       await new Promise((resolve) => squatter.close(resolve));
-      // Signed in again either way, or nothing could clean up after this.
-      fs.rmSync(path.join(FAKE_SBX_DIR, 'signed-out'), { force: true });
     }
   });
 });
