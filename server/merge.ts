@@ -46,7 +46,7 @@ export function cleanMergeError(output: string, number: number): string {
     .map((line) => line
       .replace(/^(?:X|✗|!)\s+/, '')
       .replace(/^GraphQL:\s*/, '')
-      .replace(/\s*\((?:mergePullRequest|enablePullRequestAutoMerge)\)\s*$/, '')
+      .replace(/\s*\(mergePullRequest\)\s*$/, '')
       .replace(/^Pull request [\w.-]+\/[\w.-]+#(\d+)/, '#$1'))
     .filter(Boolean)
     .join(' ');

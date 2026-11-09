@@ -381,6 +381,23 @@ test('archives from the panel as the trash icon does, without asking once told n
   }
 });
 
+test('says so when the merge went into another base than the one confirmed', async ({ page }) => {
+  const ready = await create();
+  // An agent retargets it at the last moment, which GitHub can't be told to refuse.
+  answer(ready, {
+    'view.json': view(ready),
+    'graphql.json': GRAPHQL,
+    'after-view.json': view(ready, { state: 'MERGED', baseRefName: 'release', mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }),
+  });
+  await page.goto(opened(ready.workspace));
+  await expect(status(page)).toHaveAccessibleName(named('Ready to merge'));
+  await header(page).getByRole('button', { name: 'Merge pull request #7' }).click();
+  await page.getByRole('dialog', { name: 'Merge #7 into main?' }).getByRole('button', { name: 'Squash and merge' }).click();
+  await expect(page.locator('.toast').filter({ hasText: '#7 was merged into release, not main.' })).toBeVisible();
+  await expect(page.locator('.toast').filter({ hasText: 'into main.' })).toHaveCount(0);
+  await expect(status(page)).toHaveAccessibleName(named('Merged'));
+});
+
 test('keeps a merge going when its dialog is closed, and says how it went', async ({ page }) => {
   const ready = await create();
   answer(ready, {

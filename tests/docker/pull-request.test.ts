@@ -160,6 +160,21 @@ describe('reading a pull request', () => {
     }
   });
 
+  it('counts changes in a submodule the checkout’s config says to ignore', async () => {
+    const at = quote(workspace.path);
+    const commit = 'git -c user.name=T -c user.email=t@example.com commit -q';
+    const setup = sandboxExec(workspace.sandboxName, `set -e
+      rm -rf /tmp/sub && git init -q /tmp/sub && (cd /tmp/sub && ${commit} --allow-empty -m init)
+      cd ${at} && git -c protocol.file.allow=always submodule --quiet add /tmp/sub sub && ${commit} -m sub
+      git config submodule.sub.ignore all && echo dirty > sub/dirty.txt`);
+    try {
+      expect(setup).toMatchObject({ code: 0 });
+      expect((await lonca.api<Checks>('GET', `/workspaces/${workspace.id}/checks`)).local).toMatchObject({ unpushed: 1, uncommitted: 1 });
+    } finally {
+      sandboxExec(workspace.sandboxName, `cd ${at} && git reset -q --hard ${head}; git config --remove-section submodule.sub; rm -rf sub "$(git rev-parse --git-dir)/modules/sub" /tmp/sub`);
+    }
+  });
+
   it('ignores a pull request opened before the workspace, which an earlier one with its name left', async () => {
     answer({ 'view.json': merged() });
     await lonca.api('GET', `/workspaces/${workspace.id}/checks`);
