@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AppState, Project, Workspace } from '../../shared/types.ts';
-import { Lonca, asRoot, sandboxExec, git, makeFixtureRepo, sleep, until } from '../support/harness.ts';
+import { FAKE_SBX, REAL_SANDBOX, Lonca, sandboxExec, git, makeFixtureRepo, sleep, until } from '../support/harness.ts';
 
 const lonca = new Lonca({ port: 48295, instance: 'lifecycle-test', firstWorkspacePort: 50300 });
 let fixture: string;
@@ -10,12 +10,29 @@ let project: Project;
 let workspace: Workspace;
 
 const setupStep = async () => (await lonca.workspace(workspace.id)).steps.find((step) => step.id === 'setup');
+const flag = (name: string) => path.join(lonca.home, name);
 
 beforeAll(async () => {
   fixture = makeFixtureRepo();
   fs.writeFileSync(path.join(fixture, 'lonca.json'), JSON.stringify({ scripts: { setup: 'echo repo >> .context/setup-runs' } }));
   git(fixture, 'add', '.');
   git(fixture, 'commit', '--quiet', '-m', 'Add repository setup');
+  // Lets a test hold the removal of a VM, which deleting a workspace waits for.
+  const wrapper = flag('sbx-hold');
+  fs.writeFileSync(wrapper, `#!${process.execPath}
+const fs = require('node:fs');
+const cp = require('node:child_process');
+const root = process.env.LONCA_HOME;
+const args = process.argv.slice(2);
+(async () => {
+  if (args[0] === 'rm' && fs.existsSync(root + '/hold-removal')) {
+    fs.writeFileSync(root + '/removal-waiting', '');
+    while (fs.existsSync(root + '/hold-removal')) await new Promise(r => setTimeout(r, 25));
+  }
+  cp.spawn(${JSON.stringify(REAL_SANDBOX ? 'sbx' : FAKE_SBX)}, args, { stdio: 'inherit' }).on('exit', code => process.exit(code ?? 1));
+})();
+`, { mode: 0o700 });
+  lonca.env.LONCA_SBX = wrapper;
   await lonca.start();
   project = await lonca.waitForProject((await lonca.api('POST', '/projects', { path: fixture })).id);
   const made = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
@@ -99,27 +116,15 @@ it('does not allocate a workspace while its project is being removed', async () 
     const project = await lonca.waitForProject((await lonca.api('POST', '/projects', { path: repo })).id);
     const made = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
     removing = await lonca.waitForWorkspace(made.workspace.id);
-    // Hold the managed Git operation so the next request definitely overlaps teardown.
-    // Managed deletion bypasses repository hooks, which must not be able to veto cleanup.
-    asRoot(removing.sandboxName, `cat > /usr/local/bin/git <<'GIT'
-#!/bin/bash
-if [[ " $* " == *" branch -D "* ]]; then
-  touch /tmp/removal-waiting
-  for i in $(seq 1 300); do
-    [ -e /tmp/release-removal ] && break
-    sleep 0.1
-  done
-fi
-exec /usr/bin/git "$@"
-GIT
-chmod +x /usr/local/bin/git`);
+    // Hold the removal of its VM, so that the next request definitely overlaps teardown.
+    fs.writeFileSync(flag('hold-removal'), '');
     deleting = lonca.api('DELETE', `/projects/${project.id}`);
-    await until('project teardown hook', () => sandboxExec(removing!.sandboxName, 'test -e /tmp/removal-waiting').code === 0);
+    await until('project teardown', () => fs.existsSync(flag('removal-waiting')));
     const creating = fetch(`${lonca.url}/api/projects/${project.id}/workspaces`, {
       method: 'POST', headers: { ...lonca.headers, 'content-type': 'application/json' }, body: '{}',
     });
     await sleep(200);
-    expect(sandboxExec(removing.sandboxName, 'touch /tmp/release-removal').code).toBe(0);
+    fs.rmSync(flag('hold-removal'));
     await deleting;
     expect((await creating).status).toBe(404);
     const state = await lonca.api<AppState>('GET', '/state');
@@ -127,7 +132,7 @@ chmod +x /usr/local/bin/git`);
     expect(state.workspaces.some((entry) => entry.projectId === project.id)).toBe(false);
     expect(state.sessions.some((entry) => entry.workspaceId === removing!.id)).toBe(false);
   } finally {
-    if (removing) sandboxExec(removing.sandboxName, 'touch /tmp/release-removal');
+    fs.rmSync(flag('hold-removal'), { force: true });
     await deleting?.catch(() => {});
     fs.rmSync(repo, { recursive: true, force: true });
   }

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 const home = process.env.LONCA_HOME ?? path.join(os.homedir(), '.lonca');
 fs.mkdirSync(home, { recursive: true, mode: 0o700 });
 
-/** Resolved so bind mounts match the paths written into git's worktree metadata. */
+/** Resolved, so that a checkout has one path, on this computer and in its VM. */
 export const LONCA_HOME = fs.realpathSync(home);
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -46,8 +46,9 @@ export const paths = {
   agentState: (workspaceId: string) => path.join(LONCA_HOME, 'agent-state', workspaceId),
   projects: path.join(LONCA_HOME, 'projects'),
   projectDir: (slug: string) => path.join(LONCA_HOME, 'projects', slug),
-  repo: (slug: string) => path.join(LONCA_HOME, 'projects', slug, 'repo.git'),
-  worktree: (slug: string, name: string) => path.join(LONCA_HOME, 'projects', slug, 'workspaces', name),
+  /** Lonca's own copy of a repository, which new checkouts are copied from. No VM mounts it. */
+  cache: (slug: string) => path.join(LONCA_HOME, 'projects', slug, 'cache.git'),
+  checkout: (slug: string, name: string) => path.join(LONCA_HOME, 'projects', slug, 'workspaces', name),
 };
 
 /** Inside a sandbox. Writable by the agent, never read from the host. */

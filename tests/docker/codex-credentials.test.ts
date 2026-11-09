@@ -29,7 +29,7 @@ const args = process.argv.slice(2);
     process.stderr.write('Temporary credential connection failure');
     process.exit(125);
   }
-  if (args.includes('lonca-worktree') && fs.existsSync(root + '/hold-checkout')) {
+  if (args.includes('lonca-checkout') && fs.existsSync(root + '/hold-checkout')) {
     fs.writeFileSync(root + '/checkout-entered', '');
     while (fs.existsSync(root + '/hold-checkout')) await new Promise(r => setTimeout(r, 25));
   }

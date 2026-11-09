@@ -6,7 +6,7 @@ export function systemPrompt(workspace: Workspace, project: Project): string {
   const lastPort = workspace.port + 9;
   return [
     `You are working in Lonca workspace "${workspace.name}" of the project "${project.name}", inside an isolated virtual machine.`,
-    `The repository is a git worktree at ${workspace.path} on branch ${workspace.branch}. Its target is origin/${workspace.baseBranch}: compare with \`git diff origin/${workspace.baseBranch}...\` and open pull requests with \`gh pr create --base ${workspace.baseBranch}\`.`,
+    `The repository is checked out at ${workspace.path}, on branch ${workspace.branch}. Its target is origin/${workspace.baseBranch}: compare with \`git diff origin/${workspace.baseBranch}...\` and open pull requests with \`gh pr create --base ${workspace.baseBranch}\`.`,
     'Keep the current branch name unless asked to change it. The .context directory is gitignored: use it for scratch files. Files the user attaches appear in .context/attachments.',
     `Ports ${workspace.port}-${lastPort} (the first is in $LONCA_PORT) are published to the user's localhost. Servers must listen on 0.0.0.0 on one of those ports for the user to open them.`,
     project.settings.network === 'internet'

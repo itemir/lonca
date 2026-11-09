@@ -16,7 +16,7 @@ import { checkDisk, checkSandboxes, ensureSandboxImage, moveCodexLogin, onSandbo
 import { attachTerminal, closeWorkspaceTerminals, reconcileTerminals, runSetupScript } from './terminals.ts';
 import { reapLeftoverLogins } from './logins.ts';
 import { reapSbxLogin } from './sbx-login-pid.ts';
-import { abortImports, reconcileProjects } from './projects.ts';
+import { reconcileProjects, stopHostGit } from './projects.ts';
 import { errorMessage } from './util.ts';
 import { markInterruptedWork, onWorkspaceTeardown, reconcileWorkspaces, setSetupScriptStarter } from './workspaces.ts';
 
@@ -183,8 +183,8 @@ process.on('uncaughtException', (error) => console.error('uncaught error:', erro
 process.on('unhandledRejection', (error) => console.error('unhandled rejection:', error));
 
 function shutdown(): void {
-  // Imports run Git in process groups of their own, with the GitHub token, so they'd outlive this.
-  abortImports();
+  // Git runs in process groups of its own, with the GitHub token for imports and fetches, so it'd outlive this.
+  stopHostGit();
   try {
     flushTranscripts();
     flushState({ required: true });

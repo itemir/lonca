@@ -65,7 +65,7 @@ export interface Project {
   settings: ProjectSettings;
 }
 
-export type StepId = 'image' | 'sandbox' | 'worktree' | 'files' | 'setup';
+export type StepId = 'image' | 'checkout' | 'sandbox' | 'files' | 'setup';
 
 export interface WorkspaceStep {
   id: StepId;

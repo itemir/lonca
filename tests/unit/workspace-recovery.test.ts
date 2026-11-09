@@ -6,12 +6,13 @@ import type { Profile, Project, Session, Workspace, WorkspaceOperation } from '.
 import { archiveWorkspace, deleteWorkspace, markInterruptedWork, retryWorkspace, runningSandbox, setSetupScriptStarter } from '../../server/workspaces.ts';
 import { RuntimeStoppedError } from '../../server/util.ts';
 
-const { state, flushState, execText, ensureSandbox, stopSandbox } = vi.hoisted(() => ({
+const { state, flushState, execText, ensureSandbox, stopSandbox, removeSandbox } = vi.hoisted(() => ({
   state: {
     projects: [] as Project[], workspaces: [] as Workspace[], sessions: [] as Session[],
     profiles: [{ id: 'claude', agent: 'claude', name: '' }, { id: 'codex', agent: 'codex', name: '' }] as Profile[],
   },
   flushState: vi.fn(), execText: vi.fn(async () => ''), ensureSandbox: vi.fn(async () => 'box'), stopSandbox: vi.fn(async () => {}),
+  removeSandbox: vi.fn(async () => {}),
 }));
 
 vi.mock('../../server/store.ts', () => ({ state, flushState, saveState: vi.fn(), deleteTranscript: vi.fn(),
@@ -22,8 +23,8 @@ vi.mock('../../server/store.ts', () => ({ state, flushState, saveState: vi.fn(),
 vi.mock('../../server/system.ts', () => ({ system: { sandbox: { state: 'ready' } },
   ensureSandboxImage: vi.fn(), ensureCustomTemplate: vi.fn(), checkSandboxes: vi.fn(),
 }));
-vi.mock('../../server/sandbox.ts', () => ({ ensureSandbox, isSandboxRunning: async () => true, stopSandbox, sandboxState: async () => 'running', execText, exec: async () => ({ code: 0 }), removeSandbox: vi.fn() }));
-vi.mock('../../server/projects.ts', () => ({ refreshFromLocalRepo: vi.fn(), projectLifecycle: {} }));
+vi.mock('../../server/sandbox.ts', () => ({ ensureSandbox, isSandboxRunning: async () => true, stopSandbox, sandboxState: async () => 'running', execText, exec: async () => ({ code: 0 }), removeSandbox }));
+vi.mock('../../server/projects.ts', () => ({ makeCheckout: vi.fn(async () => undefined), projectLifecycle: {} }));
 
 let workspace: Workspace;
 let dir: string;
@@ -34,7 +35,7 @@ beforeEach(() => {
     settings: { image: '', setupScript: 'setup', filesToCopy: [], network: 'internet', env: {} } } as unknown as Project];
   workspace = { id: 'w', projectId: 'p', name: 'amman', path: dir, sandboxName: 'box', status: 'error',
     branch: 'test/amman', baseBranch: 'main', filesCopied: 0,
-    steps: ['image', 'sandbox', 'worktree', 'files', 'setup'].map((id) => ({ id, status: 'pending' })),
+    steps: ['image', 'checkout', 'sandbox', 'files', 'setup'].map((id) => ({ id, status: 'pending' })),
   } as Workspace;
   state.workspaces = [workspace];
   state.sessions = [];
@@ -60,16 +61,45 @@ it('does not touch the sandbox or checkout resources when saving operation inten
   await expect(archiveWorkspace(workspace)).rejects.toThrow('disk full');
   expect(workspace).toMatchObject({ status: 'error', pendingOperation: 'archive' });
   expect(ensureSandbox).not.toHaveBeenCalled();
+  expect(removeSandbox).not.toHaveBeenCalled();
   expect(execText).not.toHaveBeenCalled();
 });
 
-it.each(['archive', 'delete'] as const)('shuts the runtime down when %s fails starting it for cleanup', async (operation) => {
+it('archives by removing the VM and all of the checkout but its history, without starting a VM', async () => {
   workspace.status = 'ready';
-  // Booting can fail with the runtime already up, for the fallback as well as the first attempt.
-  ensureSandbox.mockRejectedValueOnce(new Error('boot failed')).mockRejectedValueOnce(new Error('boot failed again'));
-  await expect(operation === 'archive' ? archiveWorkspace(workspace) : deleteWorkspace(workspace)).rejects.toThrow('boot failed again');
-  expect(workspace).toMatchObject({ status: 'error', pendingOperation: operation });
-  expect(stopSandbox.mock.invocationCallOrder.at(-1)).toBeGreaterThan(ensureSandbox.mock.invocationCallOrder.at(-1)!);
+  fs.mkdirSync(path.join(dir, '.git', 'refs'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.git', 'index'), 'index');
+  fs.writeFileSync(path.join(dir, 'README.md'), 'file');
+  fs.mkdirSync(path.join(dir, 'locked'));
+  fs.chmodSync(path.join(dir, 'locked'), 0o555);
+  await archiveWorkspace(workspace);
+  expect(workspace.status).toBe('archived');
+  expect(removeSandbox).toHaveBeenCalledWith('box');
+  expect(ensureSandbox).not.toHaveBeenCalled();
+  expect(fs.readdirSync(dir)).toEqual(['.git']);
+  expect(fs.readdirSync(path.join(dir, '.git'))).toEqual(['refs']);
+});
+
+it('archives a checkout whose agent took away the permissions removing needs', async () => {
+  workspace.status = 'ready';
+  fs.mkdirSync(path.join(dir, '.git'));
+  fs.writeFileSync(path.join(dir, '.git', 'index'), 'index');
+  fs.writeFileSync(path.join(dir, 'work.txt'), 'uncommitted');
+  fs.chmodSync(path.join(dir, '.git'), 0o555);
+  fs.chmodSync(dir, 0o000);
+  await archiveWorkspace(workspace);
+  expect(workspace.status).toBe('archived');
+  expect(fs.readdirSync(dir)).toEqual(['.git']);
+  expect(fs.readdirSync(path.join(dir, '.git'))).toEqual([]);
+});
+
+it('deletes an archived workspace without asking Docker Sandboxes anything', async () => {
+  workspace.status = 'archived';
+  await deleteWorkspace(workspace);
+  expect(state.workspaces).toEqual([]);
+  expect(fs.existsSync(dir)).toBe(false);
+  expect(removeSandbox).not.toHaveBeenCalled();
+  expect(ensureSandbox).not.toHaveBeenCalled();
 });
 
 it.each(['create', 'restore'] as WorkspaceOperation[])('keeps %s usable when launching its setup script fails', async (operation) => {
@@ -86,7 +116,8 @@ it('does not recreate a runtime when duplicate deletions were queued before remo
   workspace.status = 'ready';
   await Promise.all([deleteWorkspace(workspace), deleteWorkspace(workspace)]);
   expect(state.workspaces).toEqual([]);
-  expect(ensureSandbox).toHaveBeenCalledTimes(1);
+  expect(ensureSandbox).not.toHaveBeenCalled();
+  expect(removeSandbox).toHaveBeenCalledTimes(1);
 });
 
 it('keeps the saved runtime state when a passive lookup cannot reach Docker', async () => {

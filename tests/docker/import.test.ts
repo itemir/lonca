@@ -80,9 +80,21 @@ it('imports a private HTTPS GitHub repository with the saved token and keeps it 
     expect(project.settings.defaultBranch).toBe('development');
     expect(requests.some((request) => request.path.endsWith('/info/refs') && request.authenticated)).toBe(true);
     expect(requests.some((request) => request.path.endsWith('/HEAD') && request.authenticated)).toBe(true);
-    const imported = path.join(lonca.home, 'projects', project.slug, 'repo.git');
+    const imported = path.join(lonca.home, 'projects', project.slug, 'cache.git');
     expect(git(imported, 'rev-parse', 'refs/remotes/origin/development')).toBe(git(fixture, 'rev-parse', 'HEAD'));
     expect(fs.readFileSync(path.join(imported, 'config'), 'utf8')).not.toMatch(/credential|github_pat/);
+    // A workspace's checkout is copied from that, after a fetch that uses the token as well.
+    const fetched = requests.length;
+    const made = await lonca.api('POST', `/projects/${project.id}/workspaces`, {});
+    const workspace = await lonca.waitForWorkspace(made.workspace.id);
+    expect(workspace.steps.find((step) => step.id === 'checkout')?.status).toBe('done');
+    expect(requests.slice(fetched).some((request) => request.authenticated)).toBe(true);
+    expect(fs.readFileSync(path.join(workspace.path, '.git', 'config'), 'utf8')).not.toMatch(/credential|github_pat/);
+    // A project added by its SSH address uses the token too, over HTTPS, as workspaces do.
+    const viaSsh = await lonca.waitForProject((await lonca.api('POST', '/projects', { url: 'git@github.com:owner/private.git' })).id);
+    expect(viaSsh.settings.defaultBranch).toBe('development');
+    const sshMade = await lonca.api('POST', `/projects/${viaSsh.id}/workspaces`, {});
+    expect((await lonca.waitForWorkspace(sshMade.workspace.id)).steps.find((step) => step.id === 'checkout')?.status).toBe('done');
     expect(JSON.stringify(project)).not.toContain(token);
     expect(lonca.log).not.toContain(token);
   } finally {

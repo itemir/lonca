@@ -1,6 +1,6 @@
 # Lonca
 
-Run coding agents side by side from your browser. Every workspace is a real git worktree on its own branch, running in its own virtual machine, with Claude and Codex ready to work in it.
+Run coding agents side by side from your browser. Every workspace is its own git checkout on its own branch, running in its own virtual machine, with Claude and Codex ready to work in it.
 
 *Lonca* is Turkish for guild: a group of craftspeople working on separate pieces under one roof.
 
@@ -71,9 +71,9 @@ A repository can also carry its own setup script in a `lonca.json` file at its r
 
 Rebuild a workspace from its **⋯** menu to apply network, template or limit changes to it. Its files and conversations are kept. The virtual machine starts afresh, along with anything installed in it.
 
-To close a workspace, use the trash icon on its row in the sidebar or at the top right of its panel. This archives it: its runtime is shut down and removed along with its checkout, so anything not committed is lost, while its branch and chat are kept. It asks first and shows what's lost. Once you tick **Don't ask again**, it asks only when an agent is working there or there are uncommitted changes, and when the workspace isn't running, since then they can't be counted. **Ask before archiving** in Settings turns the question back on. Archived workspaces are listed under **N archived** in the sidebar. Open one to restore it, or use its trash icon to delete it for good, along with any commits that were never pushed. Deleting always asks.
+To close a workspace, use the trash icon on its row in the sidebar or at the top right of its panel. This archives it: its runtime is shut down and removed, and so are its checkout's files, so anything not committed is lost. Its git history, with the branch, and its chat are kept. It asks first and shows what's lost. Once you tick **Don't ask again**, it asks only when an agent is working there or there are uncommitted changes, and when the workspace isn't running, since then they can't be counted. **Ask before archiving** in Settings turns the question back on. Archived workspaces are listed under **N archived** in the sidebar. Open one to restore it, or use its trash icon to delete it for good, along with any commits that were never pushed. Deleting always asks.
 
-If an operation fails or Lonca stops partway through it, the workspace remembers what was requested. Its retry button names that operation: retrying an archive finishes archiving, and retrying a delete finishes deleting. A failed cleanup stops the runtime and remains visible until it succeeds. If an archive can't finish, the trash icon offers to delete the workspace instead. Creation and restoration copy only missing files, so retrying after a partial copy preserves edits already made in the workspace. Setup failures have their own status and can be rerun from the Setup tab.
+If an operation fails or Lonca stops partway through it, the workspace remembers what was requested. Its retry button names that operation: retrying an archive finishes archiving, and retrying a delete finishes deleting. A failed cleanup remains visible until it succeeds. If an archive can't finish, the trash icon offers to delete the workspace instead. Creation and restoration copy only missing files, so retrying after a partial copy preserves edits already made in the workspace. Setup failures have their own status and can be rerun from the Setup tab.
 
 Running agents stay tracked while Docker Sandboxes is unreachable. An accepted Stop is saved and completes when the process can be reached again, including after a Lonca restart. Surviving scripts regain their Stop controls when it reconnects. Shells can also be stopped or restarted, but their old terminal output and input connection cannot be restored; the terminal explains when this happens.
 
@@ -93,7 +93,7 @@ For the agents, Lonca signs in separately from the CLIs on your computer and lea
 
 - **Claude:** open the sign-in page and approve access, and your browser comes back to Lonca by itself. Lonca runs `claude setup-token` out of sight in a small virtual machine of its own and saves the token it creates, which never reaches the page. This needs a Claude subscription; you can use an Anthropic API key instead.
 - **Codex:** open the sign-in page and approve access, and your browser comes back to Lonca by itself. Lonca runs `codex login` out of sight in the same place. Signing in this way, Codex also asks OpenAI for an API key. It doesn't use one with this login, so Lonca doesn't keep it. You can use an OpenAI API key instead.
-- **GitHub:** agents need a token to fetch private repositories, push and open pull requests. Press **Use my gh login** to copy the one from your `gh` CLI, or paste one. Because anything in a virtual machine can use it, a fine-grained token limited to the repositories you use here is the safer choice.
+- **GitHub:** agents need a token to fetch private repositories, push and open pull requests. Lonca fetches with it too, also for a repository added by its SSH address, so your own SSH keys aren't involved. Press **Use my gh login** to copy the one from your `gh` CLI, or paste one. Because anything in a virtual machine can use it, a fine-grained token limited to the repositories you use here is the safer choice.
 
 The sign-in pages send your browser to a port on `localhost`, as they do for the CLIs: 1455 for Codex and one the CLI picks for Claude. Lonca listens there for as long as the sign-in lasts and passes the request to the CLI in its virtual machine, so your browser has to be on the computer running Lonca. If it isn't, or the port is taken, the dialog offers a way that doesn't need it: a code to paste for Claude, and a one-time code to enter on the page for Codex (`codex login --device-auth`). If device code login is off for your account, turn it on in ChatGPT under Settings > Security.
 
@@ -121,18 +121,18 @@ Claude signs in with whichever account your browser is using on claude.ai. To ad
 
 ## How isolation works
 
-Every workspace gets a virtual machine from [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/). It can see its own worktree, its project's git data and a private home directory, and nothing else on your computer.
+Every workspace gets a virtual machine from [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/). It can see its own checkout and a private home directory, and nothing else on your computer.
 
 | Boundary | How it's enforced |
 | --- | --- |
 | Kernel | Its own, behind a hypervisor. |
-| Filesystem | The worktree, the project's `repo.git` and a directory for its conversations are mounted. The home directory is on the VM's own disk. |
+| Filesystem | Its checkout and a directory for its conversations are mounted. The home directory is on the VM's own disk. |
 | Credentials | None inside. A proxy on your computer adds them to requests as they leave. |
 | Privileges | Agents have `sudo` and a Docker engine of their own, which stop at the VM. |
 | Network | Every connection goes through a proxy on your computer. Rules on each sandbox block your computer, your LAN, cloud metadata addresses and other workspaces, leaving the public internet. |
 | Resources | Optional memory and CPU limits. |
 | The Lonca server | Listens on `127.0.0.1` only and requires a token, with checks against DNS rebinding and cross-site requests. The token is kept in the page's per-origin storage, not a cookie, so servers on published ports never see it. During a sign-in it also listens on the port the sign-in page comes back to, also on `127.0.0.1`, which passes on only a request with that sign-in's random state. |
-| Host git | After a repository is first imported, Lonca never runs git on it from your computer. Everything happens inside a workspace, so an agent's git hooks and config can't execute outside it. |
+| Host git | On your computer, Lonca runs git only on its own copy of each repository, which no virtual machine mounts, on a local repository you add, and on a new workspace's checkout before its virtual machine has seen it. After that, git runs on a checkout only inside its virtual machine, so an agent's git hooks and config can't execute outside it. |
 | SSH keys | Agents don't get your SSH agent. Docker Sandboxes 0.50 gives a virtual machine the SSH agent of whoever last ran a command in it, so every command Lonca runs there brings an agent with no keys. On that version, running `sbx exec` on a Lonca virtual machine from a terminal lets it use your keys until Lonca's next command in it. Version 0.51 didn't lend keys this way when tested, but its forwarding setting is still on by default. To rule it out on any version, run `sbx settings set ssh.agentForwardingEnabled false` and `sbx daemon restart`. |
 
 The network rules above apply to **Internet only**, the default. Choosing **Internet and this computer** allows host and local-network services, including ports published by other workspaces through `host.docker.internal`, even across projects. Use it only when you trust the workspace with those services.
@@ -141,12 +141,12 @@ Agents run with their own permission prompts turned off, since the workspace is 
 
 ### What is shared
 
-- **Within a project,** workspaces share one `repo.git`, because that's how git worktrees work. An agent could change another workspace's branches, or leave config and hooks that affect its neighbours. Treat all the workspaces of a project as one trust level, even in virtual machines.
+- **Within a project,** workspaces share no git data. Each has its own copy of the repository, so an agent can't change another workspace's settings, hooks, stashes or branches. They do share the remote: with your GitHub access, as below, an agent could push over another workspace's branch there.
 - **Credentials.** Nothing in a virtual machine can read them, and the proxy won't send them anywhere else, but anything in one can use them while it runs. An agent can act as you on GitHub and spend your Claude and Codex usage, across every project. The login `gh` gives you has the `admin:public_key` scope, which would let an agent add an SSH key to your account, and that would outlive the workspace. Use a fine-grained token if you can.
 - **Between a Lead's agents.** Keeping them apart stops them influencing each other by accident. It isn't a security boundary. They run as the same user in the same workspace, so one that goes looking can read another's conversation, push to GitHub, or change files the Lead reads, including ones that instruct it. The Lead is told to treat what agents report as evidence rather than instructions, but that's a request to a model, not a control.
 - **Outbound internet.** An agent can send anything it can read to the internet. It could read your code and any variables in the project's settings, but not your sign-ins or your computer's other files.
 - **Your browser and clipboard, from a virtual machine.** Docker Sandboxes lets processes in a VM open links in your browser (`sbx settings set browser.enabled false` stops that for every sandbox) and write to your clipboard.
-- **Be careful on your computer.** Worktrees live in `~/.lonca/projects/<project>/workspaces/<name>` and work with your local tools, but running `git` in one, or opening it in an editor, reads config an agent could have written. Treat a checkout an agent has touched as untrusted code, as you would any repository you download.
+- **Be careful on your computer.** Checkouts live in `~/.lonca/projects/<project>/workspaces/<name>` and work with your local tools, but running `git` in one, or opening it in an editor, reads config an agent could have written. Treat a checkout an agent has touched as untrusted code, as you would any repository you download.
 
 ## Limitations
 
@@ -162,14 +162,14 @@ Agents run with their own permission prompts turned off, since the workspace is 
   ```
 
 - Sign-in tokens reach the proxy through `sbx secret set-custom`, which Docker marks as experimental, because its built-in Anthropic and OpenAI services can't take one for a single sandbox. A future version of Docker Sandboxes could change it. A removed sign-in's placeholder stays registered on virtual machines until they're rebuilt, with nothing behind it.
-- Local repositories with no remote can't be pushed from a workspace. Their commits stay on the branch in `~/.lonca/projects/<project>/repo.git`, and you can fetch them from there.
+- Local repositories with no remote can't be pushed from a workspace. Their commits stay on the branch in the workspace's checkout, `~/.lonca/projects/<project>/workspaces/<name>`, even once it's archived, and you can fetch them from there.
 - Lonca is for one person on one computer. To use it from elsewhere, forward its port over SSH instead of exposing it.
 
 ## Disk space
 
-Everything a workspace's agents install or download stays on your computer's disk until the workspace goes. Each virtual machine has two disks, kept as files that start at about 6 MB each and grow as they're used: up to 20 GB for the machine's own files, and up to 10 GB for its Docker engine's images and containers. Workspaces don't share these, so a browser or Docker image that five of them download takes up five times the space. What's deleted inside a virtual machine usually comes back within about a minute. Worktrees are on your computer too, along with anything like `node_modules` in them.
+Everything a workspace's agents install or download stays on your computer's disk until the workspace goes. Each virtual machine has two disks, kept as files that start at about 6 MB each and grow as they're used: up to 20 GB for the machine's own files, and up to 10 GB for its Docker engine's images and containers. Workspaces don't share these, so a browser or Docker image that five of them download takes up five times the space. What's deleted inside a virtual machine usually comes back within about a minute. Checkouts are on your computer too, along with anything like `node_modules` in them. Each has its own copy of the repository's history, though on APFS these copies share disk space until they change.
 
-To get space back, archive workspaces you aren't using, which removes the virtual machine and the worktree. Rebuilding one from its **⋯** menu replaces only the virtual machine, which keeps the worktree and conversations but loses everything else on its disks, such as its home directory and Docker images. If several workspaces need the same heavy tools, installing them once in a project's template, as described under [Limitations](#limitations), means they share one copy, though not of Docker images, which a template can't hold.
+To get space back, archive workspaces you aren't using, which removes the virtual machine and all of the checkout but its history. Rebuilding one from its **⋯** menu replaces only the virtual machine, which keeps the checkout and conversations but loses everything else on its disks, such as its home directory and Docker images. If several workspaces need the same heavy tools, installing them once in a project's template, as described under [Limitations](#limitations), means they share one copy, though not of Docker images, which a template can't hold.
 
 A template takes up about 1.5 GB beyond what templates share. Lonca removes one when it's replaced, when it starts and finds an older one, and when the last virtual machine made from it goes. Until then a workspace holds on to the template it was made from, which it needs to be saved as a template itself.
 
@@ -182,7 +182,7 @@ If your computer's disk does fill up, virtual machines' disks can turn read-only
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `4700` | Port for the web app. |
-| `LONCA_HOME` | `~/.lonca` | Where projects, worktrees and settings are stored. |
+| `LONCA_HOME` | `~/.lonca` | Where projects, checkouts and settings are stored. |
 | `LONCA_FIRST_PORT` | `20000` | First port published for workspaces. |
 | `LONCA_NO_OPEN` | | Set to `1` to skip opening a browser. |
 | `LONCA_NO_NOTIFY` | | Set to `1` to never show notifications, whatever Settings says. |
@@ -235,7 +235,7 @@ Recovery tests cover operations and their failure boundaries together:
 | Cases | Coverage |
 | --- | --- |
 | Interrupted create, restore, start, stop, rebuild, archive, delete; failure to save intent; setup launch failure; duplicate deletion | `tests/unit/workspace-recovery.test.ts` |
-| Partial create/restore file copies; archive/delete/stop failures before cleanup; failures and server crashes during cleanup | `tests/docker/operation-recovery.test.ts` |
+| Partial create/restore file copies; archive/delete/stop failures before cleanup; deleting an archived workspace with Docker Sandboxes unreachable | `tests/docker/operation-recovery.test.ts` |
 | Rebuild retries and interrupted rebuilds; concurrent wake requests; queued work; agents reconnecting before Stop; session and project removal | `tests/docker/recovery.test.ts` |
 | Surviving setup scripts and shells, including job groups whose shell exited; concurrent script restart/Stop; a 70-second outage of Docker Sandboxes; Stop surviving a server crash; failed state writes before direct/queued agent launches | `tests/docker/process-recovery.test.ts` |
 | Failed Stop persistence during agent recovery and uncertain startup; shutdown grace, held queues, and lifecycle retries after writes recover | `tests/docker/agent-persistence.test.ts` |

@@ -8,7 +8,7 @@ import { getProject, getSecrets } from './store.ts';
 import { HttpError } from './util.ts';
 import { publishWorkspace, runningSandbox } from './workspaces.ts';
 
-// Every read of a worktree happens through the sandbox. The host never follows a path
+// Every read of a checkout happens through the sandbox. The host never follows a path
 // inside it, so a symlink an agent planted can't point the server at the host's files.
 
 const READ_LIMIT = 2 * 1024 * 1024;

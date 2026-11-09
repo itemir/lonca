@@ -1,11 +1,11 @@
-import { type ChildProcess, spawn } from 'node:child_process';
+import { type ChildProcess, execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import type { Project, ProjectSettings } from '../shared/types.ts';
 import { paths } from './config.ts';
 import { publish } from './events.ts';
 import { githubGitAuth } from './git-auth.ts';
-import { execText } from './sandbox.ts';
 import { flushState, getSecrets, saveState, state } from './store.ts';
 import { HttpError, KeyedQueue, errorMessage, newId, removeTree, slugify } from './util.ts';
 
@@ -13,8 +13,9 @@ import { HttpError, KeyedQueue, errorMessage, newId, removeTree, slugify } from 
 export const projectLifecycle = new KeyedQueue();
 const imports = new Map<string, { controller: AbortController; finished: Promise<void> }>();
 
-// Git on the host runs only while setting up a repository, before any sandbox has
-// mounted it, or against the user's own checkout. See WORKTREE_SCRIPT in workspaces.ts.
+// Git on this computer runs only on Lonca's own copy of a repository, which no VM mounts, on the
+// user's own checkout, and on a workspace's new checkout before any VM has seen it. Once a VM has
+// mounted a checkout, its config and hooks are an agent's to write, so git here never touches it.
 const HOST_GIT_ENV = {
   ...process.env,
   GIT_TERMINAL_PROMPT: '0',
@@ -30,11 +31,15 @@ function killGit(child: ChildProcess): void {
   catch { child.kill('SIGKILL'); }
 }
 
+// So that shutting down can end them, since they'd outlive this process, some with the GitHub token.
+const running = new Set<ChildProcess>();
+
 function hostGit(cwd: string, args: string[], signal?: AbortSignal, onProgress?: (line: string) => void, remoteUrl?: string | null): Promise<string> {
   return new Promise((resolve, reject) => {
     signal?.throwIfAborted();
     const auth = githubGitAuth(remoteUrl, getSecrets().githubToken);
     const child = spawn('git', [...auth.args, ...args], { cwd, env: { ...HOST_GIT_ENV, ...auth.env }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    running.add(child);
     const cancel = () => killGit(child);
     signal?.addEventListener('abort', cancel, { once: true });
     const stdout: Buffer[] = [];
@@ -56,6 +61,7 @@ function hostGit(cwd: string, args: string[], signal?: AbortSignal, onProgress?:
     });
     child.on('error', (error) => { failure = error; });
     child.on('close', (code) => {
+      running.delete(child);
       signal?.removeEventListener('abort', cancel);
       if (signal?.aborted) reject(signal.reason);
       else if (failure) reject(failure);
@@ -95,7 +101,7 @@ export function repoNameFromUrl(url: string): string {
 }
 
 // A directory on disk counts as taken even with no project attached. If one survived a
-// failed delete, an agent's hooks could be in it, and git on the host would run them.
+// failed delete, its checkouts hold whatever agents left there, which a new project mustn't reuse.
 function uniqueSlug(name: string): string {
   const base = slugify(name);
   const taken = new Set(state.projects.map((project) => project.slug));
@@ -138,8 +144,17 @@ async function detectDefaultBranch(repo: string, signal?: AbortSignal, remoteUrl
   }
 }
 
+/** Can be run again, so it also finishes a copy that was cut short, or makes one that was removed. */
+async function initCache(project: Project, signal?: AbortSignal): Promise<string> {
+  const cache = paths.cache(project.slug);
+  fs.mkdirSync(cache, { recursive: true });
+  await hostGit(cache, ['init', '--quiet', '--bare', '--template='], signal);
+  await hostGit(cache, ['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*'], signal);
+  if (project.remoteUrl) await hostGit(cache, ['config', 'remote.origin.url', project.remoteUrl], signal);
+  return cache;
+}
+
 async function importRepository(project: Project, signal: AbortSignal): Promise<void> {
-  const repo = paths.repo(project.slug);
   let lastPublish = 0;
   const onProgress = (line: string) => {
     project.progress = line;
@@ -149,26 +164,22 @@ async function importRepository(project: Project, signal: AbortSignal): Promise<
     }
   };
   try {
-    fs.mkdirSync(paths.projectDir(project.slug), { recursive: true });
-    fs.mkdirSync(repo);
-    await hostGit(repo, ['init', '--quiet', '--bare', '--template='], signal);
-    await hostGit(repo, ['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*'], signal);
+    const cache = await initCache(project, signal);
     if (project.localPath) {
       // Importing objects from disk first makes the fetch from the remote nearly free.
-      await hostGitProgress(repo, ['fetch', '--progress', project.localPath, '+refs/heads/*:refs/remotes/origin/*'], onProgress, signal);
+      await hostGitProgress(cache, ['fetch', '--progress', project.localPath, '+refs/heads/*:refs/remotes/origin/*'], onProgress, signal);
     }
     if (project.remoteUrl) {
-      await hostGit(repo, ['config', 'remote.origin.url', project.remoteUrl], signal);
-      const fetch = hostGitProgress(repo, ['fetch', '--progress', '--tags', 'origin'], onProgress, signal, project.remoteUrl);
+      const fetch = hostGitProgress(cache, ['fetch', '--progress', '--tags', 'origin'], onProgress, signal, project.remoteUrl);
       // A local checkout is usable even if its remote can't be reached right now.
       if (project.localPath) await fetch.catch(() => { signal.throwIfAborted(); });
       else await fetch;
     }
     const branch = project.localPath && !project.remoteUrl
       ? await hostGit(project.localPath, ['symbolic-ref', '--short', 'HEAD'], signal).catch(() => '')
-      : await detectDefaultBranch(repo, signal, project.remoteUrl);
-    const hasBranch = branch && (await hostGit(repo, ['for-each-ref', `refs/remotes/origin/${branch}`], signal));
-    const fallback = hasBranch ? branch : await detectDefaultBranch(repo, signal, project.remoteUrl);
+      : await detectDefaultBranch(cache, signal, project.remoteUrl);
+    const hasBranch = branch && (await hostGit(cache, ['for-each-ref', `refs/remotes/origin/${branch}`], signal));
+    const fallback = hasBranch ? branch : await detectDefaultBranch(cache, signal, project.remoteUrl);
     if (!fallback) throw new Error('This repository has no commits yet. Push a first commit, then add it again.');
     project.settings.defaultBranch = fallback;
     project.status = 'ready';
@@ -246,84 +257,60 @@ export async function addProjectFromPath(input: string): Promise<Project> {
   return project;
 }
 
-const IMPORT_TIMEOUT_MS = 5 * 60 * 1000;
+const FETCH_TIMEOUT_MS = 5 * 60 * 1000;
+const cacheLock = new KeyedQueue();
+const execFileAsync = promisify(execFile);
 
-/**
- * Brings new commits from a local repository with no remote into the project. The project's
- * repository may have been written to by an agent, so git touches it only in the workspace's
- * sandbox, and that sees just a bundle of the branches, not the local `.git`.
- */
-export async function refreshFromLocalRepo(project: Project, sandbox: string): Promise<void> {
-  if (!project.localPath || project.remoteUrl) return;
-  const repo = paths.repo(project.slug);
-  // In the repository, because that's what the sandbox has mounted.
-  const bundle = path.join(repo, `lonca-import-${newId()}.bundle`);
-  try {
-    await hostGit(project.localPath, ['bundle', 'create', '--quiet', bundle, '--branches']);
-    await execText(sandbox, ['git', '-C', repo, '-c', 'core.hooksPath=/dev/null', 'fetch', '--quiet', bundle, '+refs/heads/*:refs/remotes/origin/*'], { timeoutMs: IMPORT_TIMEOUT_MS });
-  } finally {
-    fs.rmSync(bundle, { force: true });
-  }
-}
-
-const MAX_PACKED_REFS_BYTES = 8 * 1024 * 1024;
-const MAX_BRANCHES = 5000;
-
-/** Reads a file that an agent could have swapped for a link or a FIFO, which would hang a plain read. */
-function readRegularFile(file: string, maxBytes: number): string | null {
-  let descriptor: number;
-  try {
-    descriptor = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-  } catch {
-    return null;
-  }
-  try {
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || stat.size > maxBytes) return null;
-    return fs.readFileSync(descriptor, 'utf8');
-  } finally {
-    fs.closeSync(descriptor);
-  }
+/** From origin, or else from the checkout the project was imported from. */
+async function fetchCache(project: Project, cache: string): Promise<void> {
+  const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+  if (project.remoteUrl) await hostGit(cache, ['fetch', '--prune', '--quiet', 'origin'], signal, undefined, project.remoteUrl);
+  else if (project.localPath) await hostGit(cache, ['fetch', '--prune', '--quiet', project.localPath, '+refs/heads/*:refs/remotes/origin/*'], signal);
 }
 
 /**
- * Reads remote branch names directly from the ref files. Parsing them is safe where
- * running git on this agent-writable repository wouldn't be.
+ * Makes a new workspace's checkout at `dir`: a copy of Lonca's copy of the repository, with the
+ * branch at the tip of its base. Its files are written later, in the workspace's VM. Returns why
+ * fetching failed, if it did, since the branch then starts from the last commit fetched.
  */
-export function listBranches(project: Project): string[] {
-  const repo = paths.repo(project.slug);
-  const branches = new Set<string>();
-  const packedRefs = readRegularFile(path.join(repo, 'packed-refs'), MAX_PACKED_REFS_BYTES) ?? '';
-  for (const line of packedRefs.split('\n')) {
-    const match = /^[0-9a-f]{40,} refs\/remotes\/origin\/(.+)$/.exec(line);
-    if (match) branches.add(match[1]);
-    if (branches.size >= MAX_BRANCHES) break;
-  }
-  const walk = (dir: string, prefix: string) => {
-    let entries: fs.Dirent[] = [];
+export function makeCheckout(project: Project, dir: string, branch: string, base: string): Promise<string | undefined> {
+  return cacheLock.run(project.id, async () => {
+    const cache = await initCache(project);
+    const fetchError = await fetchCache(project, cache).then(() => undefined, errorMessage);
+    if (!await hostGit(cache, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${base}^{commit}`]).catch(() => '')) {
+      throw new Error(`There’s no ${base} branch to start from.${fetchError ? ` Fetching it failed: ${fetchError}` : ''}`);
+    }
+    // Made beside the workspace and moved into place, so a checkout that's there is complete.
+    const staging = path.join(path.dirname(dir), `.${path.basename(dir)}.new`);
+    await removeTree(staging);
     try {
-      if (!fs.lstatSync(dir).isDirectory()) return;
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
+      fs.mkdirSync(staging, { recursive: true });
+      const gitDir = path.join(staging, '.git');
+      // Copy-on-write where the file system allows it, so a copy takes space only as it changes.
+      // APFS has to be asked; elsewhere cp tries by itself, and copies otherwise.
+      await execFileAsync('cp', [...(process.platform === 'darwin' ? ['-c'] : []), '-R', cache, gitDir]);
+      const git = (...args: string[]) => hostGit(staging, ['--git-dir', gitDir, ...args]);
+      await git('config', 'core.bare', 'false');
+      await git('update-ref', `refs/heads/${branch}`, `refs/remotes/origin/${base}`);
+      await git('symbolic-ref', 'HEAD', `refs/heads/${branch}`);
+      fs.mkdirSync(path.join(gitDir, 'info'), { recursive: true });
+      fs.writeFileSync(path.join(gitDir, 'info', 'exclude'), '.context/\n');
+      fs.renameSync(staging, dir);
+    } catch (error) {
+      // A copy cut short, by a full disk say, can be large, and nothing else would remove it.
+      await removeTree(staging);
+      throw error;
     }
-    for (const entry of entries) {
-      if (branches.size >= MAX_BRANCHES) return;
-      if (entry.isDirectory()) walk(path.join(dir, entry.name), `${prefix}${entry.name}/`);
-      else if (entry.isFile()) branches.add(`${prefix}${entry.name}`);
-    }
-  };
-  const parents = [path.join(repo, 'refs'), path.join(repo, 'refs', 'remotes')];
-  const realDirectory = (dir: string) => {
-    try {
-      return fs.lstatSync(dir).isDirectory();
-    } catch {
-      return false;
-    }
-  };
-  if (parents.every(realDirectory)) walk(path.join(repo, 'refs', 'remotes', 'origin'), '');
-  branches.delete('HEAD');
-  return [...branches].sort((a, b) => a.localeCompare(b));
+    return fetchError;
+  });
+}
+
+/** The branches of origin, as of the last fetch. */
+export async function listBranches(project: Project): Promise<string[]> {
+  const cache = paths.cache(project.slug);
+  if (!fs.existsSync(cache)) return [];
+  const listed = await hostGit(cache, ['for-each-ref', '--format=%(refname:lstrip=3)', 'refs/remotes/origin']).catch(() => '');
+  return listed.split('\n').filter((branch) => branch && branch !== 'HEAD').sort((a, b) => a.localeCompare(b));
 }
 
 /** An import can't survive a restart; say so instead of showing it in progress forever. */
@@ -338,9 +325,10 @@ export function reconcileProjects(): void {
   }
 }
 
-/** Ends every import now, including its Git processes. For shutting down. */
-export function abortImports(): void {
+/** Ends every import now, and any other Git still running. For shutting down. */
+export function stopHostGit(): void {
   for (const { controller } of imports.values()) controller.abort();
+  for (const child of running) killGit(child);
 }
 
 export async function removeProject(project: Project): Promise<void> {

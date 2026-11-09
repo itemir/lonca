@@ -72,7 +72,7 @@ function freeBytes(dir: string): number {
   }
 }
 
-/** Docker Sandboxes keeps virtual machines' disks under the home directory, and worktrees are in Lonca's. */
+/** Docker Sandboxes keeps virtual machines' disks under the home directory, and checkouts are in Lonca's. */
 export function checkDisk(): void {
   const free = Math.min(freeBytes(os.homedir()), freeBytes(LONCA_HOME));
   const lowDisk = free < LOW_DISK_BYTES ? { freeGb: Math.floor(free / 1e9) } : undefined;

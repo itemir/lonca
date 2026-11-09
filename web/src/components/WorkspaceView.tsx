@@ -40,7 +40,7 @@ function StepRow({ step, children, icon }: { step: WorkspaceStep | undefined; ch
 
 function WorkspaceIntro({ workspace, project, session, hasLead }: { workspace: Workspace; project: Project; session: Session; hasLead: boolean }) {
   const step = (id: WorkspaceStep['id']) => workspace.steps.find((entry) => entry.id === id);
-  const worktree = step('worktree');
+  const checkout = step('checkout');
   const image = step('image');
   const sandbox = step('sandbox');
   const setup = step('setup');
@@ -58,9 +58,9 @@ function WorkspaceIntro({ workspace, project, session, hasLead }: { workspace: W
         {image?.status === 'running' && (
           <StepRow step={image} icon={<Box size={16} />}>Preparing the workspace template. The first time takes a few minutes.</StepRow>
         )}
-        <StepRow step={worktree} icon={<GitBranch size={16} />}>
-          {finished(worktree) ? 'Branched' : 'Branching'} <code>{workspace.branch}</code> from <code>{base}</code>
-          {worktree?.status === 'warning' && <span className="step-warning-text"> {worktree.detail}</span>}
+        <StepRow step={checkout} icon={<GitBranch size={16} />}>
+          {finished(checkout) ? 'Branched' : 'Branching'} <code>{workspace.branch}</code> from <code>{base}</code>
+          {checkout?.status === 'warning' && <span className="step-warning-text"> {checkout.detail}</span>}
         </StepRow>
         <StepRow step={files} icon={<Folder size={16} />}>
           {finished(files) ? 'Created' : 'Creating'}{' '}
