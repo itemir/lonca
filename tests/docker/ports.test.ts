@@ -9,7 +9,7 @@ import { type MockLlm, startMockLlm } from '../support/mock-llm.ts';
 // to servers running in its workspace, which this test then opens from this computer as the user
 // would. It runs against the real sbx as well.
 
-const lonca = new Lonca({ port: 48463, instance: 'ports-test', firstWorkspacePort: 59600 });
+const lonca = new Lonca({ port: 48481, instance: 'ports-test', firstWorkspacePort: 49800 });
 let mock: MockLlm;
 let fixture: string;
 let project: Project;
