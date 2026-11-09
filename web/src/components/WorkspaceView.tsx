@@ -13,7 +13,7 @@ import { useLayout } from '../layout.ts';
 import { sessionSignIn } from '../signins.ts';
 import { attempt, tabKey, useStore, type WorkspaceTab } from '../store.ts';
 import { ChatTranscript } from './Chat.tsx';
-import { canClose, closeVerb, CloseWorkspaceDialog } from './CloseWorkspaceDialog.tsx';
+import { canClose, closeVerb, useCloseWorkspace } from './CloseWorkspaceDialog.tsx';
 import { Composer } from './Composer.tsx';
 import { DiffTab, FileTab } from './FileViews.tsx';
 import { modelLabel } from './ModelPicker.tsx';
@@ -190,7 +190,7 @@ function WorkspaceHeader({ workspace, project, earlierLeads, onReadLead, phone }
   const { sidebarOpen, toggleSidebar, rightOpen, toggleRight } = useLayout();
   const [confirm, setConfirm] = useState<ConfirmOptions | null>(null);
   const [renaming, setRenaming] = useState(false);
-  const [closing, setClosing] = useState(false);
+  const close = useCloseWorkspace(workspace);
   const running = workspace.status === 'ready';
 
   const openInEditor = (name: string, scheme: string) => setConfirm({
@@ -244,8 +244,8 @@ function WorkspaceHeader({ workspace, project, earlierLeads, onReadLead, phone }
       <span className="spacer" />
       {phone && <IconButton label="Show all tabs" onClick={phone.onShowTabs}><Layers size={17} /></IconButton>}
       <span className="workspace-name">{workspace.name}</span>
-      <IconButton className="icon-button-danger" label={`${closeVerb(workspace)} this workspace`} disabled={!canClose(workspace)} onClick={() => setClosing(true)}>
-        <Trash2 size={16} />
+      <IconButton className="icon-button-danger" label={`${closeVerb(workspace)} this workspace`} disabled={!canClose(workspace)} onClick={close.press}>
+        {close.checking ? <Spinner size={15} /> : <Trash2 size={16} />}
       </IconButton>
       <Menu
         className="open-in"
@@ -262,7 +262,7 @@ function WorkspaceHeader({ workspace, project, earlierLeads, onReadLead, phone }
       <IconButton label={rightOpen ? 'Hide the side panel' : 'Show the side panel'} onClick={toggleRight}><PanelRight size={16} /></IconButton>
       {confirm && <ConfirmDialog {...confirm} onClose={() => setConfirm(null)} />}
       {renaming && <RenameDialog workspace={workspace} onClose={() => setRenaming(false)} />}
-      {closing && <CloseWorkspaceDialog workspace={workspace} onClose={() => setClosing(false)} />}
+      {close.dialog}
     </header>
   );
 }

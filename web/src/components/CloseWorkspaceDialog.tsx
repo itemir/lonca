@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { useMatch, useNavigate } from 'react-router-dom';
 import type { Workspace } from '../../../shared/types.ts';
 import { api } from '../api.ts';
@@ -25,17 +25,73 @@ export function closeVerb(workspace: Workspace): string {
   return deletes(workspace) ? 'Delete' : 'Archive';
 }
 
-function uncommittedLine(count: number | null): string {
-  if (count === null) return 'Any uncommitted changes are lost.';
+function archive(workspace: Workspace) {
+  void attempt(() => api.workspaceAction(workspace.id, 'archive'));
+}
+
+function agentWorkingIn(workspaceId: string): boolean {
+  return useStore.getState().sessions.some((session) => session.workspaceId === workspaceId && session.status === 'running');
+}
+
+/**
+ * Archiving goes ahead without asking only for someone who said not to be asked, and even then only
+ * when nothing they'd want warning of is lost: an agent at work is stopped, and uncommitted changes
+ * are lost. Those can only be counted while the workspace is running.
+ */
+function mayArchiveUnasked(workspace: Workspace): boolean {
+  return !deletes(workspace) && !useStore.getState().settings.confirmArchive && workspace.status === 'ready' && !agentWorkingIn(workspace.id);
+}
+
+// A busy sandbox can be slow to answer. After this long the dialog asks instead, and goes on counting.
+const COUNT_PATIENCE_MS = 3000;
+
+function countUncommitted(workspace: Workspace): Promise<number | undefined> {
+  return Promise.race([
+    api.changes(workspace.id).then((changes) => changes.uncommitted, () => undefined),
+    new Promise<undefined>((resolve) => setTimeout(resolve, COUNT_PATIENCE_MS)),
+  ]);
+}
+
+/** What pressing the trash icon does, whether it's counting changes first, and the dialog it opens. */
+export function useCloseWorkspace(workspace: Workspace): { press: () => void; checking: boolean; dialog: ReactNode } {
+  const [asking, setAsking] = useState<{ uncommitted?: number } | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const press = () => {
+    if (checking) return;
+    if (!mayArchiveUnasked(workspace)) {
+      setAsking({});
+      return;
+    }
+    setChecking(true);
+    void countUncommitted(workspace).then((uncommitted) => {
+      setChecking(false);
+      // Things can move on while it counts, and someone else may have closed it already.
+      const current = useStore.getState().workspaces.find((entry) => entry.id === workspace.id);
+      if (!current || !canClose(current)) return;
+      if (uncommitted === 0 && mayArchiveUnasked(current)) archive(current);
+      else setAsking({ uncommitted });
+    });
+  };
+
+  const dialog = asking && <CloseWorkspaceDialog workspace={workspace} counted={asking.uncommitted} onClose={() => setAsking(null)} />;
+  return { press, checking, dialog };
+}
+
+function uncommittedLine(count: number | null, running: boolean): string {
+  if (count === null) return running ? 'Any uncommitted changes are lost.' : 'Any uncommitted changes are lost. They can’t be counted while it isn’t running.';
   if (count === 0) return 'No uncommitted changes.';
   return count === 1 ? '1 uncommitted change is lost.' : `${count} uncommitted changes are lost.`;
 }
 
-export function CloseWorkspaceDialog({ workspace, onClose }: { workspace: Workspace; onClose: () => void }) {
+export function CloseWorkspaceDialog({ workspace, counted, onClose }: { workspace: Workspace; counted?: number; onClose: () => void }) {
   const navigate = useNavigate();
   const onScreen = useMatch('/w/:id')?.params.id === workspace.id;
   const agentWorking = useStore((store) => store.sessions.some((session) => session.workspaceId === workspace.id && session.status === 'running'));
-  const [uncommitted, setUncommitted] = useState<number | null>(null);
+  // Once someone has said not to be asked, they're only asked when something is at stake, and the box has nothing left to do.
+  const asksEveryTime = useStore((store) => store.settings.confirmArchive);
+  const [uncommitted, setUncommitted] = useState<number | null>(counted ?? null);
+  const [stopAsking, setStopAsking] = useState(false);
   const ready = workspace.status === 'ready';
 
   // The dialog doesn't wait for this: a busy sandbox can be slow to answer, and a stopped one isn't woken just to ask.
@@ -44,9 +100,11 @@ export function CloseWorkspaceDialog({ workspace, onClose }: { workspace: Worksp
     api.changes(workspace.id).then((changes) => setUncommitted(changes.uncommitted), () => {});
   }, [ready, workspace.id]);
 
-  const archive = () => {
+  // Ticking the box and then cancelling leaves things as they were.
+  const confirmArchive = () => {
     onClose();
-    void attempt(() => api.workspaceAction(workspace.id, 'archive'));
+    if (stopAsking) void attempt(() => api.updateSettings({ confirmArchive: false }));
+    archive(workspace);
   };
 
   const remove = () => {
@@ -71,17 +129,23 @@ export function CloseWorkspaceDialog({ workspace, onClose }: { workspace: Worksp
             <div>
               {agentWorking && <p className="close-warning">An agent is working here and will be stopped.</p>}
               <p>Its virtual machine and checkout are removed, along with any git-ignored files and attachments.</p>
-              <p className={uncommitted ? 'close-warning' : undefined}>{uncommittedLine(uncommitted)}</p>
+              <p className={uncommitted || !ready ? 'close-warning' : undefined}>{uncommittedLine(uncommitted, ready)}</p>
             </div>
             <p>Its branch and chat are kept, so you can restore it later or delete it for good from the archived list in the sidebar.</p>
           </>
         )}
       </div>
       <div className="modal-actions">
+        {!deletes(workspace) && asksEveryTime && (
+          <label className="close-stop-asking">
+            <input type="checkbox" checked={stopAsking} onChange={(event) => setStopAsking(event.target.checked)} />
+            Don’t ask again
+          </label>
+        )}
         <button type="button" className="button" autoFocus onClick={onClose}>Cancel</button>
         {deletes(workspace)
           ? <button type="button" className="button button-danger" onClick={remove}>Delete permanently</button>
-          : <button type="button" className="button button-primary" onClick={archive}>Archive</button>}
+          : <button type="button" className="button button-primary" onClick={confirmArchive}>Archive</button>}
       </div>
     </Modal>
   );

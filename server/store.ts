@@ -52,6 +52,7 @@ function defaultSettings(): AppSettings {
     leadDefault: { agent: 'claude', model: 'claude-opus-5-5', effort: 'high' },
     leadMaxAgents: 4,
     notifications: true,
+    confirmArchive: true,
   };
 }
 

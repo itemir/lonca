@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
-import type { Project, Workspace } from '../../shared/types.ts';
+import type { AppState, Project, Workspace } from '../../shared/types.ts';
 import { Lonca, makeFixtureRepo, sandboxRunning, until } from '../support/harness.ts';
 
 const lonca = new Lonca({ port: 48371, instance: 'workspace-close-ui', firstWorkspacePort: 56300 });
@@ -120,6 +120,137 @@ test('archives the workspace on screen from the header, then deletes it', async 
   await expectGone(workspace);
 });
 
+test('archives without asking once told not to ask, until Settings asks again', async ({ page }) => {
+  const here = await create('Stays open');
+  const first = await create('Asked once');
+  const second = await create('From the sidebar');
+  const third = await create('From the header');
+  const confirmArchive = async () => (await lonca.api<AppState>('GET', '/state')).settings.confirmArchive;
+  try {
+    await page.goto(opened(here));
+    const row = (title: string) => page.locator('.workspace-row').filter({ hasText: title });
+    const header = page.locator('.workspace-header');
+    const dialog = page.getByRole('dialog', { name: 'Archive this workspace?' });
+    const stopAsking = dialog.getByRole('checkbox', { name: 'Don’t ask again' });
+    const trash = async (title: string, workspace: Workspace) => {
+      await row(title).hover();
+      await row(title).getByRole('button', { name: `Archive “${title}” (${workspace.name})` }).click();
+    };
+
+    // Ticking the box and then cancelling leaves things as they were.
+    await trash('Asked once', first);
+    await expect(stopAsking).not.toBeChecked();
+    await stopAsking.check();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+    expect(await confirmArchive()).toBe(true);
+
+    await trash('Asked once', first);
+    await expect(stopAsking).not.toBeChecked();
+    await stopAsking.check();
+    await dialog.getByRole('button', { name: 'Archive', exact: true }).click();
+    await lonca.waitForWorkspace(first.id, 'archived');
+    expect(await confirmArchive()).toBe(false);
+
+    // The server keeps it, so a page loaded afresh doesn't ask either. Nothing would press Archive
+    // in a dialog, so archiving finishing shows that none was in the way.
+    await page.reload();
+    await trash('From the sidebar', second);
+    await lonca.waitForWorkspace(second.id, 'archived');
+    expect(sandboxRunning(second.sandboxName)).toBeNull();
+    expect(fs.existsSync(second.path)).toBe(false);
+    await expect(page).toHaveURL(workspaceUrl(here));
+
+    await row('From the header').getByRole('link').click();
+    await header.getByRole('button', { name: 'Archive this workspace' }).click();
+    await lonca.waitForWorkspace(third.id, 'archived');
+    await expect(page.locator('.workspace-banner')).toContainText('archived');
+    await expect(page).toHaveURL(workspaceUrl(third));
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+
+    // Deleting for good still asks, with nothing to tick.
+    await header.getByRole('button', { name: 'Delete this workspace' }).click();
+    const deleting = page.getByRole('dialog', { name: 'Delete this workspace?' });
+    await expect(deleting.getByRole('button', { name: 'Delete permanently' })).toBeVisible();
+    await expect(deleting.getByRole('checkbox')).toHaveCount(0);
+    await deleting.getByRole('button', { name: 'Cancel' }).click();
+    await expect(deleting).toBeHidden();
+    expect((await lonca.workspace(third.id)).status).toBe('archived');
+
+    await page.getByRole('link', { name: 'Settings', exact: true }).click();
+    const ask = page.getByRole('switch', { name: 'Ask before archiving', exact: true });
+    await expect(ask).toHaveAttribute('aria-checked', 'false');
+    await ask.click();
+    await expect(ask).toHaveAttribute('aria-checked', 'true');
+    expect(await confirmArchive()).toBe(true);
+
+    await row('Stays open').getByRole('link').click();
+    await header.getByRole('button', { name: 'Archive this workspace' }).click();
+    await expect(stopAsking).not.toBeChecked();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+    expect((await lonca.workspace(here.id)).status).toBe('ready');
+  } finally {
+    // The other tests here expect to be asked.
+    await lonca.api('PATCH', '/settings', { confirmArchive: true });
+  }
+});
+
+test('asks anyway, with a warning, when there’s something to lose', async ({ page }) => {
+  const changed = await create('Has changes');
+  const stopped = await create('Stopped');
+  const busy = await create('Agent at work');
+  fs.writeFileSync(path.join(changed.path, 'new.txt'), 'uncommitted\n');
+  await lonca.api('POST', `/workspaces/${stopped.id}/stop`);
+  await lonca.api('PATCH', '/settings', { confirmArchive: false });
+  try {
+    await page.route('**/api/state', async (route) => {
+      const response = await route.fetch();
+      const state = await response.json();
+      for (const session of state.sessions) if (session.workspaceId === busy.id) session.status = 'running';
+      await route.fulfill({ response, json: state });
+    });
+    await page.goto(opened(changed));
+    const row = (title: string) => page.locator('.workspace-row').filter({ hasText: title });
+    const trash = page.locator('.workspace-header').getByRole('button', { name: 'Archive this workspace' });
+    const dialog = page.getByRole('dialog', { name: 'Archive this workspace?' });
+    const warnings = dialog.locator('.close-warning');
+
+    // Not being asked has already been chosen, so there's nothing to tick.
+    await trash.click();
+    await expect(warnings).toHaveText(['1 uncommitted change is lost.']);
+    await expect(dialog.getByRole('checkbox')).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+
+    // A stopped one isn't woken to count them.
+    await row('Stopped').hover();
+    await row('Stopped').getByRole('button', { name: `Archive “Stopped” (${stopped.name})` }).click();
+    await expect(warnings).toHaveText(['Any uncommitted changes are lost. They can’t be counted while it isn’t running.']);
+    expect(sandboxRunning(stopped.sandboxName)).toBe(false);
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+
+    await row('Agent at work').hover();
+    await row('Agent at work').getByRole('button', { name: `Archive “Agent at work” (${busy.name})` }).click();
+    await expect(warnings).toHaveText(['An agent is working here and will be stopped.']);
+    await expect(dialog).toContainText('No uncommitted changes.');
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+
+    // Archive still archives, and leaves the choice as it was.
+    await trash.click();
+    await dialog.getByRole('button', { name: 'Archive', exact: true }).click();
+    await lonca.waitForWorkspace(changed.id, 'archived');
+    expect((await lonca.api<AppState>('GET', '/state')).settings.confirmArchive).toBe(false);
+    expect((await lonca.workspace(stopped.id)).status).toBe('stopped');
+    expect((await lonca.workspace(busy.id)).status).toBe('ready');
+  } finally {
+    // The other tests here expect to be asked.
+    await lonca.api('PATCH', '/settings', { confirmArchive: true });
+  }
+});
+
 test('doesn’t wake a stopped workspace to count its changes', async ({ page }) => {
   const workspace = await create();
   await lonca.api('POST', `/workspaces/${workspace.id}/stop`);
@@ -224,6 +355,10 @@ test.describe('on a phone', () => {
       return box!.y;
     }));
     expect(archive).toBeLessThan(cancel);
+    // Cancel stays nearest the thumb, and the box above the buttons is as easy to hit.
+    const stopAsking = await dialog.locator('label').filter({ has: page.getByRole('checkbox', { name: 'Don’t ask again' }) }).boundingBox();
+    expect(stopAsking?.height).toBe(44);
+    expect(stopAsking!.y).toBeLessThan(archive);
     await dialog.getByRole('button', { name: 'Cancel' }).tap();
     await expect(dialog).toBeHidden();
     await expect(page).toHaveURL(workspaceUrl(here));

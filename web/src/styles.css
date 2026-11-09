@@ -323,6 +323,8 @@ code { font-family: var(--mono); font-size: 0.93em; }
 .close-target code { color: var(--text-3); font-size: 12px; }
 .close-body { display: flex; flex-direction: column; gap: 10px; }
 .close-warning { color: var(--warning); }
+.close-stop-asking { display: flex; align-items: center; gap: 7px; margin-right: auto; color: var(--text-2); font-size: 13px; cursor: pointer; }
+.close-stop-asking input { margin: 0; accent-color: var(--accent); }
 
 /* The second tap of a double tap mustn't land on a button that just opened under the finger. */
 @keyframes tap-guard { from { pointer-events: none; } }
@@ -2182,6 +2184,8 @@ a.home-row:hover { background: var(--panel); }
   .close-dialog .modal { width: 100%; max-height: 100%; border-width: 1px 0 0; border-radius: 12px 12px 0 0; }
   .close-dialog .modal-actions { flex-direction: column-reverse; }
   .close-dialog .button { height: 44px; }
+  /* Above the buttons rather than where Cancel goes, and as easy to hit. */
+  .close-dialog .close-stop-asking { order: 1; min-height: 44px; margin-right: 0; }
   .lock-popover { width: min(300px, 80vw); }
   .workspace-banner { flex-wrap: wrap; }
   .banner-actions { width: 100%; justify-content: flex-start; }

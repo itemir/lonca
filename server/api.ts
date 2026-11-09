@@ -107,6 +107,7 @@ const appSettingsSchema = z.object({
   leadDefault: leadChoiceSchema,
   leadMaxAgents: z.number().int().min(1).max(8),
   notifications: z.boolean(),
+  confirmArchive: z.boolean(),
 }).partial();
 
 // The whole file goes on the CLI's command line each turn, and that has limits.
