@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { NextFunction, Request, Response } from 'express';
-import { DEV_MODE, HTTP_PORT } from './config.ts';
+import { DEV_MODE, DEV_PORT, HTTP_PORT } from './config.ts';
 import { accessToken } from './store.ts';
 
 // The server can start virtual machines and hand out shells, and anything running on this
@@ -13,8 +13,6 @@ import { accessToken } from './store.ts';
 // Browsers send cookies to every port on a host, so a server an agent runs on a published
 // port would receive a cookie the moment the user opened it. localStorage is per-origin,
 // which includes the port.
-
-const DEV_PORT = 5173;
 
 function allowedAuthorities(): Set<string> {
   const ports = DEV_MODE ? [HTTP_PORT, DEV_PORT] : [HTTP_PORT];

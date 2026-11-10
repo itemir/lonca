@@ -17,6 +17,7 @@ import {
 } from './inspect.ts';
 import { publish } from './events.ts';
 import { mergePullRequest, mergeRequestSchema } from './merge.ts';
+import { closePort } from './ports.ts';
 import {
   addProjectFromPath, addProjectFromUrl, listBranches, projectLifecycle, publishProject, removeProject,
 } from './projects.ts';
@@ -331,6 +332,12 @@ export function createApi(me: AppState['me']): Router {
 
   api.post('/workspaces/:id/agents/stop', async (req, res) => {
     await stopAgents(workspaceParam(req).id);
+    res.status(204).end();
+  });
+
+  // Forwards are the Lead's to make, but the user can close one.
+  api.delete('/workspaces/:id/ports/:port', async (req, res) => {
+    await closePort(workspaceParam(req), parse(z.coerce.number().int().min(1).max(65535), req.params.port));
     res.status(204).end();
   });
 

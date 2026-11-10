@@ -982,6 +982,16 @@ a.crumb:hover { color: var(--text); }
 .step-pending .intro-icon, .step-pending code { color: var(--text-3); }
 .step-error, .step-error .intro-icon { color: var(--error); }
 .step-warning-text { display: block; color: var(--warning); font-size: 13px; }
+.forward { display: inline-flex; align-items: center; gap: 2px; margin-right: 10px; }
+.forward-close {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  color: var(--text-3);
+}
+.forward-close:hover { background: var(--hover); color: var(--text); }
 
 .chip {
   display: inline-flex;

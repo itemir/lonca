@@ -94,6 +94,16 @@ export interface DiffStat {
   files: number;
 }
 
+/** A port on the user's localhost that a Lead forwarded to one in its workspace's virtual machine. */
+export interface PortForward {
+  /** On 127.0.0.1 of the computer running Lonca. */
+  hostPort: number;
+  /** In the virtual machine. */
+  port: number;
+  /** When it was forwarded. */
+  since: number;
+}
+
 export interface Workspace {
   id: string;
   projectId: string;
@@ -114,6 +124,8 @@ export interface Workspace {
   leadLockedAt?: number;
   /** First of the ten ports published on the host's localhost. */
   port: number;
+  /** Ports forwarded on top of those ten. They close when the workspace stops. */
+  forwards?: PortForward[];
   status: WorkspaceStatus;
   error?: string;
   /** Saved before changing resources; retries finish this operation, even after a restart. */

@@ -9,8 +9,13 @@ prefix="lonca-${LONCA_INSTANCE:-}"
 marker="dev.lonca.fake-sbx=1"
 template_marker="dev.lonca.fake-sbx-template=1"
 base=docker/sandbox-templates:shell-docker
+relay_marker="dev.lonca.fake-sbx-relay"
 filters=(--filter "label=$marker")
-if [ -n "${LONCA_INSTANCE:-}" ]; then filters+=(--filter "label=dev.lonca.instance=$prefix"); fi
+relay_filters=(--filter "label=$relay_marker")
+if [ -n "${LONCA_INSTANCE:-}" ]; then
+  filters+=(--filter "label=dev.lonca.instance=$prefix")
+  relay_filters+=(--filter "label=dev.lonca.instance=$prefix")
+fi
 
 # A test can cut one server off from Docker Sandboxes, leaving its sandboxes running and the test's
 # own commands, which don't name an instance, working.
@@ -43,6 +48,113 @@ list() {
 
 templates() {
   docker images --filter "label=$template_marker" --format '{{.Repository}}:{{.Tag}}'
+}
+
+# Ports published after a sandbox is made, as "host_ip host_port sandbox_port" lines. Like the real
+# one's, they outlive a stop and are published again whenever the sandbox starts. Each is relayed by
+# a small container of its own, which reaches the sandbox over Docker's network rather than its
+# loopback, so that, as in a VM, only a server listening on 0.0.0.0 can be reached.
+ports_file() { echo "$state/ports-$1"; }
+
+relay_name() { echo "$1-port-$2"; }
+
+start_relay() {
+  local name=$1 ip=$2 host=$3 port=$4 relay target image
+  relay=$(relay_name "$name" "$host")
+  [ "$(docker inspect --format '{{.State.Running}}' "$relay" 2>/dev/null)" != true ] || return 0
+  docker rm -f "$relay" >/dev/null 2>&1
+  target=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name")
+  image=$(docker inspect --format '{{.Config.Image}}' "$name")
+  if ! docker run -d --name "$relay" --label "$relay_marker=$name" --label "dev.lonca.instance=$prefix" \
+    --publish "$ip:$host:7000" --entrypoint socat "$image" TCP-LISTEN:7000,fork,reuseaddr "TCP:$target:$port" >/dev/null 2>&1; then
+    # Another command starting the sandbox at the same moment may have just made it.
+    [ "$(docker inspect --format '{{.State.Running}}' "$relay" 2>/dev/null)" != true ] || return 0
+    docker rm -f "$relay" >/dev/null 2>&1
+    return 1
+  fi
+}
+
+stop_relays() {
+  docker ps -aq --filter "label=$relay_marker=$1" | xargs -r docker rm -f >/dev/null
+}
+
+# Like the real one, it won't start a sandbox when one of its ports has been taken meanwhile.
+start_relays() {
+  local ip host port
+  [ -f "$(ports_file "$1")" ] || return 0
+  while read -r ip host port; do
+    [ -n "$host" ] || continue
+    if ! start_relay "$1" "$ip" "$host" "$port"; then
+      stop_relays "$1"
+      docker stop -t 1 "$1" >/dev/null
+      echo "error: cannot start sandbox: start runtime: request failed: 409 Conflict: republish port: port not available: mapping ports: failed to bind host port $ip:$host: address already in use" >&2
+      return 1
+    fi
+  done < "$(ports_file "$1")"
+}
+
+# [HOST_IP:]HOST_PORT:SANDBOX_PORT[/PROTOCOL]. Lonca always names the host port.
+parse_spec() {
+  local parts=()
+  IFS=: read -r -a parts <<< "${1%/*}"
+  case ${#parts[@]} in
+    2) spec_ip=127.0.0.1; spec_host=${parts[0]}; spec_port=${parts[1]} ;;
+    3) spec_ip=${parts[0]}; spec_host=${parts[1]}; spec_port=${parts[2]} ;;
+    *) echo "error: the stand-in for sbx needs a host port: $1" >&2; exit 1 ;;
+  esac
+}
+
+publish_port() {
+  parse_spec "$2"
+  if grep -qs "^[^ ]* $spec_host " "$(ports_file "$1")"; then
+    echo "error: publish ports: request failed: 409 Conflict: port $spec_ip:$spec_host/tcp4 is already published" >&2
+    exit 1
+  fi
+  # Like the real one, it starts a stopped sandbox.
+  if [ "$(docker inspect --format '{{.State.Running}}' "$1")" != true ]; then
+    echo "ports-start $1" >> "$state/calls.log"
+    docker start "$1" >/dev/null || exit 1
+    start_relays "$1" || exit 1
+  fi
+  if ! start_relay "$1" "$spec_ip" "$spec_host" "$spec_port"; then
+    echo "error: host $spec_ip:$spec_host is already in use; choose a different host port with --publish" >&2
+    exit 1
+  fi
+  echo "$spec_ip $spec_host $spec_port" >> "$(ports_file "$1")"
+  echo "ports $1 --publish $2" >> "$state/calls.log"
+  echo "Published $spec_ip:$spec_host -> $spec_port/tcp4"
+}
+
+# Like the real one, it doesn't start a stopped sandbox, and isn't bothered by a port that isn't published.
+unpublish_port() {
+  parse_spec "$2"
+  local file kept=() ip host port
+  file=$(ports_file "$1")
+  while read -r ip host port; do
+    [ -n "$host" ] || continue
+    if [ "$ip $host $port" = "$spec_ip $spec_host $spec_port" ]; then
+      docker rm -f "$(relay_name "$1" "$host")" >/dev/null 2>&1
+    else
+      kept+=("$ip $host $port")
+    fi
+  done < <(cat "$file" 2>/dev/null)
+  if [ ${#kept[@]} -gt 0 ]; then printf '%s\n' "${kept[@]}" > "$file"; else rm -f "$file"; fi
+  echo "ports $1 --unpublish $2" >> "$state/calls.log"
+  echo "Unpublish requested for $spec_ip:$spec_host -> $spec_port"
+}
+
+# Lonca doesn't list them, so neither does this.
+ports() {
+  signed_in
+  if ! docker inspect "${1:-}" >/dev/null 2>&1; then
+    echo "error: sandbox '${1:-}' not found" >&2
+    exit 1
+  fi
+  case "${2:-}" in
+    --publish|-p) publish_port "$1" "${3:?}" ;;
+    --unpublish) unpublish_port "$1" "${3:?}" ;;
+    *) echo "error: the stand-in for sbx only publishes and unpublishes ports" >&2; exit 1 ;;
+  esac
 }
 
 run_sandbox() {
@@ -78,7 +190,7 @@ run_sandbox() {
   fi
   if docker inspect "$name" >/dev/null 2>&1; then
     [ ! -e "$state/slow-start" ] || sleep 2
-    docker start "$name" >/dev/null
+    if docker start "$name" >/dev/null; then start_relays "$name" || exit 1; fi
     echo "$name"
     return
   fi
@@ -134,6 +246,7 @@ exec_in_sandbox() {
     done
     echo "exec-start $name $purpose" >> "$state/calls.log"
     docker start "$name" >/dev/null || exit 125
+    start_relays "$name" || exit 125
   fi
   # Like the real one, it gives a command a pipe for stdin even without --interactive.
   if [[ " ${flags[*]-} " != *" --interactive "* ]]; then
@@ -179,6 +292,7 @@ logout() {
   signed_in
   echo logout >> "$state/calls.log"
   docker ps -q "${filters[@]}" | xargs -r docker stop -t 1 >/dev/null
+  docker ps -aq "${relay_filters[@]}" | xargs -r docker rm -f >/dev/null
   touch "$state/signed-out"
 }
 
@@ -195,13 +309,16 @@ case "$command" in
   logout) logout "$@" ;;
   run) run_sandbox "$@" ;;
   exec) exec_in_sandbox "$@" ;;
-  stop) signed_in; docker stop -t 1 "$1" >/dev/null ;;
+  stop) signed_in; docker stop -t 1 "$1" >/dev/null && stop_relays "$1" ;;
   rm)
     signed_in
     [ "${1:-}" = --force ] && shift
     echo "rm $1" >> "$state/calls.log"
+    stop_relays "$1"
+    rm -f "$(ports_file "$1")"
     docker rm -f "$1" >/dev/null
     ;;
+  ports) ports "$@" ;;
   cp) signed_in; docker cp "$@" ;;
   secret)
     signed_in
