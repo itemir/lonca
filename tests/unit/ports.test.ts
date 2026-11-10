@@ -359,6 +359,16 @@ describe('forward_port’s replies', () => {
     expect(vm.execText).toHaveBeenCalledWith('vm-own', ['sh', '-c', expect.stringContaining('cat /proc/net/tcp /proc/net/tcp6')], expect.anything());
   });
 
+  it('keeps the record when sbx can neither publish it nor say it didn’t, until it can be closed', async () => {
+    const hostPort = await freePort();
+    vm.publishPort.mockRejectedValueOnce(new Error('sbx ports took too long'));
+    vm.unpublishPort.mockRejectedValueOnce(new Error('error: cannot connect to sandboxd'));
+    await expect(ports.forwardPort(own, 3000, hostPort)).rejects.toThrow('Close it with close_port before trying again.');
+    expect(own.forwards).toEqual([{ hostPort, port: 3000, since: expect.any(Number) }]);
+    expect(await ports.closePort(own, 3000)).toBe(`Stopped forwarding localhost:${hostPort} to port 3000.`);
+    expect(own.forwards).toBeUndefined();
+  });
+
   it('takes the record back when sbx can’t publish it, and makes sure it didn’t anyway', async () => {
     const hostPort = await freePort();
     vm.publishPort.mockRejectedValueOnce(new Error('sbx ports took too long'));

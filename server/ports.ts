@@ -212,10 +212,12 @@ export function forwardPort(workspace: Workspace, port: number, wanted?: number)
     try {
       await publishPort(sandbox, forward.hostPort, port);
     } catch (error) {
-      // It may have been published anyway, as when sbx took too long to answer. Unpublishing what isn't does nothing.
-      await unpublishPort(sandbox, forward.hostPort, port).catch(() => {});
-      setForwards(workspace, forwardsOf(workspace).filter((entry) => entry !== forward));
-      throw new HttpError(502, `Docker Sandboxes couldn't forward localhost:${forward.hostPort} to port ${port}: ${errorMessage(error)}`);
+      // It may have been published anyway, as when sbx took too long to answer. Unpublishing what isn't does
+      // nothing. If that fails too, the record stays, for the next stop or start to close it.
+      const gone = await unpublishPort(sandbox, forward.hostPort, port).then(() => true, () => false);
+      if (gone) setForwards(workspace, forwardsOf(workspace).filter((entry) => entry !== forward));
+      const kept = gone ? '' : ` Lonca couldn't tell whether it was forwarded anyway, so it's listed until it can be closed. Close it with close_port before trying again.`;
+      throw new HttpError(502, `Docker Sandboxes couldn't forward localhost:${forward.hostPort} to port ${port}: ${errorMessage(error)}${kept}`);
     }
     const moved = wanted === undefined && forward.hostPort !== port ? ` localhost:${port} wasn't available on the user's computer, so Lonca chose another port.` : '';
     const listeners = await listenersIn(sandbox);
