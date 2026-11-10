@@ -174,7 +174,7 @@ it.skipIf(REAL_SANDBOX).each(['streaming', 'starting'] as const)('does not recre
   const command = phase === 'streaming' ? 'claude' : 'lonca-run';
   const script = phase === 'streaming' ? `#!/bin/bash
 trap '' TERM
-cat >/dev/null
+head -n 1 >/dev/null
 cat <<'JSONL'
 {"type":"stream_event","event":{"type":"message_start","message":{"id":"delete-test"}}}
 {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
@@ -231,7 +231,7 @@ it.skipIf(REAL_SANDBOX)('keeps a surviving agent tracked when Stop arrives befor
 cat > /usr/local/bin/claude <<'AGENT'
 #!/bin/bash
 trap '' TERM
-cat >/dev/null
+head -n 1 >/dev/null
 while true; do echo heartbeat >> .context/reconnect-heartbeat; sleep 0.2; done
 AGENT
 chmod +x /usr/local/bin/claude`);
@@ -278,7 +278,7 @@ it.skipIf(REAL_SANDBOX)('recovers the other workspaces when one can’t be reach
   const fake = (name: string) => `mv /usr/local/bin/claude /usr/local/bin/claude-paused-original
 cat > /usr/local/bin/claude <<'AGENT'
 #!/bin/bash
-cat >/dev/null
+head -n 1 >/dev/null
 while true; do echo heartbeat >> .context/${name}; sleep 0.2; done
 AGENT
 chmod +x /usr/local/bin/claude`;
@@ -325,7 +325,7 @@ it.skipIf(REAL_SANDBOX)('stops a surviving agent and replaces the runtime after 
 cat > /usr/local/bin/claude <<'AGENT'
 #!/bin/bash
 trap '' TERM
-cat >/dev/null
+head -n 1 >/dev/null
 while true; do echo heartbeat >> .context/rebuild-heartbeat; sleep 0.2; done
 AGENT
 chmod +x /usr/local/bin/claude`);

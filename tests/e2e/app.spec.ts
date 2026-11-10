@@ -577,20 +577,22 @@ test.describe('with agents connected', () => {
     await page.getByRole('tab', { name: 'All files' }).click();
   });
 
-  test('continues the conversation and queues follow-ups', async () => {
+  test('continues the conversation and takes a follow-up sent while it works', async () => {
     await send('SLOW first question');
     await expect(page.locator('.working-row')).toBeVisible();
-    await send('a queued follow-up');
-    await expect(page.locator('.user-message.queued')).toContainText('a queued follow-up');
-    await expect(page.locator('.queued-note')).toContainText('Sends when the current turn finishes');
+    await send('a follow-up while it works');
+    await expect(page.locator('.user-message.queued')).toContainText('a follow-up while it works');
+    // Claude reads it during the turn, and may be reading it already, so it can't be called back.
+    await expect(page.locator('.queued-note')).toContainText('It reads this at its next step');
+    await expect(page.locator('.queued-note').getByRole('button', { name: 'Cancel' })).toHaveCount(0);
     await shot('queued');
-    await expect(page.locator('.assistant-text').last()).toContainText('You said: a queued follow-up', { timeout: 90000 });
+    await expect(page.locator('.assistant-text').last()).toContainText('You said: a follow-up while it works', { timeout: 90000 });
     await expect(page.locator('.user-message.queued')).toHaveCount(0);
     await waitForTurn();
-    // The follow-up reads as coming after the answer it waited for, not before it.
+    // It reached Claude while it wrote its first answer, so it comes after that answer, not before it.
     const order = await page.locator('.user-message, .assistant-text').allInnerTexts();
     const firstAnswer = order.findIndex((text) => text.includes('You said: SLOW first question'));
-    const followUp = order.indexOf('a queued follow-up');
+    const followUp = order.indexOf('a follow-up while it works');
     expect(firstAnswer).toBeGreaterThan(-1);
     expect(followUp).toBeGreaterThan(firstAnswer);
   });

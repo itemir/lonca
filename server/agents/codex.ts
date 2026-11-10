@@ -1,3 +1,4 @@
+import { READS_WHILE_WORKING } from '../../shared/catalog.ts';
 import type { TodoEntry, ToolItem } from '../../shared/types.ts';
 import { describeTeamTool } from './team-tools.ts';
 import { type AgentAdapter, type AgentParser, type ChatOp, clipOutput } from './types.ts';
@@ -191,4 +192,5 @@ export const codexAdapter: AgentAdapter = {
       : ['codex', 'exec', ...options, '-'];
   },
   parser: createCodexParser,
+  readsWhileWorking: READS_WHILE_WORKING.codex,
 };

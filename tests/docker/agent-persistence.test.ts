@@ -19,7 +19,7 @@ cat > /usr/local/bin/claude <<'AGENT'
 #!/bin/bash
 trap 'touch .context/agent-term' TERM
 trap '' HUP
-cat >/dev/null
+head -n 1 >/dev/null
 touch .context/agent-ready
 while true; do echo tick >> .context/agent-heartbeat; sleep 0.1; done
 AGENT

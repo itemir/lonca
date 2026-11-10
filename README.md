@@ -32,9 +32,17 @@ To reopen Lonca later, run `npm start` again. The link it prints contains an acc
 
 - **Projects and workspaces.** Add as many repositories as you like, and open as many workspaces in each as you need. Each one gets a city name, a branch such as `you/amman` from `origin/main`, and a virtual machine of its own.
 - **A Lead in every workspace.** The first tab is an agent that answers for the outcome. It does the work itself or starts other agents, on any model, in tabs of their own, and compares and cross-checks what they find.
-- **Claude and Codex.** Open several conversations in one workspace, each with its own agent, model and effort level, and sign-in if you have several. Conversations keep going if you close the browser or restart Lonca, and you can queue follow-ups while an agent works.
+- **Claude and Codex.** Open several conversations in one workspace, each with its own agent, model and effort level, and sign-in if you have several. Conversations keep going if you close the browser or restart Lonca, and you can write to an agent while it works: Claude reads your message at its next step, and Codex once its turn ends. [More on that](#writing-while-it-works).
 - **Changes and checks.** Browse and search files, read a diff of everything on the branch, and follow a pull request's checks. Create PR asks the agent to commit, push and open one. The top of the side panel says what the pull request is waiting for, including work in the workspace that isn't in it yet, and offers Merge once GitHub would merge it. Merge asks first, and Lonca checks again just before merging, so nothing pushed after you looked is merged. It never deletes the branch. Once the pull request is merged, the panel offers Archive. While the workspace is stopped, it shows the pull request as it was when last checked.
 - **Terminals.** Each workspace has real shells inside it, and a Setup tab if your project has a setup script. A shell's prompt names its project and the last part of its branch, as in `lonca@lonca-malmo` for `itemir/malmo` in the lonca project, and follows the branch if you switch. A shell can move to a separate browser window, which you can place, minimize or make full screen like any other. Closing that window brings the terminal back to the panel, still running. If your browser blocks the window, allow pop-ups for Lonca. Run scripts left running by an older version appear as Recovered run script terminals; closing one stops its processes.
+
+## Writing while it works
+
+With Claude, a message you send to a conversation that's working, or that the Lead sends to a working agent, reaches the agent while it works. Claude reads it at its next step, usually when a command or tool it's running finishes, and carries on with it in mind. If it was writing its final reply, it answers your message straight afterwards. Until it's read, the message waits under the turn, saying so, and can't be cancelled, because the agent may be reading it. Once read, it moves into the conversation where the agent read it.
+
+Codex can't take a message while `codex exec` runs, so a message to a working Codex conversation waits for its turn to end, and you can cancel it until then. So do Lonca's own updates to a Lead, which are meant to start a turn of their own.
+
+If a turn is stopped before the agent has read a message, the message stays queued, and is held like anything else queued after a Stop. If a virtual machine stops dead within a moment of Claude reading a message, Claude's own copy of the conversation can be missing it although Lonca shows it as read. If the agent seems not to have seen it, send it again.
 
 ## The Lead
 
@@ -228,7 +236,7 @@ Tests keep a template of their own, `lonca-instance-sandbox`, as any instance wi
 | `shared/` | Types used by both. |
 | `template/` | What the workspace template is made from: the script that builds it and the files it installs. |
 
-An agent runs detached inside its workspace, writing its output to a file the server follows. That's why a turn survives the server restarting: the new server finds the run and reads its output again from the start. A Lead's tools work the same way, with no network path to the server: an MCP server inside the workspace appends each call to a file the server is following, and waits for the server to write the reply.
+An agent runs detached inside its workspace, writing its output to a file the server follows. That's why a turn survives the server restarting: the new server finds the run and reads its output again from the start. A Lead's tools work the same way, with no network path to the server: an MCP server inside the workspace appends each call to a file the server is following, and waits for the server to write the reply. A message to a Claude agent that's working goes the other way: the server writes it into its turn's inbox, a small script started with the CLI (`inbox.py`) passes it on, and the CLI echoes it in its output when it reads it, which is how the server knows.
 
 Recovery tests cover operations and their failure boundaries together:
 
@@ -246,6 +254,7 @@ Recovery tests cover operations and their failure boundaries together:
 | Pending terminal resizes while a sandbox is stopped, missing or unreachable; resizing after recovery; stale resizes after terminal exit | `tests/unit/sandbox-terminal.test.ts` |
 | Terminal recovery during runtime shutdown, preserved script exit codes, and scans limited to workspaces present at server startup | `tests/unit/terminal-recovery.test.ts` |
 | Partial transcript appends, interrupted queue promotion, retained writes and automatic retries, flushing multiple conversations, deletion with pending writes | `tests/unit/transcript-persistence.test.ts` |
+| Messages read while an agent works: their order, one sent as a turn ends, Stop before one is read, a restart or a failed save as one is read, Cancel while a restart is still recovering, one whose file may not have been written, something other than a file in the inbox, and the Lead's messages to a working agent | `tests/unit/inbox.test.ts`, `tests/docker/mid-turn.test.ts`, `tests/e2e/composer.spec.ts` |
 | Recovered script controls, and when the Setup tab appears, in the browser | `tests/e2e/setup.spec.ts` |
 | Moving a terminal to its own window and back, through reloads, exits and a blocked pop-up, in the browser | `tests/e2e/terminal-window.spec.ts` |
 | A conversation that can't be read on opening or after a reconnect, and recovering from it, in the browser | `tests/e2e/hydration.spec.ts` |

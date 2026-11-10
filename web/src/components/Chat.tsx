@@ -106,17 +106,24 @@ function ThinkingRow({ item }: { item: ThinkingItem }) {
 
 function UserMessage({ item, sessionId }: { item: UserItem; sessionId: string }) {
   const running = useStore((store) => store.sessions.find((session) => session.id === sessionId)?.status === 'running');
+  // Passed to the turn under way, which may be reading it already, so it can't be called back.
+  const reading = useStore((store) => {
+    const session = store.sessions.find((entry) => entry.id === sessionId);
+    return session?.status === 'running' && Boolean(session.activeRunId) && item.handoff?.runId === session.activeRunId;
+  });
   const queuedNote = item.queued && (
     <div className="queued-note">
-      {running ? 'Sends when the current turn finishes' : 'Waiting to send'}
+      {reading ? 'It reads this at its next step' : running ? 'Sends when the current turn finishes' : 'Waiting to send'}
       {!running && (
         <button type="button" className="link-button" onClick={() => void attempt(() => api.flushQueue(sessionId))}>
           <Send size={12} /> Send now
         </button>
       )}
-      <button type="button" className="link-button" onClick={() => void attempt(() => api.cancelQueued(sessionId, item.id))}>
-        <X size={12} /> Cancel
-      </button>
+      {!reading && (
+        <button type="button" className="link-button" onClick={() => void attempt(() => api.cancelQueued(sessionId, item.id))}>
+          <X size={12} /> Cancel
+        </button>
+      )}
     </div>
   );
   // Written for the Lead to read, so what's shown is what happened.
@@ -295,13 +302,16 @@ export function ChatTranscript({ session, workspace, intro, footer }: { session:
     const isWaiting = (item: ChatItem) => item.type === 'user' && Boolean(item.queued);
     return [items.filter((item) => !isWaiting(item)), items.filter(isWaiting)];
   }, [items]);
+  // From the message that started the turn, not one it read while it worked.
   const startedAt = useMemo(() => {
+    const started = session.activeMessageId ? items.find((item) => item.id === session.activeMessageId) : undefined;
+    if (started) return started.ts;
     for (let i = items.length - 1; i >= 0; i--) {
       const item = items[i];
-      if (item.type === 'user' && !item.queued) return item.ts;
+      if (item.type === 'user' && !item.queued && !item.midTurn) return item.ts;
     }
     return session.updatedAt;
-  }, [items, session.updatedAt]);
+  }, [items, session.activeMessageId, session.updatedAt]);
 
   // Follow new output unless the reader has scrolled up to look at something.
   useEffect(() => {

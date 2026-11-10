@@ -32,7 +32,7 @@ describe('agent process identity', () => {
   beforeEach(() => {
     writeScript('/usr/local/bin/lonca-run', currentLauncher);
     writeScript(claudePath, `#!/bin/bash
-cat >/dev/null
+head -n 1 >/dev/null
 touch .context/identity-agent-started
 trap '' TERM HUP
 while true; do echo tick >> .context/identity-heartbeat; sleep 0.1; done
@@ -83,7 +83,7 @@ while true; do echo tick >> .context/identity-heartbeat; sleep 0.1; done
       type: 'assistant', message: { id: text, content: [{ type: 'text', text }] },
     });
     writeScript(claudePath, `#!/bin/bash
-cat >/dev/null
+head -n 1 >/dev/null
 printf %s "$PYTHONPATH" > .context/agent-pythonpath
 pwd > .context/agent-workdir
 printf '%s\\n' ${quote(event('imports-isolated'))}
@@ -158,7 +158,7 @@ while true; do sleep 0.1; done
   });
 
   it('records a normal nonzero CLI exit', async () => {
-    writeScript(claudePath, '#!/bin/bash\ncat >/dev/null\necho cli-failed >&2\nexit 17\n');
+    writeScript(claudePath, '#!/bin/bash\nhead -n 1 >/dev/null\necho cli-failed >&2\nexit 17\n');
     const session = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, {});
     await lonca.api('POST', `/sessions/${session.id}/messages`, { text: 'Fail normally', attachments: [] });
     await lonca.waitForIdle(session.id);

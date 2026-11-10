@@ -39,7 +39,7 @@ async function startAgent(): Promise<string> {
   const quotedCli = `'${cli.replaceAll("'", "'\\''")}'`;
   asRoot(workspace.sandboxName, `cat > ${quotedCli} <<'CLI'
 #!/bin/bash
-cat >/dev/null
+head -n 1 >/dev/null
 echo '{"type":"assistant","message":{"id":"saved","content":[{"type":"text","text":"saved answer"}]}}'
 sleep 600
 CLI
