@@ -220,24 +220,21 @@ export function secretsStatus(): SecretsStatus {
   return { claudeToken: mask(secrets.claudeToken), githubToken: mask(secrets.githubToken) };
 }
 
-/**
- * A browser keeps the token for every origin it opened Lonca on, and a Lead can forward one of
- * those ports to a page of its own. So the token changes whenever Lonca runs on another port than
- * last time, and once for a token from before this was recorded, leaving what browsers kept useless.
- */
-export function renewTokenOnNewPort(port: number): void {
-  let last = '';
+/** Every port Lonca has served its pages on, so that no forward is ever given one. */
+export function uiPorts(): number[] {
   try {
-    last = fs.readFileSync(paths.tokenPort, 'utf8').trim();
+    return fs.readFileSync(paths.uiPorts, 'utf8').split('\n').map(Number).filter((port) => Number.isInteger(port) && port > 0);
   } catch {
-    // Never recorded.
+    return [];
   }
-  if (last === String(port)) return;
-  writeAtomic(paths.token, crypto.randomBytes(24).toString('base64url'), 0o600);
-  writeAtomic(paths.tokenPort, String(port), 0o600);
 }
 
-/** The token that guards the web UI and API, stable across restarts on the same port. */
+export function rememberUiPort(port: number): void {
+  const known = uiPorts();
+  if (!known.includes(port)) writeAtomic(paths.uiPorts, [...known, port].join('\n'), 0o600);
+}
+
+/** The token that guards the web UI and API, stable across restarts. */
 export function accessToken(): string {
   try {
     return fs.readFileSync(paths.token, 'utf8').trim();

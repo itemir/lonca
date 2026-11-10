@@ -137,6 +137,7 @@ function tables(...rows: string[]): string {
 beforeAll(async () => {
   home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lonca-ports-')));
   vi.stubEnv('LONCA_HOME', home);
+  vi.stubEnv('PORT', '4801');
   store = await import('../../server/store.ts');
   workspaces = await import('../../server/workspaces.ts');
   // As the runner's does when an agent won't stop. It comes before the ports' own, as it does in the server.
@@ -206,7 +207,8 @@ describe('choosing the port on the user’s computer', () => {
     ['taken by something listening on ::1', async () => listenOn('::1')],
     ['below 1024', async () => 80],
     ['Lonca’s own', async () => HTTP_PORT],
-    // A browser may keep Lonca's token for this origin.
+    // A browser may keep Lonca's token for these origins.
+    ['Lonca’s default', async () => 4700],
     ['Lonca’s in development', async () => 5173],
     ['Codex’s sign-in port', async () => 1455],
     ['one browsers won’t open', async () => 6000],
@@ -233,6 +235,11 @@ describe('choosing the port on the user’s computer', () => {
     ['1023', async () => 1023, 'has to be from 1024 to 65535'],
     ['65536', async () => 65536, 'has to be from 1024 to 65535'],
     ['Lonca’s own', async () => HTTP_PORT, 'is kept for Lonca\'s own pages'],
+    ['Lonca’s default', async () => 4700, 'is kept for Lonca\'s own pages'],
+    ['one Lonca has run on before', async () => {
+      store.rememberUiPort(4802);
+      return 4802;
+    }, 'is kept for Lonca\'s own pages'],
     ['Lonca’s in development', async () => 5173, 'is kept for Lonca\'s own pages'],
     ['Codex’s sign-in port', async () => 1455, 'is kept for signing in to Codex'],
     ['one browsers won’t open', async () => 6000, 'Browsers won\'t open localhost:6000'],

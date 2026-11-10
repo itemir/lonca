@@ -1,8 +1,8 @@
 import net, { type AddressInfo } from 'node:net';
 import type { PortForward, Workspace } from '../shared/types.ts';
-import { DEV_PORT, HTTP_PORT, PORTS_PER_WORKSPACE } from './config.ts';
+import { DEFAULT_HTTP_PORT, DEV_PORT, HTTP_PORT, PORTS_PER_WORKSPACE } from './config.ts';
 import { execText, publishPort, sandboxState, unpublishPort } from './sandbox.ts';
-import { flushState, state } from './store.ts';
+import { flushState, state, uiPorts } from './store.ts';
 import { HttpError, KeyedQueue, errorMessage } from './util.ts';
 import { isPortFree, onSandboxChange, publishWorkspace, reserveHostPorts, runningSandbox } from './workspaces.ts';
 
@@ -132,9 +132,9 @@ async function hostPortProblem(workspace: Workspace, hostPort: number): Promise<
   if (!Number.isInteger(hostPort) || hostPort < LOWEST_HOST_PORT || hostPort > HIGHEST_PORT) {
     return `A port on the user's computer has to be from ${LOWEST_HOST_PORT} to ${HIGHEST_PORT}, so localhost:${hostPort} can't be used.`;
   }
-  // A browser keeps Lonca's token for its origin, where a page the VM served could read it. The token
-  // changes when Lonca moves to another port, but Vite's in development serves it on the same one.
-  if ([HTTP_PORT, DEV_PORT].includes(hostPort)) return `localhost:${hostPort} is kept for Lonca's own pages.`;
+  // A browser keeps Lonca's token for each origin it opened Lonca on, where a page the VM served could
+  // read it, or install a service worker that takes over Lonca's pages whenever it's back on that port.
+  if ([HTTP_PORT, DEFAULT_HTTP_PORT, DEV_PORT, ...uiPorts()].includes(hostPort)) return `localhost:${hostPort} is kept for Lonca's own pages.`;
   if (hostPort === CODEX_SIGN_IN_PORT) return `localhost:${hostPort} is kept for signing in to Codex.`;
   if (BROWSER_BLOCKED_PORTS.includes(hostPort)) return `Browsers won't open localhost:${hostPort}.`;
   const owner = state.workspaces.find((entry) => isOwnPort(entry, hostPort));
