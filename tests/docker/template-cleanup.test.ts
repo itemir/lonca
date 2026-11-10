@@ -40,7 +40,7 @@ describe('old templates', () => {
     expect(rebuilt).not.toBe(original);
     expect(listed(original)).toBe(true);
 
-    // What the README tells people to do, which needs the image the VM was made from.
+    // What the guide tells people to do, which needs the image the VM was made from.
     sbx('stop', workspace.sandboxName);
     const saved = `${lonca.prefix}-saved:1`;
     sbx('template', 'save', workspace.sandboxName, saved);

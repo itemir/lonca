@@ -205,7 +205,7 @@ export async function ensureSandboxImage(): Promise<string> {
 /** A project's own template has to be one Docker Sandboxes already has. */
 export async function ensureCustomTemplate(image: string): Promise<string> {
   if (await templateLoaded(image)) return image;
-  throw new SandboxError(`Docker Sandboxes has no template called ${image}. \`sbx template ls\` lists the ones it has, and the README says how to make one.`);
+  throw new SandboxError(`Docker Sandboxes has no template called ${image}. \`sbx template ls\` lists the ones it has, and Lonca's guide says how to make one.`);
 }
 
 /** Rebuilds from scratch to pick up new versions of the agent CLIs. */
