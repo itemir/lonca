@@ -159,6 +159,11 @@ export async function addProxySecretEverywhere(secret: ProxySecret): Promise<voi
   })));
 }
 
+/** Runs something that Stop, Archive and Rebuild have to wait for, such as merging the workspace's pull request. */
+export function underLifecycle<T>(workspace: Workspace, task: () => Promise<T>): Promise<T> {
+  return lifecycle.run(workspace.id, task);
+}
+
 /** Observes a workspace's sandbox without waking it for reads or automatic terminals. */
 export async function runningSandbox(workspace: Workspace): Promise<string> {
   if (workspace.status !== 'ready') {

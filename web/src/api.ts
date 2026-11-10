@@ -1,6 +1,6 @@
 import type {
-  AgentId, Attachment, ChangeSet, Checks, DockerLoginState, FileContent, FileEntry, LeadChoice, LoginMethod, LoginState, Playbook, Profile, Project, ProjectSettings,
-  SearchHit, Session, SessionSnapshot, TerminalInfo, UserItem, Workspace, AppState, AppSettings,
+  AgentId, Attachment, ChangeSet, Checks, DockerLoginState, FileContent, FileEntry, LeadChoice, LoginMethod, LoginState, MergeMethod, MergeReply, Playbook, Profile,
+  Project, ProjectSettings, SearchHit, Session, SessionSnapshot, TerminalInfo, UserItem, Workspace, AppState, AppSettings,
 } from '../../shared/types.ts';
 import { accessToken } from './auth.ts';
 
@@ -14,10 +14,19 @@ function authHeaders(): Record<string, string> {
   return { authorization: `Bearer ${accessToken() ?? ''}` };
 }
 
+/** A request the server answered with an error, as opposed to one that never got an answer. */
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function failure(response: Response, fallback: string): Promise<Error> {
   if (response.status === 401) listeners.unauthorized();
   const body = await response.json().catch(() => null);
-  return new Error(body?.error ?? fallback);
+  return new ApiError(response.status, body?.error ?? fallback);
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -60,6 +69,8 @@ export const api = {
   diff: (id: string, path: string, untracked: boolean, oldPath?: string) =>
     request<string>('GET', `/workspaces/${id}/diff?${query({ path, untracked: untracked ? '1' : '0', oldPath: oldPath ?? '' })}`),
   checks: (id: string) => request<Checks>('GET', `/workspaces/${id}/checks`),
+  mergePr: (id: string, merge: { number: number; headOid: string; base: string; method: MergeMethod }) =>
+    request<MergeReply>('POST', `/workspaces/${id}/pr/merge`, merge),
 
   async uploadAttachment(workspaceId: string, file: File): Promise<Attachment> {
     const response = await fetch(`/api/workspaces/${workspaceId}/attachments?${query({ name: file.name })}`, {

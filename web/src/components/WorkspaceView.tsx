@@ -10,6 +10,7 @@ import { api } from '../api.ts';
 import { basename, effortLabel } from '../format.ts';
 import { useIsPhone } from '../hooks.ts';
 import { useLayout } from '../layout.ts';
+import { usePrPolling, usePrStatus } from '../pr.ts';
 import { sessionSignIn } from '../signins.ts';
 import { attempt, tabKey, useStore, type WorkspaceTab } from '../store.ts';
 import { ChatTranscript } from './Chat.tsx';
@@ -17,6 +18,7 @@ import { canClose, closeVerb, useCloseWorkspace } from './CloseWorkspaceDialog.t
 import { Composer } from './Composer.tsx';
 import { DiffTab, FileTab } from './FileViews.tsx';
 import { modelLabel } from './ModelPicker.tsx';
+import { PrAnnouncer, panelNote } from './PullRequest.tsx';
 import { RightPanel } from './RightPanel.tsx';
 import { CloseLeadDialog, NoLead, SessionBanner, StatusGlyph, TabsSheet, TeamActivity, TeamStrip, sessionState } from './Team.tsx';
 import { Avatar, ConfirmDialog, type ConfirmOptions, IconButton, Menu, Modal, Spinner } from './ui.tsx';
@@ -192,6 +194,9 @@ function WorkspaceHeader({ workspace, project, earlierLeads, onReadLead, phone }
   const [renaming, setRenaming] = useState(false);
   const close = useCloseWorkspace(workspace);
   const running = workspace.status === 'ready';
+  // With the panel closed, its button is where a pull request that's ready or merged gets noticed.
+  const pr = usePrStatus(workspace);
+  const note = rightOpen ? null : panelNote(pr);
 
   const openInEditor = (name: string, scheme: string) => setConfirm({
     title: `Open in ${name}?`,
@@ -259,7 +264,10 @@ function WorkspaceHeader({ workspace, project, earlierLeads, onReadLead, phone }
           { label: `Open localhost:${workspace.port}`, icon: <Globe size={14} />, disabled: !running, onSelect: () => window.open(portUrl(workspace), '_blank', 'noopener,noreferrer') },
         ]}
       />
-      <IconButton label={rightOpen ? 'Hide the side panel' : 'Show the side panel'} onClick={toggleRight}><PanelRight size={16} /></IconButton>
+      <IconButton className="panel-toggle" label={rightOpen ? 'Hide the side panel' : note ? `Show the side panel. ${note.text}` : 'Show the side panel'} onClick={toggleRight}>
+        <PanelRight size={16} />
+        {note && <span className={`panel-dot dot-${note.kind}`} aria-hidden="true" />}
+      </IconButton>
       {confirm && <ConfirmDialog {...confirm} onClose={() => setConfirm(null)} />}
       {renaming && <RenameDialog workspace={workspace} onClose={() => setRenaming(false)} />}
       {close.dialog}
@@ -400,6 +408,8 @@ export function WorkspaceView() {
   const [tabsOpen, setTabsOpen] = useState(false);
 
   const workspace = allWorkspaces.find((entry) => entry.id === id);
+  // Here rather than in the side panel, which isn't there while it's closed, as on most phones.
+  usePrPolling(workspace?.id, workspace?.status === 'ready');
   const project = allProjects.find((entry) => entry.id === workspace?.projectId);
   const sessions = useMemo(
     () => allSessions
@@ -532,6 +542,7 @@ export function WorkspaceView() {
           <IconButton label="New conversation" onClick={newSession}><Plus size={15} /></IconButton>
         </div>}
         <StatusBanner workspace={workspace} />
+        <PrAnnouncer key={workspace.id} workspace={workspace} />
         {activeSession && <SessionBanner session={activeSession} />}
         {activeSession && <MarkRead session={activeSession} />}
         <div className="workspace-content">

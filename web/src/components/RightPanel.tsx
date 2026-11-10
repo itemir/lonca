@@ -1,15 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
-  CheckCircle2, ChevronRight, CircleDashed, ExternalLink, File, FileCode, FileImage, FileText, Folder, FolderOpen, GitPullRequest,
+  CheckCircle2, ChevronRight, CircleDashed, ExternalLink, File, FileCode, FileImage, FileText, Folder, FolderOpen,
   ListTree, MinusCircle, RefreshCw, Search, TriangleAlert, X, XCircle,
 } from 'lucide-react';
+import type { PrStatus } from '../../../shared/pr.ts';
 import type { ChangeSet, CheckRun, Checks, FileEntry, Project, SearchHit, Workspace } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { basename, dirname, safeUrl } from '../format.ts';
 import { usePolled, useResizable } from '../hooks.ts';
-import { attempt, useStore } from '../store.ts';
+import { refreshPr, usePrStatus, usePrStore } from '../pr.ts';
+import { useStore } from '../store.ts';
 import { BottomPanel } from './BottomPanel.tsx';
+import { PrHeader, PrIcon } from './PullRequest.tsx';
 import { IconButton, Spinner } from './ui.tsx';
 
 type PanelTab = 'files' | 'changes' | 'checks';
@@ -194,13 +197,13 @@ function CheckIcon({ status }: { status: CheckRun['status'] }) {
   }
 }
 
-function ChecksPanel({ checks, error, onCreatePr, hasWork }: {
+function ChecksPanel({ checks, status, onCreatePr, hasWork }: {
   checks: Checks | null;
-  error: string | null;
+  status: PrStatus;
   onCreatePr: () => void;
   hasWork: boolean;
 }) {
-  if (!checks) return <div className="panel-empty">{error ?? <Spinner />}</div>;
+  if (!checks) return <div className="panel-empty"><Spinner /></div>;
   if (checks.github === 'not-github') return <div className="panel-empty">Checks appear for repositories hosted on GitHub.</div>;
   if (checks.github === 'missing-token') {
     return (
@@ -211,7 +214,7 @@ function ChecksPanel({ checks, error, onCreatePr, hasWork }: {
     );
   }
   if (checks.github === 'error') return <div className="panel-empty"><TriangleAlert size={15} />{checks.error}</div>;
-  if (!checks.pr) {
+  if (!checks.pr || status.kind === 'none') {
     return (
       <div className="panel-empty">
         No pull request for this branch yet.
@@ -219,20 +222,17 @@ function ChecksPanel({ checks, error, onCreatePr, hasWork }: {
       </div>
     );
   }
+  // No buttons here: the one Merge is at the top of the panel.
   return (
     <div className="checks">
-      <a className="pr-card" href={safeUrl(checks.pr.url)} target="_blank" rel="noreferrer">
-        <GitPullRequest size={15} />
+      <a className={`pr-card pr-tone-${status.tone}`} href={safeUrl(checks.pr.url)} target="_blank" rel="noreferrer">
+        <PrIcon status={status} size={15} />
         <span className="pr-title">{checks.pr.title}</span>
         <span className="pr-number">#{checks.pr.number}<ExternalLink size={12} /></span>
       </a>
-      <div className="pr-state">
-        {checks.pr.isDraft ? 'Draft' : checks.pr.state.toLowerCase().replace(/^./, (char) => char.toUpperCase())}
-        {checks.pr.reviewDecision === 'APPROVED' && ', approved'}
-        {checks.pr.reviewDecision === 'CHANGES_REQUESTED' && ', changes requested'}
-        {checks.pr.mergeable === 'CONFLICTING' && ', has conflicts'}
-      </div>
-      {checks.checks.length === 0 && <div className="panel-empty">No checks have reported on this pull request.</div>}
+      <ul className="pr-state">
+        {status.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+      </ul>
       {checks.checks.map((check) => (
         <a key={check.name} className="check-row" href={safeUrl(check.url)} target="_blank" rel="noreferrer">
           <CheckIcon status={check.status} />
@@ -260,14 +260,15 @@ export function RightPanel({ workspace, project, onOpenFile, onOpenDiff, onCreat
   const height = useResizable('bottom', 300, 120, 820, 'y', true);
   const ready = workspace.status === 'ready';
   const changes = usePolled(ready ? () => api.changes(workspace.id) : null, 5000, [workspace.id, ready]);
-  const checks = usePolled(ready ? () => api.checks(workspace.id) : null, 30000, [workspace.id, ready, secrets.githubToken]);
+  // Read for the workspace on screen by WorkspaceView, which stays mounted while this panel is closed.
+  const checks = usePrStore((store) => store.entries[workspace.id]?.checks ?? null);
+  const status = usePrStatus(workspace);
   // The server updates the workspace's totals when a turn ends; the list follows them.
   useEffect(() => {
     if (ready) changes.refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace.diff?.added, workspace.diff?.removed, workspace.diff?.files]);
   const hasWork = useMemo(() => (changes.data?.files.length ?? 0) > 0 || (changes.data?.ahead ?? 0) > 0, [changes.data]);
-  const pr = checks.data?.pr;
 
   const createPr = () => {
     if (!project.settings.env.GH_TOKEN && !secrets.githubToken) {
@@ -282,17 +283,7 @@ export function RightPanel({ workspace, project, onOpenFile, onOpenDiff, onCreat
     <aside className="right-panel" style={{ width: width.size }} aria-label="Workspace details">
       <div className="resize-handle resize-x right-handle" onPointerDown={width.onPointerDown} />
       <div className="right-header">
-        {pr ? (
-          <a className="button button-small" href={safeUrl(pr.url)} target="_blank" rel="noreferrer">
-            <GitPullRequest size={13} /> #{pr.number}
-          </a>
-        ) : (
-          hasWork && project.githubOwner && (
-            <button type="button" className="button button-small" onClick={createPr}>
-              <GitPullRequest size={13} /> Create PR
-            </button>
-          )
-        )}
+        <PrHeader workspace={workspace} project={project} hasWork={hasWork} onCreatePr={createPr} />
       </div>
       <div className="right-top">
         <div className="panel-tabs" role="tablist">
@@ -308,7 +299,7 @@ export function RightPanel({ workspace, project, onOpenFile, onOpenDiff, onCreat
             </IconButton>
           )}
           {tab === 'changes' && <IconButton label="Refresh changes" onClick={changes.refresh}><RefreshCw size={14} /></IconButton>}
-          {tab === 'checks' && <IconButton label="Refresh checks" onClick={checks.refresh}><RefreshCw size={14} /></IconButton>}
+          {tab === 'checks' && <IconButton label="Refresh checks" onClick={() => void refreshPr(workspace.id, { force: true })}><RefreshCw size={14} /></IconButton>}
         </div>
         {tab === 'files' && searching && (
           <div className="panel-search">
@@ -322,7 +313,7 @@ export function RightPanel({ workspace, project, onOpenFile, onOpenDiff, onCreat
           {ready && tab === 'files' && !searching && <FileTree workspace={workspace} onOpen={onOpenFile} />}
           {ready && tab === 'files' && searching && <SearchResults workspace={workspace} query={query} onOpen={onOpenFile} />}
           {ready && tab === 'changes' && <ChangesList changes={changes.data} error={changes.error} onOpen={onOpenDiff} />}
-          {ready && tab === 'checks' && <ChecksPanel checks={checks.data} error={checks.error} onCreatePr={createPr} hasWork={hasWork} />}
+          {ready && tab === 'checks' && <ChecksPanel checks={checks} status={status} onCreatePr={createPr} hasWork={hasWork} />}
         </div>
       </div>
       {bottomOpen ? (

@@ -16,6 +16,7 @@ import {
   getChanges, getChecks, getFileDiff, listDirectory, readWorkspaceFile, safeAttachmentName, searchFiles,
 } from './inspect.ts';
 import { publish } from './events.ts';
+import { mergePullRequest, mergeRequestSchema } from './merge.ts';
 import {
   addProjectFromPath, addProjectFromUrl, listBranches, projectLifecycle, publishProject, removeProject,
 } from './projects.ts';
@@ -284,6 +285,11 @@ export function createApi(me: AppState['me']): Router {
 
   api.get('/workspaces/:id/checks', async (req, res) => {
     res.json(await getChecks(workspaceParam(req)));
+  });
+
+  api.post('/workspaces/:id/pr/merge', express.json(), async (req, res) => {
+    const workspace = workspaceParam(req);
+    res.json(await mergePullRequest(workspace, parse(mergeRequestSchema, req.body)));
   });
 
   api.post('/workspaces/:id/attachments', express.raw({ type: () => true, limit: '50mb' }), async (req, res) => {

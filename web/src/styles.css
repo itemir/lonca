@@ -15,6 +15,8 @@
   --added: #8fbf7f;
   --removed: #e5867a;
   --warning: #dcbc7f;
+  /* A merged pull request, as on GitHub. 8:1 on --panel. */
+  --merged: #c9a4cf;
   --error: #e5867a;
   --error-bg: #2a1a18;
   --font: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -198,11 +200,17 @@ code { font-family: var(--mono); font-size: 0.93em; }
   text-decoration: none;
 }
 
-.button:hover:not(:disabled) { background: var(--hover); }
+.button:hover:not(:disabled, [aria-disabled='true']) { background: var(--hover); }
+/* aria-disabled for a button that has to keep focus while it can't be pressed, such as Merge while it merges. */
 .button:disabled { opacity: 0.5; }
+/* A little stronger, since "Merging…" is the only word of progress there is: 5:1 on the panel. */
+.button[aria-disabled='true'] { opacity: 0.55; cursor: default; }
 .button-small { height: 26px; padding: 0 9px; font-size: 12.5px; border-radius: 6px; }
 .button-primary { background: var(--text); border-color: var(--text); color: #1b1917; }
-.button-primary:hover:not(:disabled) { background: #fff; }
+.button-primary:hover:not(:disabled, [aria-disabled='true']) { background: #fff; }
+/* The usual arc is the accent colour, which barely shows on a white button. */
+.button-primary .spinner-arc { stroke: currentColor; }
+.button-primary .spinner-track { stroke: rgb(27 25 23 / 0.25); }
 .button-danger { color: var(--error); }
 
 .link-button {
@@ -301,7 +309,8 @@ code { font-family: var(--mono); font-size: 0.93em; }
   padding: 12px 12px 12px 18px;
 }
 
-.modal-header h2 { font-size: 14.5px; font-weight: 600; }
+/* A title can name a branch, which can be one long word. It wraps rather than push Close away. */
+.modal-header h2 { min-width: 0; font-size: 14.5px; font-weight: 600; overflow-wrap: anywhere; }
 .modal-body { padding: 0 18px 18px; overflow: auto; }
 .confirm-body { color: var(--text-2); }
 
@@ -328,7 +337,10 @@ code { font-family: var(--mono); font-size: 0.93em; }
 
 /* The second tap of a double tap mustn't land on a button that just opened under the finger. */
 @keyframes tap-guard { from { pointer-events: none; } }
-.close-dialog .modal-actions { animation: tap-guard 0s 350ms backwards; }
+.sheet-dialog .modal-actions { animation: tap-guard 0s 350ms backwards; }
+
+.merge-body { display: flex; flex-direction: column; gap: 10px; overflow-wrap: anywhere; }
+.merge-body .form-error { margin: 0; }
 
 /* Forms */
 
@@ -387,6 +399,25 @@ select.input { appearance: auto; }
 }
 
 .segmented button.active { background: var(--hover); color: var(--text); }
+
+/* A radio group that looks like the rest: real radios, so arrow keys and screen readers work. */
+.segmented label {
+  flex: 1;
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 5px 8px;
+  border-radius: 6px;
+  color: var(--text-2);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.segmented label.active { background: var(--hover); color: var(--text); }
+.segmented label input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: inherit; }
+.segmented label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+.segmented label:has(input:disabled) { cursor: default; opacity: 0.6; }
 
 .radio {
   display: flex;
@@ -740,6 +771,23 @@ a.crumb:hover { color: var(--text); }
 }
 
 .open-in-icon { background: #151c1f; color: var(--text-2); border-right: 1px solid var(--line-strong); }
+
+/* A dot of its own, not ::after, which is the button's larger touch area on touch screens. A ring in
+   the header's colour keeps it apart from the icon's strokes, which are about as light. */
+.panel-toggle { position: relative; }
+.panel-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--panel);
+  pointer-events: none;
+}
+.panel-toggle:hover .panel-dot { box-shadow: 0 0 0 2px var(--hover); }
+.dot-ready { background: var(--added); }
+.dot-merged { background: var(--merged); }
 .open-in-caret { width: 24px; color: var(--text-2); }
 .open-in-button:hover { border-color: var(--text-3); }
 
@@ -1375,9 +1423,52 @@ a.crumb:hover { color: var(--text); }
   height: var(--header);
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  gap: 6px;
   padding: 0 10px;
   border-bottom: 1px solid transparent;
+  container: pr-header / inline-size;
+}
+
+/* Reads as text, not a button. Its icon lines up with the pull request's in the Checks tab. */
+.pr-status {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px 0 11px;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.pr-status:hover { background: var(--hover); }
+.pr-status .pr-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pr-status .pr-number { gap: 3px; }
+.pr-status:hover .pr-number { color: var(--text-2); }
+.pr-icon { flex: none; }
+.pr-unreachable { flex: none; margin-left: -3px; color: var(--warning); }
+
+/* Only ready and merged colour their words. The rest colour their icon, and each has its own. */
+.pr-tone-ready .pr-icon, .pr-tone-ready .pr-label { color: var(--added); }
+.pr-tone-merged .pr-icon, .pr-tone-merged .pr-label { color: var(--merged); }
+.pr-tone-waiting .pr-icon { color: var(--warning); }
+.pr-tone-blocked .pr-icon { color: var(--removed); }
+.pr-tone-muted .pr-icon { color: var(--text-3); }
+/* Dimmed by colour rather than opacity, which would take the number below what's readable. */
+.pr-status.is-stale .pr-label, .pr-status.is-stale .pr-icon { color: var(--text-3); }
+/* The hover fill is lighter, and grey on it would be too faint to read. */
+.pr-status.is-stale:hover .pr-label { color: var(--text-2); }
+
+/* Labels are short, but a narrow panel still needs the room. The link's name keeps the number. */
+.pr-action { flex: none; margin-left: auto; }
+
+@container pr-header (max-width: 310px) {
+  .pr-status .pr-number, .pr-action > svg:not(.spinner) { display: none; }
 }
 
 .right-top {
@@ -1570,6 +1661,7 @@ a.crumb:hover { color: var(--text); }
 .pr-title { flex: 1; min-width: 0; }
 .pr-number { flex: none; display: inline-flex; align-items: center; gap: 4px; color: var(--text-3); font-family: var(--mono); font-size: 12px; }
 .pr-state { padding: 2px 11px 8px; color: var(--text-3); font-size: 12.5px; }
+.pr-state li + li { margin-top: 3px; }
 
 .check-row {
   display: flex;
@@ -2124,6 +2216,8 @@ a.home-row:hover { background: var(--panel); }
 
 @media (max-width: 1000px) {
   .right-header:empty { display: none; }
+  /* The button follows the status, away from the corner where the panel button's touch area reaches. */
+  .pr-action { margin-left: 0; }
 
   /* Below the header, so the button that closes the panel stays reachable. */
   .right-panel {
@@ -2180,10 +2274,10 @@ a.home-row:hover { background: var(--panel); }
   .model-popover { min-width: min(340px, 86vw); }
 
   /* A sheet at the bottom, within reach of a thumb, with Cancel nearest. */
-  .close-dialog { align-items: flex-end; padding: 0; }
-  .close-dialog .modal { width: 100%; max-height: 100%; border-width: 1px 0 0; border-radius: 12px 12px 0 0; }
-  .close-dialog .modal-actions { flex-direction: column-reverse; }
-  .close-dialog .button { height: 44px; }
+  .sheet-dialog { align-items: flex-end; padding: 0; }
+  .sheet-dialog .modal { width: 100%; max-height: 100%; border-width: 1px 0 0; border-radius: 12px 12px 0 0; }
+  .sheet-dialog .modal-actions { flex-direction: column-reverse; }
+  .sheet-dialog .button { height: 44px; }
   /* Above the buttons rather than where Cancel goes, and as easy to hit. */
   .close-dialog .close-stop-asking { order: 1; min-height: 44px; margin-right: 0; }
   .lock-popover { width: min(300px, 80vw); }
@@ -2207,11 +2301,18 @@ a.home-row:hover { background: var(--panel); }
   .model-button { height: 40px; }
   .button { min-height: 44px; }
   .button-small { min-height: 40px; }
+  .merge-methods label { min-height: 34px; }
   .menu-item { min-height: 44px; }
   .tool-head { min-height: 36px; }
   .banner-actions .button, .add-sign-in { min-height: 44px; }
   .sign-in-switch { min-height: 44px; align-items: center; padding-bottom: 6px; }
   .sign-in-menu .menu-trigger { width: 44px; height: 44px; }
+}
+
+/* The floating panel starts right under the header, whose buttons' touch areas below reach into it.
+   Its first row starts below them, so a tap meant for one of those can't land on Merge. */
+@media (max-width: 1000px) and (hover: none), (max-width: 1000px) and (pointer: coarse) {
+  .right-header { height: calc(var(--header) + 8px); padding-top: 8px; }
 }
 
 /* Fingers need bigger targets than the dense layout gives them. */
@@ -2225,6 +2326,7 @@ a.home-row:hover { background: var(--panel); }
 
   .workspace-header .icon-button { position: relative; }
   .workspace-header .icon-button::after { content: ''; position: absolute; inset: -9px -4px; }
+  .panel-dot { top: 9px; right: 9px; }
 
   .bottom-tabs { height: 44px; }
   .bottom-tabs .icon-button, .terminal-tab .tab-close { width: 44px; height: 44px; }

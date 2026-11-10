@@ -1,0 +1,31 @@
+#!/bin/bash
+# Stands in for gh inside a test sandbox. It answers from files in /var/tmp/fake-gh, which the test
+# writes, and logs every call it gets, so nothing ever reaches GitHub.
+#   view.json, or view.err to fail     what `gh pr view` prints
+#   graphql.json, absent to fail       what `gh api graphql` prints
+#   merge.sleep, merge.stderr          how long `gh pr merge` takes and what it complains about
+#   merge.code                         its exit code: 124 is how `timeout` reports giving up
+#   after-view.json                    replaces view.json once a merge has run
+dir=/var/tmp/fake-gh
+# One line a call, its arguments apart by a unit separator, with any line breaks in them written as \n.
+{ printf '%s\x1f' "${@//$'\n'/\\n}"; printf '\n'; } >> "$dir/calls.log"
+case "${1:-} ${2:-}" in
+  'pr view')
+    if [ -e "$dir/view.err" ]; then cat "$dir/view.err" >&2; exit 1; fi
+    cat "$dir/view.json"
+    ;;
+  'api graphql')
+    [ -e "$dir/graphql.json" ] || { echo 'gh: Something went wrong' >&2; exit 1; }
+    cat "$dir/graphql.json"
+    ;;
+  'pr merge')
+    [ ! -e "$dir/merge.sleep" ] || sleep "$(cat "$dir/merge.sleep")"
+    [ ! -e "$dir/after-view.json" ] || cp "$dir/after-view.json" "$dir/view.json"
+    [ ! -e "$dir/merge.stderr" ] || cat "$dir/merge.stderr" >&2
+    exit "$(cat "$dir/merge.code" 2>/dev/null || echo 0)"
+    ;;
+  *)
+    echo "fake gh has no answer for: $*" >&2
+    exit 1
+    ;;
+esac
