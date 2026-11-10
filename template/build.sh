@@ -11,7 +11,9 @@ apt-get install -y -qq --no-install-recommends fd-find tree >/dev/null
 ln -sf /usr/bin/fdfind /usr/local/bin/fd
 rm -rf /var/lib/apt/lists/*
 
-npm install -g --silent --prefix /usr/local @anthropic-ai/claude-code @openai/codex
+# The newest Claude Code, but no older than the first that knows every model in shared/catalog.ts.
+# Raising the floor changes this file, so servers build a new template when they next start.
+npm install -g --silent --prefix /usr/local '@anthropic-ai/claude-code@>=2.1.321' @openai/codex
 npm cache clean --force --silent
 
 install -m 644 "$here/gitconfig" /etc/gitconfig
