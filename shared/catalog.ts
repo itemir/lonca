@@ -21,7 +21,7 @@ export const DEFAULT_CATALOG: Catalog = {
     label: 'Claude',
     models: [
       claudeModel('claude-opus-5-5', 'Opus 5.5'),
-      claudeModel('claude-fable-5-1', 'Fable 5.1'),
+      claudeModel('claude-fable-5-2', 'Fable 5.2'),
       claudeModel('claude-sonnet-5-5', 'Sonnet 5.5'),
       claudeModel('claude-haiku-5-5', 'Haiku 5.5'),
     ],
