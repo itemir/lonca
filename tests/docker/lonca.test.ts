@@ -792,16 +792,21 @@ EOF`);
     expect(texts(after).at(-1)).toContain('You said: after the interrupt');
   });
 
-  it('queues messages sent during a turn and runs them in order', async () => {
+  it('passes messages sent during a turn to that turn, in order', async () => {
     await lonca.api('POST', `/sessions/${claudeSession.id}/messages`, { text: 'SLOW first', attachments: [] });
     await until('the turn to start', async () => (await lonca.session(claudeSession.id)).status === 'running', 10000);
-    const queued = await lonca.api('POST', `/sessions/${claudeSession.id}/messages`, { text: 'queued second', attachments: [] });
-    expect(queued.queued).toBe(true);
-    const cancelled = await lonca.api('POST', `/sessions/${claudeSession.id}/messages`, { text: 'queued and cancelled', attachments: [] });
-    await lonca.api('DELETE', `/sessions/${claudeSession.id}/queue/${cancelled.id}`);
-    const items = await lonca.waitForIdle(claudeSession.id, 60000);
-    expect(texts(items).at(-1)).toContain('You said: queued second');
-    expect(JSON.stringify(items)).not.toContain('queued and cancelled');
+    const runId = (await lonca.session(claudeSession.id)).activeRunId;
+    // Each waits under the turn until Claude reads it.
+    const second = await lonca.api('POST', `/sessions/${claudeSession.id}/messages`, { text: 'sent second', attachments: [] });
+    expect(second.queued).toBe(true);
+    const third = await lonca.api('POST', `/sessions/${claudeSession.id}/messages`, { text: 'sent third', attachments: [] });
+    const items = await lonca.waitForIdle(claudeSession.id, 90000);
+    const sinceFirst = items.slice(items.findLastIndex((item) => item.type === 'user' && item.text === 'SLOW first'));
+    // Read by the turn that was under way, rather than each starting one of its own.
+    expect(sinceFirst.filter((item) => item.type === 'user' && item.midTurn).map((item) => item.id)).toEqual([second.id, third.id]);
+    expect(sinceFirst.filter((item) => item.type === 'result').every((item) => item.runId === runId)).toBe(true);
+    // Claude can take both in one turn, so its last answer is to the third, or to both.
+    expect(texts(items).at(-1)).toContain('sent third');
   });
 
   it('honours a stop pressed before the agent has even launched', async () => {
@@ -1671,7 +1676,7 @@ describe('when Docker Sandboxes can’t run workspaces', () => {
       const cli = sandboxExec(workspace.sandboxName, 'command -v claude').output;
       asRoot(workspace.sandboxName, `cat > '${cli}' <<'CLI'
 #!/bin/bash
-cat >/dev/null
+head -n 1 >/dev/null
 echo '{"type":"assistant","message":{"id":"saved","content":[{"type":"text","text":"saved answer"}]}}'
 sleep 600
 CLI

@@ -21,7 +21,7 @@ export const TEAM_TOOLS = [
   },
   {
     name: 'message_agent',
-    description: 'Send an agent you started a follow-up, such as a question, a challenge or the next piece of work. Queued if it\'s busy. Returns at once: end your turn, and Lonca wakes you when it answers.',
+    description: 'Send an agent you started a follow-up, such as a question, a challenge or the next piece of work. If it\'s working, a Claude agent reads it at its next step, and a Codex agent when its turn ends. Returns at once: end your turn, and Lonca wakes you when it answers.',
     inputSchema: {
       type: 'object',
       properties: {

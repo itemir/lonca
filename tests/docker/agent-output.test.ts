@@ -31,7 +31,7 @@ describe('agent output completion', () => {
     const cli = sandboxExec(workspace.sandboxName, 'command -v claude').output;
     const script = `#!/usr/bin/python3
 import json, os, sys, time
-prompt = sys.stdin.read().strip()
+prompt = json.loads(sys.stdin.readline())['message']['content'].strip()
 with open('.context/output-started', 'a') as stream:
     stream.write(prompt + '\\n')
 def answer(i, text=None):

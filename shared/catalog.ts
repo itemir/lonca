@@ -1,4 +1,10 @@
-import type { Catalog, ModelOption } from './types.ts';
+import type { AgentId, Catalog, ModelOption } from './types.ts';
+
+/**
+ * Whether a provider's CLI reads a message sent while it works, at its next step. Codex's can't
+ * while it runs as `codex exec`, so a message to it waits for the turn to end.
+ */
+export const READS_WHILE_WORKING: Record<AgentId, boolean> = { claude: true, codex: false };
 
 const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { ChatItem } from '../../shared/types.ts';
+import type { ChatItem, ResultItem } from '../../shared/types.ts';
 import { createClaudeParser, describeClaudeTool } from '../../server/agents/claude.ts';
 import { claudeAdapter } from '../../server/agents/claude.ts';
 import { codexAdapter, createCodexParser, unwrapShellCommand } from '../../server/agents/codex.ts';
@@ -17,14 +17,18 @@ function fixture(name: string): unknown[] {
 }
 
 /** Applies a parser's output the way the runner does and returns the resulting chat. */
-function replay(parser: AgentParser, events: unknown[]): { items: ChatItem[]; resume: string | null } {
+function replay(parser: AgentParser, events: unknown[]): { items: ChatItem[]; resume: string | null; delivered: string[]; turns: number } {
   const items = new Map<string, ChatItem>();
   let resume: string | null = null;
+  const delivered: string[] = [];
+  let turns = 1;
   const apply = (ops: ChatOp[]) => {
     for (const op of ops) {
       if (op.op === 'upsert') items.set(op.item.id, op.item);
       else if (op.op === 'remove') items.delete(op.itemId);
       else if (op.op === 'resume') resume = op.id;
+      else if (op.op === 'delivered') delivered.push(op.uuid);
+      else if (op.op === 'turn') turns++;
       else {
         const item = items.get(op.itemId);
         if (item && (item.type === 'text' || item.type === 'thinking')) item.text += op.text;
@@ -33,7 +37,7 @@ function replay(parser: AgentParser, events: unknown[]): { items: ChatItem[]; re
   };
   for (const event of events) apply(parser.line(event));
   apply(parser.finish());
-  return { items: [...items.values()], resume };
+  return { items: [...items.values()], resume, delivered, turns };
 }
 
 describe('Claude parser', () => {
@@ -140,6 +144,44 @@ describe('Claude parser', () => {
     } as never);
     expect(argv).toEqual(expect.arrayContaining(['--model', 'claude-opus-5-5', '--effort', 'max', '--resume', 'abc', '--append-system-prompt', 'context']));
     expect(argv.slice(0, 2)).toEqual(['claude', '-p']);
+    // It reads its messages as they come, and says when it's read each one.
+    expect(argv).toEqual(expect.arrayContaining(['--input-format', 'stream-json', '--replay-user-messages']));
+  });
+
+  // Recorded from Claude Code 2.1.319 with the flags Lonca uses, through inbox.py.
+  it('says when it reads messages sent during a tool call, in the turn it read them in', () => {
+    const { items, delivered, turns } = replay(createClaudeParser('run'), fixture('claude-midturn'));
+    expect(delivered).toEqual([
+      '242d5ef2-d0e1-4367-ab2d-64154d6c15fd', '75f3b79a-7afc-4de4-a100-0e283f09d5a3', 'fdd03cc4-c890-4631-8528-e78ec6110844',
+    ]);
+    expect(turns).toBe(1);
+    expect(items.map((item) => item.type)).toEqual(['text', 'tool', 'text', 'result']);
+    expect(items.at(-1)).toMatchObject({ id: 'run:result', failed: false });
+    // The echoes aren't tool results, which the same event type carries.
+    expect(items[1]).toMatchObject({ status: 'done', output: 'first-done' });
+  });
+
+  it('gives each turn of one process its own result', () => {
+    const { items, delivered, turns } = replay(createClaudeParser('run'), fixture('claude-followon'));
+    expect(delivered).toEqual(['c4b1e268-cd9e-46b7-8855-9f72d4143f1b', '6b4ac5cd-c183-4a9f-bcbe-4fe24e002ba5']);
+    expect(turns).toBe(2);
+    expect(items.map((item) => item.type === 'result' ? item.id : item.type)).toEqual(['text', 'run:result', 'text', 'run:result:2']);
+    expect(items[2]).toMatchObject({ text: 'Mock Claude here. You said: LATE message' });
+    // The CLI counts the process's cost so far, and each turn shows its own.
+    const costs = items.filter((item): item is ResultItem => item.type === 'result').map((item) => item.costUsd);
+    expect(costs[0]).toBeCloseTo(0.000224, 9);
+    expect(costs[1]).toBeCloseTo(0.000224, 9);
+  });
+
+  it('starts counting a turn again only after a result', () => {
+    const parser = createClaudeParser('run');
+    const init = { type: 'system', subtype: 'init', session_id: 'session' };
+    expect(parser.line(init)).toEqual([{ op: 'resume', id: 'session' }]);
+    expect(parser.line(init)).toEqual([{ op: 'resume', id: 'session' }]);
+    parser.line({ type: 'result', subtype: 'success', is_error: true, result: 'First failed', session_id: 'session' });
+    expect(parser.line(init)).toEqual([{ op: 'turn' }, { op: 'resume', id: 'session' }]);
+    const second = parser.line({ type: 'result', subtype: 'success', is_error: true, result: 'Second failed', session_id: 'session' });
+    expect(second.flatMap((op) => op.op === 'upsert' ? [op.item.id] : [])).toEqual(['run:result:2-error', 'run:result:2']);
   });
 });
 

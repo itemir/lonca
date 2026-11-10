@@ -17,7 +17,7 @@ beforeAll(async () => {
 cat > /usr/local/bin/claude <<'AGENT'
 #!/bin/bash
 trap '' TERM HUP
-cat >/dev/null
+head -n 1 >/dev/null
 while true; do echo tick >> .context/agent-heartbeat; sleep 0.2; done
 AGENT
 chmod +x /usr/local/bin/claude`);

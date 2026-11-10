@@ -1,6 +1,23 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 
 const script = fs.readFileSync(new URL('./process.py', import.meta.url), 'utf8');
+const inboxScript = fs.readFileSync(new URL('./inbox.py', import.meta.url), 'utf8');
+
+/**
+ * Starts a CLI that reads messages while it works, with inbox.py passing them on, `uuid` first.
+ * It's sent with each run, as process.py is, so a VM needs no new template for it.
+ */
+export function inboxCommand(dir: string, uuid: string, command: string[]): string[] {
+  return ['python3', '-I', '-c', inboxScript, dir, uuid, ...command];
+}
+
+/** What a CLI that wants a UUID for each message calls this one. The same id always gives the same UUID. */
+export function messageUuid(id: string): string {
+  const hex = crypto.createHash('sha256').update(`lonca-message:${id}`).digest('hex');
+  const variant = (8 | (parseInt(hex[16], 16) & 3)).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
 
 /** Send the current protocol with each exec so existing VMs use it too. */
 export function agentProcessCommand(action: 'status' | 'follow' | 'signal', dir: string, ...args: string[]): string[] {

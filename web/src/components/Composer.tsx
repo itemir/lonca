@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { ArrowUp, Paperclip, Plus, Square, X } from 'lucide-react';
 import { create } from 'zustand';
+import { READS_WHILE_WORKING } from '../../../shared/catalog.ts';
 import { canRun } from '../../../shared/lead.ts';
 import { hasSeveral, profileIdOf, profileLabel, profileStatus } from '../../../shared/profiles.ts';
 import type { Attachment, Session, Workspace } from '../../../shared/types.ts';
@@ -118,7 +119,7 @@ export function Composer({ session, workspace }: { session: Session; workspace: 
     : session.role === 'agent'
       ? 'Message this agent directly. The Lead is told.'
       : session.status === 'running'
-        ? 'Send a follow-up for when this turn finishes'
+        ? READS_WHILE_WORKING[session.agent] ? 'Write while it works. It reads this at its next step' : 'Send a follow-up for when this turn finishes'
         : session.role === 'lead'
           ? session.hasMessages ? 'Ask or tell the Lead something' : `Tell the Lead what you want done in ${workspace.name}`
           : `Ask ${agentLabel} to do something in ${workspace.name}`;

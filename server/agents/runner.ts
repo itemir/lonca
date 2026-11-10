@@ -16,11 +16,11 @@ import { onWorkspaceReady, onWorkspaceTeardown, publishWorkspace, runningSandbox
 import { claudeAdapter } from './claude.ts';
 import { codexAdapter } from './codex.ts';
 import { playbookFor } from './playbook.ts';
-import { agentProcessCommand, leadToolsScript, parseOutputReceipt, parseToolCall, type ToolCall } from './process.ts';
+import { agentProcessCommand, inboxCommand, leadToolsScript, messageUuid, parseOutputReceipt, parseToolCall, type ToolCall } from './process.ts';
 import { currentJobNote, scratchDir, sessionPrompt, userPrompt } from './prompt.ts';
 import { sanitizeItem } from './sanitize.ts';
 import { TEAM_TOOLS } from './team-tools.ts';
-import type { AgentAdapter, AgentParser, ChatOp } from './types.ts';
+import { type AgentAdapter, type AgentParser, type ChatOp, resultId } from './types.ts';
 
 const adapters: Record<AgentId, AgentAdapter> = { claude: claudeAdapter, codex: codexAdapter };
 
@@ -93,6 +93,16 @@ interface ActiveRun {
   reportedStopped?: boolean;
   /** The sign-in it runs on, which its limits and refusals belong to. None for a project's own key. */
   profileId?: string;
+  /** Its CLI reads messages from `<dir>/inbox` while it works, until it closes that. */
+  readsInbox: boolean;
+  /** Messages its CLI has read. They're no longer queued, even if saving that failed. */
+  delivered: Set<string>;
+  /** Hand-offs to the inbox, one at a time and in the order the messages were sent. */
+  handoffs: Promise<void>;
+  /** Messages whose inbox file is known to be written. */
+  written: Set<string>;
+  /** Which of its CLI's turns it's on: the CLI takes another for a message sent while it finished. */
+  cliTurn: number;
 }
 
 const runs = new Map<string, ActiveRun>();
@@ -258,7 +268,120 @@ function apply(sessionId: string, run: ActiveRun | null, ops: ChatOp[]): void {
         }
         break;
       }
+      case 'delivered':
+        if (run) delivered(run, String(op.uuid));
+        break;
+      case 'turn':
+        // The run's outcome is its last turn's.
+        if (run) Object.assign(run, { cliTurn: run.cliTurn + 1, sawResult: false, limited: false, limitResetsAt: undefined, reportedFailure: false });
+        break;
     }
+  }
+}
+
+/**
+ * The CLI has read a message sent while it worked, so the message joins the conversation where it
+ * was read. A replay after a restart finds it there already, and leaves it there.
+ */
+function delivered(run: ActiveRun, uuid: string): void {
+  const session = getSession(run.sessionId);
+  const id = session?.queue.find((entry) => messageUuid(entry) === uuid);
+  if (!session || !id) return;
+  run.delivered.add(id);
+  const transcript = transcriptFor(session.id);
+  const item = transcript.find(id);
+  if (item?.type === 'user' && item.queued) {
+    const { handoff: _handoff, ...rest } = item;
+    transcript.moveToEnd({ ...rest, queued: false, midTurn: true, ts: Date.now() });
+  }
+  try {
+    persistSession(session, { queue: session.queue.filter((entry) => entry !== id) });
+  } catch (error) {
+    // Retiring the run takes it off the queue too, and that retries until it's saved.
+    console.error('could not save a message as read:', errorMessage(error));
+  }
+}
+
+// A missing inbox is a definite no: the CLI has stopped reading it, or never had one.
+const INBOX_WRITE = String.raw`[ -d "$0" ] || exit 3
+cat > "$0/.$1.tmp" && mv -f "$0/.$1.tmp" "$0/$1"`;
+
+/** Whether the message's file is in the inbox, can't be, or might be. */
+async function writeInbox(run: ActiveRun, item: UserItem, seq: number): Promise<'written' | 'closed' | 'unknown'> {
+  const name = `${String(seq).padStart(12, '0')}.json`;
+  const content = JSON.stringify({ uuid: messageUuid(item.id), text: userPrompt(item.text, item.attachments ?? []) });
+  for (let attempt = 1; attempt <= 3 && runs.get(run.sessionId) === run; attempt++) {
+    try {
+      // Writing it mustn't boot a VM that stopped while this was being handled.
+      if (!await isSandboxRunning(run.sandbox)) return 'unknown';
+      const { code } = await exec(run.sandbox, ['bash', '-c', INBOX_WRITE, `${run.dir}/inbox`, name], { stdin: content, timeoutMs: 15000 });
+      if (code === 0) return 'written';
+      if (code === 3) return 'closed';
+    } catch { /* Tried again, like any other failure to reach the VM. */ }
+    await sleep(1000);
+  }
+  return 'unknown';
+}
+
+/**
+ * Hands what's queued to the turn under way, in the order it was sent, if its CLI reads messages
+ * while it works. Lonca's own updates to a Lead wait for the turn to end, since they're meant to
+ * start one. Each message is marked before its file is written, so that a crash in between can't
+ * leave the agent reading a message the user could still cancel. A file that might have been
+ * written keeps its mark until the turn ends, since the agent may be reading it.
+ */
+function handOff(run: ActiveRun): void {
+  if (!run.readsInbox) return;
+  run.handoffs = run.handoffs.then(() => handOffQueued(run))
+    .catch((error) => console.error('could not pass a message to a working agent:', errorMessage(error)));
+}
+
+async function handOffQueued(run: ActiveRun): Promise<void> {
+  for (;;) {
+    const session = getSession(run.sessionId);
+    if (!session || runs.get(session.id) !== run || !run.readsInbox || !run.launched || run.interrupted || session.held || session.userStopped) return;
+    const transcript = transcriptFor(session.id);
+    const item = session.queue.map((id) => transcript.find(id)).find((entry): entry is UserItem =>
+      entry?.type === 'user' && Boolean(entry.queued) && entry.from !== 'lonca' && !run.written.has(entry.id));
+    if (!item) return;
+    let seq = item.handoff?.runId === run.runId ? item.handoff.seq : undefined;
+    if (seq === undefined) {
+      const reserved = (session.handoffs ?? 0) + 1;
+      try {
+        // The number is saved before the mark, so that a crash between the two can't give it to another message too.
+        persistSession(session, { handoffs: reserved });
+        transcript.upsert({ ...item, handoff: { runId: run.runId, seq: reserved } });
+        persistSession(session, {});
+      } catch (error) {
+        // It stays an ordinary queued message, which the next turn starts with.
+        transcript.upsert(item);
+        console.error('could not save a message as passed on:', errorMessage(error));
+        return;
+      }
+      seq = reserved;
+    }
+    const written = await writeInbox(run, item, seq);
+    if (written === 'unknown') return; // Tried again with the next message, or the next turn takes it.
+    if (written === 'written') {
+      run.written.add(item.id);
+      continue;
+    }
+    // The CLI has stopped reading, so nothing more goes to this turn. The mark stays until the turn is
+    // retired, after all its output has been read: this message's file may have been written before,
+    // even by a server before a restart, and read, and only its echo in that output can say so.
+    run.readsInbox = false;
+    return;
+  }
+}
+
+/** What's queued but was never read stays queued, for the next turn, and can be cancelled again. */
+function clearHandoffs(run: ActiveRun, session: Session, queue: string[]): void {
+  const transcript = transcriptFor(session.id);
+  for (const id of queue) {
+    const item = transcript.find(id);
+    if (item?.type !== 'user' || item.handoff?.runId !== run.runId) continue;
+    const { handoff: _handoff, ...rest } = item;
+    transcript.upsert(rest);
   }
 }
 
@@ -353,6 +476,8 @@ async function superviseRun(run: ActiveRun, stop?: { holdQueue: boolean }): Prom
     // sending TERM. The run ID was saved before launch, so it remains recoverable.
     if (run.interrupted && run.stopRequestedAt === undefined) stopProcess(run);
     void follow(run).catch((error) => console.error('lost track of an agent run:', errorMessage(error)));
+    // What was sent while it started, or handed over before a restart, goes to it now.
+    handOff(run);
   }
 }
 
@@ -565,7 +690,7 @@ async function finishRun(run: ActiveRun, { code, stderr }: { code: number | null
     }
     apply(sessionId, run, [{
       op: 'upsert',
-      item: { id: `${runId}:result`, ts: Date.now(), runId, type: 'result', interrupted: run.interrupted, failed: failed && !run.interrupted },
+      item: { id: resultId(runId, run.cliTurn), ts: Date.now(), runId, type: 'result', interrupted: run.interrupted, failed: failed && !run.interrupted },
     }]);
   }
   if (run.replay && complete) {
@@ -596,11 +721,14 @@ async function retireRun(run: ActiveRun, extra: () => Partial<Session> = () => (
     if (!session) break;
     try {
       const patch = extra();
+      // What the CLI read isn't queued any more, even if saving that failed when it was read.
+      const queue = (patch.queue ?? session.queue).filter((id) => !run.delivered.has(id));
+      clearHandoffs(run, session, queue);
       persistSession(session, {
-        ...patch, ...outcomeOf(run, session), status: 'idle', activeRunId: null, activeMessageId: undefined, activeProfileId: undefined, stopRequested: undefined,
+        ...patch, queue, ...outcomeOf(run, session), status: 'idle', activeRunId: null, activeMessageId: undefined, activeProfileId: undefined, stopRequested: undefined,
         ...(session.role === 'lead' ? { toolReplies: undefined } : {}),
         // Whatever is queued would only meet the same limit.
-        held: run.outcome === 'limit' || (run.holdQueue && (patch.queue ?? session.queue).length > 0) ? true : session.held,
+        held: run.outcome === 'limit' || (run.holdQueue && queue.length > 0) ? true : session.held,
       });
       break;
     } catch (error) {
@@ -688,6 +816,7 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
     startedAt: Date.now(), offset: 0, interrupted: false, holdQueue: false, launched: false, sawResult: false, outputLimitHit: false, output: null,
     item, resumedFrom: session.resumeId, toolCalls: new Set(), toolQueue: Promise.resolve(), limited: false, reportedFailure: false, stopped: false,
     profileId: turnProfile(session.agent, profileId, project),
+    readsInbox: adapter.readsWhileWorking, delivered: new Set(), handoffs: Promise.resolve(), written: new Set(), cliTurn: 1,
   };
   // Registered before anything slow happens, so Stop works from the moment the turn begins.
   runs.set(session.id, run);
@@ -711,7 +840,7 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
     if (session.agent === 'codex') await setUpCodex(workspace, project);
     // Both prompts use one snapshot, even if the user edits the playbook while startup awaits I/O.
     const playbook = session.role === 'lead' ? playbookFor(project).content : undefined;
-    await execText(sandbox, ['mkdir', '-p', run.dir, ...(session.work ? [scratchDir(session.id)] : [])]);
+    await execText(sandbox, ['mkdir', '-p', run.dir, ...(run.readsInbox ? [`${run.dir}/inbox`] : []), ...(session.work ? [scratchDir(session.id)] : [])]);
     await execText(sandbox, ['bash', '-c', 'cat > "$0"', `${run.dir}/prompt`], {
       stdin: userPrompt([playbookUpdate(session, run, playbook), item.context, item.text, currentJobNote(session)].filter(Boolean).join('\n\n'), attachments),
     });
@@ -729,7 +858,7 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
       ...(session.agent === 'codex' ? { config: codexTurn(getProfile(profileId), project).config } : {}),
     });
     launchAttempted = true;
-    await execText(sandbox, ['lonca-run', run.dir, ...command], {
+    await execText(sandbox, ['lonca-run', run.dir, ...(run.readsInbox ? inboxCommand(run.dir, messageUuid(item.id), command) : command)], {
       env: turnEnv(session, project, profileId),
       workdir: workspace.path,
       timeoutMs: 20000,
@@ -790,7 +919,8 @@ export function startNextQueued(session: Session): void {
     return;
   }
   // A queued message joins the conversation when it's sent, after the turn it waited for.
-  const started: UserItem = { ...item, queued: false, ts: Date.now() };
+  const { handoff: _handoff, ...rest } = item;
+  const started: UserItem = { ...rest, queued: false, ts: Date.now() };
   transcript.moveToEnd(started);
   void startRun(session, workspace, started).catch((error) => console.error('could not start a turn:', errorMessage(error)));
 }
@@ -914,6 +1044,8 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
   } else {
     startNextQueued(session);
   }
+  const run = runs.get(session.id);
+  if (run) handOff(run);
   return canStart && !session.queue.includes(item.id) ? { ...item, queued: false } : item;
 }
 
@@ -929,6 +1061,8 @@ export async function flushQueue(sessionId: string, receipt?: ToolReceipt, patch
   releaseQueueHold(session, { ...(session.role === 'lead' ? { autonomousTurns: 0 } : {}), ...patch }, receipt);
   if ((workspace.status === 'stopped' || workspace.status === 'ready') && session.queue.length > 0) await startWorkspace(workspace);
   startNextQueued(session);
+  const run = runs.get(session.id);
+  if (run) handOff(run);
 }
 
 export function cancelQueued(sessionId: string, itemId: string): void {
@@ -937,6 +1071,9 @@ export function cancelQueued(sessionId: string, itemId: string): void {
   if (!session.queue.includes(itemId)) throw new HttpError(404, 'That message is no longer queued');
   const transcript = transcriptFor(sessionId);
   const item = transcript.find(itemId);
+  if (item?.type === 'user' && (!item.queued || (session.activeRunId && item.handoff?.runId === session.activeRunId))) {
+    throw new HttpError(409, 'The agent may already be reading this message, so it can no longer be cancelled.');
+  }
   const queue = session.queue.filter((id) => id !== itemId);
   transcript.remove(itemId);
   try {
@@ -1100,6 +1237,8 @@ async function resumeRun(session: Session): Promise<void> {
       replay: { previous, seen: new Set() }, toolCalls: new Set(), toolQueue: Promise.resolve(), limited: false, reportedFailure: false, stopped: Boolean(session.stopRequested),
       // One that started before there could be several runs on the provider's first.
       profileId: turnProfile(session.agent, session.activeProfileId ?? session.agent, getProject(workspace.projectId)),
+      // One started by a version of Lonca without an inbox says so when a message is written to it.
+      readsInbox: adapters[session.agent].readsWhileWorking, delivered: new Set(), handoffs: Promise.resolve(), written: new Set(), cliTurn: 1,
     };
     runs.set(session.id, run);
     // A crash during teardown can leave an agent alive in a workspace now marked error.

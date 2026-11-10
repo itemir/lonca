@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { AgentId, AgentJob, ChatItem, LeadChoice, NoticeItem, Profile, Session, TextItem, ToolItem, UserItem, Workspace } from '../../shared/types.ts';
+import { READS_WHILE_WORKING } from '../../shared/catalog.ts';
 import { canRun, isWorking, leadBlocker, staysHeld } from '../../shared/lead.ts';
 import {
   autoSwitchTarget, hasSeveral, isLimited, isReady, leadDefaultFor, leadMayUse, limitEnds, profileIdOf, profileLabel, profileName, profileStatus,
@@ -224,7 +225,9 @@ async function messageAgent(lead: Session, workspace: Workspace, call: ToolCall)
     ? `${nameOf(agent)} was stopped by the user, so your message waits until they release it. Tell them if you need it.`
     : staysHeld(agent)
       ? `${nameOf(agent)} is paused, so your message is queued. Use retry_agent when it can continue.`
-      : `Sent to ${nameOf(agent)}. End your turn: Lonca wakes you when it answers.`;
+      : agent.status === 'running'
+        ? `Sent to ${nameOf(agent)}, which is working, so it reads this ${READS_WHILE_WORKING[agent.agent] ? 'at its next step' : 'when its turn ends'}. End your turn: Lonca wakes you when it answers.`
+        : `Sent to ${nameOf(agent)}. End your turn: Lonca wakes you when it answers.`;
   await deliver(agent, call, text, { lead, id: call.id, reply: { text: reply } }, job);
   return reply;
 }
@@ -273,9 +276,12 @@ async function stopAgent(lead: Session, call: ToolCall): Promise<string> {
 
 const TRYING_AGAIN = 'Trying again';
 
+/** What the turn being retried was asked, including what it was sent while it worked. */
 function continuation(session: Session): string {
-  const last = transcriptFor(session.id).items.findLast((item): item is UserItem => item.type === 'user' && !item.queued && item.summary !== TRYING_AGAIN);
-  return `Continue where you left off. If you hadn't started, this was the request:\n\n${last?.text ?? ''}`;
+  const sent = transcriptFor(session.id).items.filter((item): item is UserItem => item.type === 'user' && !item.queued && item.summary !== TRYING_AGAIN);
+  const start = sent.findLastIndex((item) => !item.midTurn);
+  const later = sent.slice(start + 1).map((item) => item.text);
+  return `Continue where you left off. If you hadn't started, this was the request:\n\n${sent[start]?.text ?? ''}${later.length ? `\n\nAnd this was sent to you while you worked on it:\n\n${later.join('\n\n')}` : ''}`;
 }
 
 /** Works for a usage limit or a failure, which a conversation survives. `patch` is saved with what carries it on. */

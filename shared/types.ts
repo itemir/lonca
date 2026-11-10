@@ -154,6 +154,13 @@ export interface UserItem extends ChatItemBase {
   summary?: string;
   /** Sent ahead of `text` without being shown. */
   context?: string;
+  /**
+   * Handed to the turn under way, which reads it at its next step. It's still queued until the
+   * agent shows it has read it. `seq` numbers its file in that turn's inbox.
+   */
+  handoff?: { runId: string; seq: number };
+  /** Read by a turn that was already under way, rather than starting one. */
+  midTurn?: boolean;
 }
 
 export interface TextItem extends ChatItemBase {
@@ -278,8 +285,10 @@ export interface Session {
   activeMessageId?: string;
   /** An accepted Stop must survive a lost connection or server restart. */
   stopRequested?: { holdQueue: boolean };
-  /** Ids of user items waiting for the current turn to finish. */
+  /** Ids of user items waiting for the current turn to finish, or for it to read them. */
   queue: string[];
+  /** How many messages have been handed to turns under way, which numbers their files. */
+  handoffs?: number;
   /** Queued messages wait for a decision, including after a stop, usage limit or failure. */
   held?: boolean;
   /** A team session stopped by the user. Only another user action can release it. */

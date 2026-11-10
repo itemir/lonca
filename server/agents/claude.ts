@@ -1,6 +1,7 @@
+import { READS_WHILE_WORKING } from '../../shared/catalog.ts';
 import type { TextItem, ThinkingItem, ToolItem, ToolKind } from '../../shared/types.ts';
 import { describeTeamTool } from './team-tools.ts';
-import { type AgentAdapter, type AgentParser, type ChatOp, clipEdit, clipOutput } from './types.ts';
+import { type AgentAdapter, type AgentParser, type ChatOp, clipEdit, clipOutput, resultId } from './types.ts';
 
 interface ToolDescription {
   kind: ToolKind;
@@ -86,6 +87,11 @@ export function createClaudeParser(runId: string): AgentParser {
   let extraBlocks = 0;
   let sawError = false;
   let limitResetsAt: number | undefined;
+  // A message sent while it finished a turn gets a turn of its own in the same process.
+  let turn = 1;
+  let resultInTurn = false;
+  // Its results count the process's cost so far, which each turn's row shouldn't repeat.
+  let costSoFar = 0;
 
   const itemId = (messageId: string, index: number | string) => `${runId}:${messageId}:${index}`;
 
@@ -184,6 +190,8 @@ export function createClaudeParser(runId: string): AgentParser {
   }
 
   function userEvent(event: any): ChatOp[] {
+    // It echoes each message it reads with the uuid it was sent with, whenever in the turn that is.
+    if (event.isReplay) return typeof event.uuid === 'string' ? [{ op: 'delivered', uuid: event.uuid }] : [];
     const ops: ChatOp[] = [];
     const content = event.message?.content;
     if (!Array.isArray(content)) return ops;
@@ -200,23 +208,26 @@ export function createClaudeParser(runId: string): AgentParser {
 
   function resultEvent(event: any): ChatOp[] {
     const ops: ChatOp[] = [];
+    resultInTurn = true;
+    const spent = costSoFar;
+    if (typeof event.total_cost_usd === 'number') costSoFar = event.total_cost_usd;
     if (event.session_id) ops.push({ op: 'resume', id: event.session_id });
     if (event.is_error && !sawError) {
       const errors = Array.isArray(event.errors) ? event.errors.join('\n') : '';
       ops.push({
         op: 'upsert',
-        item: { id: `${runId}:result-error`, ts: Date.now(), runId, type: 'notice', level: 'error', text: event.result || errors || 'The agent stopped with an error.' },
+        item: { id: `${resultId(runId, turn)}-error`, ts: Date.now(), runId, type: 'notice', level: 'error', text: event.result || errors || 'The agent stopped with an error.' },
       });
     }
     ops.push({
       op: 'upsert',
       item: {
-        id: `${runId}:result`,
+        id: resultId(runId, turn),
         ts: Date.now(),
         runId,
         type: 'result',
         durationMs: event.duration_ms,
-        costUsd: event.total_cost_usd,
+        costUsd: typeof event.total_cost_usd === 'number' ? event.total_cost_usd - spent : undefined,
         inputTokens: event.usage ? (event.usage.input_tokens ?? 0) + (event.usage.cache_read_input_tokens ?? 0) + (event.usage.cache_creation_input_tokens ?? 0) : undefined,
         outputTokens: event.usage?.output_tokens,
         failed: Boolean(event.is_error),
@@ -230,7 +241,18 @@ export function createClaudeParser(runId: string): AgentParser {
       const event = raw as any;
       switch (event?.type) {
         case 'system':
-          if (event.subtype === 'init' && event.session_id) return [{ op: 'resume', id: event.session_id }];
+          if (event.subtype === 'init') {
+            const ops: ChatOp[] = [];
+            if (resultInTurn) {
+              turn++;
+              resultInTurn = false;
+              sawError = false;
+              limitResetsAt = undefined;
+              ops.push({ op: 'turn' });
+            }
+            if (event.session_id) ops.push({ op: 'resume', id: event.session_id });
+            return ops;
+          }
           if (event.subtype === 'compact_boundary') {
             return [{ op: 'upsert', item: { id: `${runId}:compact:${event.uuid ?? Date.now()}`, ts: Date.now(), runId, type: 'notice', level: 'info', text: 'The conversation was summarized to free up context.' } }];
           }
@@ -274,6 +296,9 @@ export const claudeAdapter: AgentAdapter = {
   command({ session, systemPrompt, tools }) {
     return [
       'claude', '-p',
+      // Messages come one per line, from the run's inbox, and each is echoed when it's read.
+      '--input-format', 'stream-json',
+      '--replay-user-messages',
       '--output-format', 'stream-json',
       '--verbose',
       '--include-partial-messages',
@@ -288,4 +313,5 @@ export const claudeAdapter: AgentAdapter = {
     ];
   },
   parser: createClaudeParser,
+  readsWhileWorking: READS_WHILE_WORKING.claude,
 };

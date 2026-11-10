@@ -4,7 +4,16 @@ export type ChatOp =
   | { op: 'upsert'; item: ChatItem }
   | { op: 'delta'; itemId: string; text: string }
   | { op: 'remove'; itemId: string }
-  | { op: 'resume'; id: string };
+  | { op: 'resume'; id: string }
+  /** The CLI has read the message with this uuid, which may have been sent while it worked. */
+  | { op: 'delivered'; uuid: string }
+  /** The same process began another turn, for what it was sent while it finished the last one. */
+  | { op: 'turn' };
+
+/** The result of a run's first turn, or of a later one by the same process. */
+export function resultId(runId: string, turn: number): string {
+  return turn > 1 ? `${runId}:result:${turn}` : `${runId}:result`;
+}
 
 /** Turns one agent CLI's JSONL output into chat items. */
 export interface AgentParser {
@@ -28,6 +37,8 @@ export interface TurnContext {
 export interface AgentAdapter {
   command(context: TurnContext): string[];
   parser(runId: string): AgentParser;
+  /** Its CLI reads messages from the run's inbox while it works, and echoes each one it reads. */
+  readsWhileWorking: boolean;
 }
 
 export const TOOL_OUTPUT_LIMIT = 16 * 1024;
