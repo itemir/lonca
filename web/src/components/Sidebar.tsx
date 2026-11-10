@@ -190,7 +190,7 @@ export function Sidebar() {
       <footer className="sidebar-footer">
         <SandboxStatusChip />
         <span className="spacer" />
-        <a className="icon-button" href="https://github.com/itemir/lonca#readme" target="_blank" rel="noreferrer" aria-label="Help" title="Help"><CircleHelp size={16} /></a>
+        <a className="icon-button" href="https://github.com/itemir/lonca/blob/main/docs/guide.md" target="_blank" rel="noreferrer" aria-label="Help" title="Help"><CircleHelp size={16} /></a>
         <Link className="icon-button" to="/settings" aria-label="Settings" title="Settings"><SettingsIcon size={16} /></Link>
       </footer>
     </aside>

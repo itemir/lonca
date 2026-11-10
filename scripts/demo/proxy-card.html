@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../node_modules/@fontsource-variable/inter/index.css">
+<link rel="stylesheet" href="../../node_modules/@fontsource-variable/jetbrains-mono/index.css">
+<style>
+  html, body { margin: 0; width: 1200px; height: 740px; background: transparent; }
+  body { font-family: 'Inter Variable', system-ui, sans-serif; color: #111827; display: flex; align-items: center; justify-content: center; background: rgba(15, 23, 42, 0.50); }
+  .card { background: #ffffff; border-radius: 14px; box-shadow: 0 24px 60px rgba(15, 23, 42, 0.35); padding: 26px 30px 28px; width: 940px; }
+  h2 { margin: 0 0 18px; font-size: 19px; font-weight: 650; letter-spacing: -0.01em; }
+  .row { display: flex; align-items: stretch; gap: 0; }
+  .box { flex: 1; border-radius: 10px; padding: 14px 16px; border: 1px solid #e5e7eb; background: #f9fafb; }
+  .box.vm { background: #eff6ff; border-color: #bfdbfe; }
+  .box.mac { background: #f0fdf4; border-color: #bbf7d0; }
+  .where { font-size: 11.5px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.06em; color: #6b7280; margin-bottom: 6px; }
+  .what { font-size: 15px; line-height: 1.4; font-weight: 520; }
+  code { display: inline-block; margin-top: 8px; font-family: 'JetBrains Mono Variable', ui-monospace, monospace; font-size: 12.5px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 6px; padding: 3px 7px; color: #1f2937; }
+  .arrow { width: 46px; display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 26px; }
+  .hosts code { margin-right: 4px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h2>Credentials never enter the virtual machine</h2>
+    <div class="row">
+      <div class="box vm">
+        <div class="where">Inside the VM</div>
+        <div class="what">Agents only have a placeholder</div>
+        <code>sk-ant-oat01-lonca-placeholder</code>
+      </div>
+      <div class="arrow">→</div>
+      <div class="box mac">
+        <div class="where">On your computer</div>
+        <div class="what">Docker Sandboxes’ proxy swaps in your real token as the request leaves</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="box hosts">
+        <div class="where">To the service</div>
+        <div class="what">And only to its own hosts</div>
+        <code>api.anthropic.com</code><code>chatgpt.com</code><code>github.com</code>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

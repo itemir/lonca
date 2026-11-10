@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Run parallel coding agents from your browser, each in its own git checkout and virtual machine.",
+  "description": "Run a team of Claude and Codex coding agents from your browser. Each workspace is a virtual machine of its own, so agents work without stopping to ask permission.",
   "license": "MIT",
   "engines": {
     "node": ">=22.18"
