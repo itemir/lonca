@@ -22,6 +22,20 @@ const LIST_CACHE_MS = 1500;
 
 export class SandboxError extends Error {}
 
+/**
+ * Docker Sandboxes didn't answer in time, which is no fault in Lonca. A sandbox can be slow to come
+ * back, and on a Mac, Node's timers count time asleep: a command that was waiting when the computer
+ * went to sleep is overdue as it wakes if it slept for longer than the command had left.
+ */
+export class SandboxTimeoutError extends SandboxError {
+  readonly status = 504;
+  readonly sandbox: string | undefined;
+  constructor(message: string, sandbox?: string) {
+    super(message);
+    this.sandbox = sandbox;
+  }
+}
+
 export interface ExecOptions {
   env?: string[];
   workdir?: string;
@@ -109,7 +123,7 @@ async function sbx(args: string[], options: { timeoutMs?: number } = {}): Promis
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      reject(new SandboxError(`sbx ${args[0]} took too long`));
+      reject(new SandboxTimeoutError(`sbx ${args[0]} took too long`));
     }, options.timeoutMs ?? COMMAND_TIMEOUT_MS);
     child.on('error', (error) => {
       clearTimeout(timer);
@@ -709,7 +723,7 @@ export async function exec(name: string, cmd: string[], options: ExecOptions = {
     // A little later than `timeout` itself, so a normal timeout reports its exit code.
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      reject(new SandboxError(`Timed out running ${cmd[0]} in the workspace’s sandbox`));
+      reject(new SandboxTimeoutError(`Timed out running ${cmd[0]} in the workspace’s sandbox`, name));
     }, timeoutMs + 5000);
     child.on('error', (error) => {
       clearTimeout(timer);
