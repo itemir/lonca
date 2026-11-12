@@ -1,3 +1,4 @@
+import './log.ts';
 import { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createServer } from 'node:http';

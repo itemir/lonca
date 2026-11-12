@@ -11,7 +11,7 @@ import {
 import { checkButtonCanStart, closeWorkspaceLead, holdWhenStopped, markRead, moveToProfile, stopAgents, switchLead, tryAgain, warnOfOtherWriter } from './agents/team.ts';
 import { createProfile, removeProfile, updateProfile } from './profiles.ts';
 import { projectCodexKey } from './boundary.ts';
-import { execText, sbxLogout } from './sandbox.ts';
+import { SandboxTimeoutError, execText, sbxLogout } from './sandbox.ts';
 import {
   getChanges, getChecks, getFileDiff, listDirectory, readWorkspaceFile, safeAttachmentName, searchFiles,
 } from './inspect.ts';
@@ -51,9 +51,13 @@ function projectParam(req: Request): Project {
   return project;
 }
 
+// Which workspace a request was about, for a failure to say.
+const requestWorkspaces = new WeakMap<Request, Workspace>();
+
 function workspaceParam(req: Request): Workspace {
   const workspace = getWorkspace(String(req.params.id));
   if (!workspace) throw new HttpError(404, 'No such workspace');
+  requestWorkspaces.set(req, workspace);
   return workspace;
 }
 
@@ -667,9 +671,15 @@ export function createApi(me: AppState['me']): Router {
 
   api.use((_req, _res, next) => next(new HttpError(404, 'No such API route')));
 
-  api.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  api.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
     const status = (error as { status?: number }).status ?? 500;
     if (status === 500) console.error(error);
+    // A stack trace would point at Lonca, which isn't at fault. Which request it was, and which sandbox, is what helps.
+    else if (error instanceof SandboxTimeoutError) {
+      // Listing sandboxes, say, is about none of them, but the request may have been about one.
+      const sandbox = error.sandbox ?? requestWorkspaces.get(req)?.sandboxName;
+      console.error(`${req.method} ${req.baseUrl}${req.path}: ${error.message}${sandbox ? ` (${sandbox})` : ''}`);
+    }
     res.status(status).json({ error: errorMessage(error) });
   });
 
