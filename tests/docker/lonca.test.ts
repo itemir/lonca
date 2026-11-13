@@ -661,14 +661,16 @@ supports_websockets = false
 EOF`);
   });
 
-  it('reports sign-in status for both CLIs', async () => {
+  it('reports sign-in status for every CLI', async () => {
     const state = await until('status checks', async () => {
       const current = await lonca.api('GET', '/state');
       return current.catalog.codex.models.length > 1 ? current : null;
     }, 60000);
     expect(state.system.profiles.claude.signedIn).toBe(false);
     expect(state.system.profiles.codex.signedIn).toBe(false);
+    expect(state.system.profiles.gemini.signedIn).toBe(false);
     expect(state.catalog.claude.models.map((model: { id: string }) => model.id)).toContain('claude-opus-5-5');
+    expect(state.catalog.gemini.models.map((model: { id: string }) => model.id)).toContain('gemini-3.1-pro-preview');
     for (const model of state.catalog.codex.models) expect(model.efforts.length).toBeGreaterThan(0);
   });
 

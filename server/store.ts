@@ -6,7 +6,7 @@ import type {
   AppSettings, Catalog, ChatItem, Profile, Project, SecretsStatus, Session, Workspace,
 } from '../shared/types.ts';
 import { DEFAULT_CATALOG } from '../shared/catalog.ts';
-import { PROFILE_ID } from '../shared/profiles.ts';
+import { AGENTS, PROFILE_ID } from '../shared/profiles.ts';
 import { paths } from './config.ts';
 
 interface StateFile {
@@ -34,10 +34,13 @@ export interface Secrets {
 
 /** Before there could be several, each provider had one sign-in, which keeps the provider's id. */
 function firstProfiles(): Profile[] {
-  return [
-    { id: 'claude', agent: 'claude', name: '' },
-    { id: 'codex', agent: 'codex', name: '' },
-  ];
+  return AGENTS.map((agent) => ({ id: agent, agent, name: '' }));
+}
+
+/** A provider added since this file was saved starts with its first sign-in, as every provider does. */
+function withEveryProvider(profiles: Profile[]): Profile[] {
+  const missing = AGENTS.filter((agent) => !profiles.some((profile) => profile.agent === agent));
+  return [...profiles, ...missing.map((agent): Profile => ({ id: agent, agent, name: '' }))];
 }
 
 function defaultSettings(): AppSettings {
@@ -79,9 +82,9 @@ function load(): StateFile {
       ...parsed,
       workspaces: parsed.workspaces.map(upgradeWorkspace),
       settings: { ...defaultSettings(), ...parsed.settings },
-      profiles: (parsed.profiles ?? firstProfiles()).filter((profile) => PROFILE_ID.test(profile.id)),
-      // Only Codex's list is discovered at runtime. Claude's ships with the app, so upgrades update it.
-      catalog: { claude: DEFAULT_CATALOG.claude, codex: parsed.catalog?.codex ?? DEFAULT_CATALOG.codex },
+      profiles: withEveryProvider((parsed.profiles ?? firstProfiles()).filter((profile) => PROFILE_ID.test(profile.id))),
+      // Only Codex's list is discovered at runtime. Claude's and Gemini's ship with the app, so upgrades update them.
+      catalog: { claude: DEFAULT_CATALOG.claude, codex: parsed.catalog?.codex ?? DEFAULT_CATALOG.codex, gemini: DEFAULT_CATALOG.gemini },
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -165,11 +168,12 @@ export function setClaudeCredential(profileId: string, value: string | undefined
   updateSecrets({ claudeTokens });
 }
 
-/** A sign-in's id, or GitHub's. Anything else could name a file outside the directory. */
+/** A sign-in's id, GitHub's, or a Gemini sign-in's with `.key` for its key. Anything else could name a file outside the directory. */
 type BoundaryName = string;
 
 function boundaryFile(name: BoundaryName): string {
-  if (name !== 'github' && !PROFILE_ID.test(name)) throw new Error(`Not a credential the proxy reads: ${name}`);
+  const geminiKey = /^gemini(-[a-f0-9]{12})?\.key$/.test(name);
+  if (name !== 'github' && !geminiKey && !PROFILE_ID.test(name)) throw new Error(`Not a credential the proxy reads: ${name}`);
   return path.join(paths.boundary, name);
 }
 

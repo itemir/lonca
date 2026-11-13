@@ -1,9 +1,11 @@
-// A scripted stand-in for the Anthropic Messages and OpenAI Responses APIs. It lets
-// tests drive the real `claude` and `codex` CLIs inside a real container without
+// A scripted stand-in for the Anthropic Messages and OpenAI Responses APIs, and for both of
+// Gemini's: Code Assist, which a Google account uses, and the Gemini API, which a key does. It
+// lets tests drive the real `claude`, `codex` and `gemini` CLIs inside a real container without
 // credentials or token spend. A prompt containing `RUN: <shell command>` makes the
 // mock call the CLI's shell tool with that command, then finish with a short reply.
 // `SLOW` delays the response, and `THINK` adds a thinking block for Claude. A line with
 // `TOOL: <name> <json>` calls one of Lonca's tools for a Lead, and there can be several.
+// `READ: <path>` has Gemini read a file with its own tool, and `WRITE: <path> <text>` write one.
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -13,6 +15,10 @@ export interface MockLlm {
   requests: { path: string; model?: string; auth?: string; body: string }[];
   /** Answers Codex's requests with a 401, as the real API does without a valid login. */
   refuseCodex: boolean;
+  /** Answers every Gemini request with a 401, as Google does for a token or key it won't take. */
+  refuseGemini: boolean;
+  /** Leaves preview models out of a Google account's quota, as for an account that can't use them. */
+  hidePreviewModels: boolean;
   /** Models that answer with a 429, as the real APIs do at a usage limit. */
   limited: Set<string>;
   /** Credentials, or what stands in for them, that answer with a 429: one sign-in at its limit while another isn't. */
@@ -199,9 +205,146 @@ async function responsesStream(res: http.ServerResponse, body: any): Promise<voi
   res.end();
 }
 
+interface GeminiRequest {
+  /** Code Assist's own method, or the Gemini API's. */
+  method: string;
+  codeAssist: boolean;
+  model?: string;
+}
+
+function geminiRequest(path: string): GeminiRequest | null {
+  const codeAssist = /\/v1internal:(\w+)$/.exec(path);
+  if (codeAssist) return { method: codeAssist[1], codeAssist: true };
+  const api = /\/v1(?:beta|alpha)?\/models\/([^/:]+):(\w+)$/.exec(path);
+  if (api) return { method: api[2], codeAssist: false, model: api[1] };
+  if (/\/v1(?:beta)?\/models\/?$/.test(path)) return { method: 'listModels', codeAssist: false };
+  return null;
+}
+
+function json(res: http.ServerResponse, status: number, data: unknown): void {
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(data));
+}
+
+// The user's prompt is the last text of the last user turn. The CLI puts its own context first.
+function geminiPrompt(contents: any[]): { prompt: string; hasToolResult: boolean } {
+  const last = (contents ?? []).filter((content) => content.role === 'user').at(-1);
+  const parts: any[] = last?.parts ?? [];
+  const texts = parts.map((part) => part.text).filter((text) => typeof text === 'string' && !text.startsWith('<session_context>'));
+  return { prompt: texts.at(-1) ?? '', hasToolResult: parts.some((part) => part.functionResponse) };
+}
+
+/** What a Google account at its limit gets: a day to wait, which the CLI would sit out. */
+const CAPACITY_EXHAUSTED = (model: string) => ({
+  error: {
+    code: 429,
+    message: 'You have exhausted your capacity on this model. Your quota will reset after 19h14m47s.',
+    status: 'RESOURCE_EXHAUSTED',
+    details: [
+      { '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'QUOTA_EXHAUSTED', domain: 'cloudcode-pa.googleapis.com', metadata: { uiMessage: 'true', model, quotaResetDelay: '69287s' } },
+      { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '69287s' },
+    ],
+  },
+});
+
+/** What a key at its daily quota gets, which the CLI gives up on at once. */
+const DAILY_QUOTA = (model: string) => ({
+  error: {
+    code: 429,
+    message: 'You exceeded your current quota, please check your plan and billing details.',
+    status: 'RESOURCE_EXHAUSTED',
+    details: [
+      { '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaMetric: 'generativelanguage.googleapis.com/generate_content_free_tier_requests', quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', quotaDimensions: { model, location: 'global' }, quotaValue: '50' }] },
+      { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '41s' },
+    ],
+  },
+});
+
+const REFUSED = { error: { code: 401, message: 'Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential.', status: 'UNAUTHENTICATED' } };
+
+/** Fills in a schema the CLI asks for an answer in, as it does to check on its own progress. */
+function fillSchema(schema: any): unknown {
+  const type = String(schema?.type ?? '').toUpperCase();
+  if (schema?.enum) return schema.enum[0];
+  if (type === 'OBJECT') return Object.fromEntries(Object.entries(schema.properties ?? {}).map(([key, value]) => [key, fillSchema(value)]));
+  if (type === 'INTEGER' || type === 'NUMBER') return 10;
+  if (type === 'BOOLEAN') return false;
+  if (type === 'ARRAY') return [];
+  return 'mock';
+}
+
+const GEMINI_USAGE = { promptTokenCount: 120, candidatesTokenCount: 15, totalTokenCount: 135 };
+
+/** The parts of one answer, in the chunks they're streamed in. */
+function geminiAnswer(request: any): any[][] {
+  const { prompt, hasToolResult } = geminiPrompt(request.contents);
+  const offered: string[] = (request.tools ?? []).flatMap((tool: any) => (tool.functionDeclarations ?? []).map((declaration: any) => declaration.name));
+  const teamCalls = hasToolResult ? [] : wantedTools(prompt).filter((call) => offered.includes(`mcp_lonca_${call.name}`));
+  if (teamCalls.length > 0) {
+    return [teamCalls.map((call, index) => ({ functionCall: { id: `call_${++counter}_${index}`, name: `mcp_lonca_${call.name}`, args: call.input } }))];
+  }
+  const file = hasToolResult ? null : /READ: (\S+)/.exec(prompt)?.[1];
+  if (file && offered.includes('read_file')) return [[{ functionCall: { id: `call_${++counter}`, name: 'read_file', args: { file_path: file } } }]];
+  const write = hasToolResult ? null : /WRITE: (\S+) (.+)/.exec(prompt);
+  if (write && offered.includes('write_file')) return [[{ functionCall: { id: `call_${++counter}`, name: 'write_file', args: { file_path: write[1], content: write[2] } } }]];
+  const command = hasToolResult ? null : wantedCommand(prompt);
+  if (command && offered.includes('run_shell_command')) {
+    return [[{ text: 'Running that now.' }], [{ functionCall: { id: `call_${++counter}`, name: 'run_shell_command', args: { command, description: 'Run the requested command' } } }]];
+  }
+  const reply = hasToolResult ? 'The command finished.' : `Mock Gemini here. You said: ${prompt.slice(0, 80)}`;
+  return (reply.match(/.{1,12}/gs) ?? []).map((text) => [{ text }]);
+}
+
+async function geminiResponse(res: http.ServerResponse, mock: MockLlm, gemini: GeminiRequest, body: any, limited: boolean): Promise<void> {
+  if (mock.refuseGemini) return json(res, 401, REFUSED);
+  const wrap = (response: unknown) => (gemini.codeAssist ? { response, traceId: `trace-${counter}` } : response);
+  switch (gemini.method) {
+    case 'loadCodeAssist':
+      return json(res, 200, { currentTier: { id: 'free-tier', name: 'Gemini Code Assist for individuals' }, cloudaicompanionProject: 'mock-project' });
+    case 'onboardUser':
+      return json(res, 200, { done: true, response: { cloudaicompanionProject: { id: 'mock-project' } } });
+    case 'retrieveUserQuota': {
+      const models = ['gemini-3.5-flash', 'gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-2.5-pro', 'gemini-2.5-flash'];
+      const all = mock.hidePreviewModels ? models : ['gemini-3.1-pro-preview', 'gemini-3-flash-preview', ...models];
+      return json(res, 200, { buckets: all.map((modelId) => ({ modelId, remainingFraction: 0.9, remainingAmount: '100', resetTime: new Date(Date.now() + 3600e3).toISOString(), tokenType: 'REQUESTS' })) });
+    }
+    case 'listExperiments':
+      return json(res, 200, { experimentIds: [], flags: [] });
+    case 'countTokens':
+      return json(res, 200, { totalTokens: 42 });
+    case 'listModels':
+      return json(res, 200, { models: [{ name: 'models/gemini-3.5-flash', supportedGenerationMethods: ['generateContent'] }] });
+    case 'generateContent':
+    case 'streamGenerateContent':
+      break;
+    default:
+      return json(res, 200, {});
+  }
+  const request = gemini.codeAssist ? body.request ?? {} : body;
+  const model = gemini.model ?? body.model ?? 'gemini';
+  if (limited) return json(res, 429, gemini.codeAssist ? CAPACITY_EXHAUSTED(model) : DAILY_QUOTA(model));
+  if (geminiPrompt(request.contents).prompt.includes('SLOW')) await sleep(SLOW_MS);
+  const schema = request.generationConfig?.responseJsonSchema ?? request.generationConfig?.responseSchema;
+  const chunks = schema ? [[{ text: JSON.stringify(fillSchema(schema)) }]] : geminiAnswer(request);
+  const candidate = (parts: any[], last: boolean) => wrap({
+    candidates: [{ content: { role: 'model', parts }, index: 0, ...(last ? { finishReason: 'STOP' } : {}) }],
+    ...(last ? { usageMetadata: GEMINI_USAGE } : {}),
+    modelVersion: model,
+  });
+  if (gemini.method === 'generateContent') return json(res, 200, candidate(chunks.flat(), true));
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+  for (const [index, parts] of chunks.entries()) {
+    res.write(`data: ${JSON.stringify(candidate(parts, index === chunks.length - 1))}\n\n`);
+    await sleep(15);
+  }
+  res.end();
+}
+
 export function startMockLlm(port = 0): Promise<MockLlm> {
   const requests: MockLlm['requests'] = [];
-  const mock: MockLlm = { port: 0, requests, refuseCodex: false, limited: new Set(), limitedAuth: new Set(), close: async () => {} };
+  const mock: MockLlm = {
+    port: 0, requests, refuseCodex: false, refuseGemini: false, hidePreviewModels: false, limited: new Set(), limitedAuth: new Set(), close: async () => {},
+  };
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk) => chunks.push(chunk));
@@ -213,10 +356,14 @@ export function startMockLlm(port = 0): Promise<MockLlm> {
       } catch {
         // Some CLI background calls send non-JSON bodies; they get the default reply.
       }
-      const auth = req.headers.authorization ?? (req.headers['x-api-key'] as string | undefined);
-      requests.push({ path, model: body.model, auth, body: JSON.stringify(body) });
-      const limited = mock.limited.has(body.model) || [...mock.limitedAuth].some((credential) => auth?.includes(credential));
-      if (req.method === 'POST' && limited && path.endsWith('/messages')) {
+      const auth = req.headers.authorization ?? (req.headers['x-api-key'] as string | undefined) ?? (req.headers['x-goog-api-key'] as string | undefined);
+      const gemini = geminiRequest(path);
+      const model = gemini?.model ?? body.model;
+      requests.push({ path, model, auth, body: JSON.stringify(body) });
+      const limited = mock.limited.has(model) || [...mock.limitedAuth].some((credential) => auth?.includes(credential));
+      if (gemini) {
+        await geminiResponse(res, mock, gemini, body, limited);
+      } else if (req.method === 'POST' && limited && path.endsWith('/messages')) {
         // Told not to retry, as with a subscription: an API key's client would keep trying for minutes.
         res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '3600', 'x-should-retry': 'false' });
         res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Number of requests has exceeded your rate limit.' } }));

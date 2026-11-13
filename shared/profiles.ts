@@ -3,10 +3,10 @@ import type { AgentId, AgentStatus, Catalog, Profile, ProfileStatus, Project, Se
 // A provider can have several sign-ins, which code calls profiles. The one each provider had before
 // that has the provider's id, so a conversation from then, which names none, still has its own.
 
-export const AGENTS: AgentId[] = ['claude', 'codex'];
+export const AGENTS: AgentId[] = ['claude', 'codex', 'gemini'];
 
 /** What an id can be. It names files on this computer, so nothing else is taken for one. */
-export const PROFILE_ID = /^(claude|codex)(-[a-f0-9]{12})?$/;
+export const PROFILE_ID = new RegExp(`^(${AGENTS.join('|')})(-[a-f0-9]{12})?$`);
 
 export function agentOfProfileId(id: string): AgentId | undefined {
   const match = PROFILE_ID.exec(id);
@@ -52,10 +52,17 @@ export function limitEnds(status: ProfileStatus): number | undefined {
   return status.limitResetsAt ?? status.limitedAt + UNKNOWN_LIMIT_MS;
 }
 
+/** The variables a project can set to bring a key of its own for each provider. */
+const PROJECT_KEYS: Record<AgentId, string[]> = {
+  claude: ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'],
+  codex: ['CODEX_API_KEY', 'OPENAI_API_KEY'],
+  gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+};
+
 /** A project can bring its own key for a provider, which goes in place of any sign-in. */
 export function projectBringsKey(agent: AgentId, project: Pick<Project, 'settings'> | undefined): boolean {
   const env = project?.settings.env ?? {};
-  return Boolean(agent === 'claude' ? env.ANTHROPIC_API_KEY || env.CLAUDE_CODE_OAUTH_TOKEN : env.CODEX_API_KEY || env.OPENAI_API_KEY);
+  return PROJECT_KEYS[agent].some((name) => Boolean(env[name]));
 }
 
 /** "Claude – work", or just "Claude" for one nobody has named. */

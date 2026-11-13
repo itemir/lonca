@@ -13,7 +13,7 @@ import { HTTP_PORT, LONCA_HOME, WEB_DIST } from './config.ts';
 import { subscribe } from './events.ts';
 import { setClientFocus } from './notify.ts';
 import { flushState, flushTranscripts, rememberUiPort, saveState, state } from './store.ts';
-import { checkDisk, checkSandboxes, ensureSandboxImage, moveCodexLogin, onSandboxesReady, refreshAgents, refreshCodexCatalog, system } from './system.ts';
+import { checkDisk, checkSandboxes, ensureSandboxImage, moveCodexLogin, onSandboxesReady, refreshAgents, refreshCodexCatalog, renewGeminiLogins, system } from './system.ts';
 import { attachTerminal, closeWorkspaceTerminals, reconcileTerminals, runSetupScript } from './terminals.ts';
 import { reapLeftoverLogins } from './logins.ts';
 import { reapSbxLogin } from './sbx-login-pid.ts';
@@ -169,6 +169,8 @@ server.listen(HTTP_PORT, '127.0.0.1', () => {
   setInterval(checkDisk, 10000).unref();
   // Signing in is checked when it changes, but a Codex sign-in also has to be renewed before it ends.
   setInterval(() => void refreshAgents().catch((error) => console.error('could not check sign-ins:', errorMessage(error))), 60 * 60 * 1000).unref();
+  // A Google account's access token lasts an hour. This only goes to Google when one is due.
+  setInterval(() => void renewGeminiLogins().catch((error) => console.error('could not renew a Gemini sign-in:', errorMessage(error))), 60 * 1000).unref();
 });
 
 server.on('error', (error: NodeJS.ErrnoException) => {

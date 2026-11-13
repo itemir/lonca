@@ -1,0 +1,8 @@
+{"type":"init","timestamp":"2026-11-12T16:14:05.194Z","session_id":"9e7ba741-0a0a-46ed-b631-9094a2f2f553","model":"gemini-3.1-pro-preview"}
+{"type":"message","timestamp":"2026-11-12T16:14:05.194Z","role":"user","content":"Please RUN: echo hello from the shell"}
+{"type":"message","timestamp":"2026-11-12T16:14:05.203Z","role":"assistant","content":"Running that now.","delta":true}
+{"type":"tool_use","timestamp":"2026-11-12T16:14:05.231Z","tool_name":"run_shell_command","tool_id":"run_shell_command__call_1","parameters":{"command":"echo hello from the shell","description":"Run the requested command"}}
+{"type":"tool_result","timestamp":"2026-11-12T16:14:05.252Z","tool_id":"run_shell_command__call_1","status":"success","output":"hello from the shell"}
+{"type":"message","timestamp":"2026-11-12T16:14:05.256Z","role":"assistant","content":"The command ","delta":true}
+{"type":"message","timestamp":"2026-11-12T16:14:05.273Z","role":"assistant","content":"finished.","delta":true}
+{"type":"result","timestamp":"2026-11-12T16:14:05.289Z","status":"success","stats":{"total_tokens":270,"input_tokens":240,"output_tokens":30,"cached":0,"input":240,"duration_ms":95,"tool_calls":1,"models":{"gemini-3.1-pro-preview":{"total_tokens":270,"input_tokens":240,"output_tokens":30,"cached":0,"input":240}}}}

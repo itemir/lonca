@@ -1,0 +1,5 @@
+{"type":"init","timestamp":"2026-11-12T16:14:21.018Z","session_id":"6f051faf-5417-4d4f-a5e2-9db1cad2b9e8","model":"gemini-3.1-pro-preview"}
+{"type":"message","timestamp":"2026-11-12T16:14:21.018Z","role":"user","content":"Reach the limit"}
+{"type":"result","timestamp":"2026-11-12T16:14:21.027Z","status":"error","error":{"type":"FatalCancellationError","message":"Operation cancelled."},"stats":{"total_tokens":0,"input_tokens":0,"output_tokens":0,"cached":0,"input":0,"duration_ms":0,"tool_calls":0,"models":{"gemini-3.1-pro-preview":{"total_tokens":0,"input_tokens":0,"output_tokens":0,"cached":0,"input":0}}}}
+
+{"type": "lonca_limit", "message": "You have exhausted your capacity on this model. Your quota will reset after 19h14m47s.", "wait_ms": 73967119, "timestamp": "2026-11-12T16:14:21.040Z"}

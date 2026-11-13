@@ -2,8 +2,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import express, { type NextFunction, type Request, type Response, Router } from 'express';
 import { z } from 'zod';
-import { PROFILE_ID, profileIdOf } from '../shared/profiles.ts';
-import type { AppState, LeadChoice, Profile, Project, Session, Workspace } from '../shared/types.ts';
+import { AGENTS, PROFILE_ID, profileIdOf } from '../shared/profiles.ts';
+import type { AgentId, AppState, LeadChoice, LoginMethod, Profile, Project, Session, Workspace } from '../shared/types.ts';
 import { playbookFor, resetPlaybook, savePlaybook } from './agents/playbook.ts';
 import {
   cancelQueued, chooseProfile, createLead, createSession, deleteSession, flushQueue, interruptSession, publishSession, reportWorkspaceStopped, sendMessage,
@@ -21,10 +21,11 @@ import { closePort } from './ports.ts';
 import {
   addProjectFromPath, addProjectFromUrl, listBranches, projectLifecycle, publishProject, removeProject,
 } from './projects.ts';
+import { saveGeminiApiKey, signOutGemini } from './gemini-login.ts';
 import { dockerLogins, logins } from './logins.ts';
 import { flushState, getProject, getSession, getWorkspace, isClaudeCredential, saveState, secretsStatus, setClaudeCredential, state, updateSecrets } from './store.ts';
 import {
-  checkClaudeCredential, checkCodexKey, checkSandboxes, clearAgentRejected, clearProfileLimit, getProfile, rebuildImage, refreshAgents,
+  checkClaudeCredential, checkCodexKey, checkGeminiKey, checkSandboxes, clearAgentRejected, clearProfileLimit, getProfile, rebuildImage, refreshAgents,
   saveCodexApiKey, signOutCodex, system,
 } from './system.ts';
 import {
@@ -80,6 +81,11 @@ function withProfile(choice: LeadChoice): LeadChoice {
   return { ...choice, profileId: chooseProfile(choice.agent, choice.profileId) };
 }
 
+const agentSchema = z.enum(AGENTS);
+
+// Claude's code to paste is part of its browser's way. Codex's and Gemini's other ways start again.
+const LOGIN_METHODS: Record<AgentId, LoginMethod[]> = { claude: ['browser'], codex: ['browser', 'device'], gemini: ['browser', 'code'] };
+
 const attachmentSchema = z.object({
   name: z.string(),
   path: z.string(),
@@ -101,13 +107,13 @@ const projectSettingsSchema = z.object({
   env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'Environment variable names may only use letters, digits and underscores'), z.string()),
 }).partial();
 
-const leadChoiceSchema = z.object({ agent: z.enum(['claude', 'codex']), model: z.string().min(1), effort: z.string().min(1), profileId: z.string().optional() });
+const leadChoiceSchema = z.object({ agent: agentSchema, model: z.string().min(1), effort: z.string().min(1), profileId: z.string().optional() });
 
 const appSettingsSchema = z.object({
   branchPrefix: z.string().regex(/^[\w./-]*$/, 'Branch prefixes may only use letters, digits, dots, dashes and slashes'),
   gitName: z.string(),
   gitEmail: z.string(),
-  defaultAgent: z.enum(['claude', 'codex']),
+  defaultAgent: agentSchema,
   defaultModel: z.string(),
   defaultEffort: z.string(),
   leadDefault: leadChoiceSchema,
@@ -205,7 +211,7 @@ export function createApi(me: AppState['me']): Router {
     const project = projectParam(req);
     const body = parse(z.object({
       baseBranch: z.string().optional(),
-      agent: z.enum(['claude', 'codex']).optional(),
+      agent: agentSchema.optional(),
       model: z.string().optional(),
       effort: z.string().optional(),
       profileId: z.string().optional(),
@@ -318,7 +324,7 @@ export function createApi(me: AppState['me']): Router {
   api.post('/workspaces/:id/sessions', express.json(), (req, res) => {
     const workspace = workspaceParam(req);
     const body = parse(z.object({
-      agent: z.enum(['claude', 'codex']).optional(),
+      agent: agentSchema.optional(),
       model: z.string().optional(),
       effort: z.string().optional(),
       profileId: z.string().optional(),
@@ -393,7 +399,7 @@ export function createApi(me: AppState['me']): Router {
     const session = sessionParam(req);
     const body = parse(z.object({
       title: z.string().min(1).optional(),
-      agent: z.enum(['claude', 'codex']).optional(),
+      agent: agentSchema.optional(),
       model: z.string().optional(),
       effort: z.string().optional(),
       profileId: z.string().optional(),
@@ -541,6 +547,27 @@ export function createApi(me: AppState['me']): Router {
     return { verified: check === 'accepted' };
   }
 
+  async function saveGeminiKey(profile: Profile, raw: string): Promise<{ verified: boolean }> {
+    const key = stripSpace(raw);
+    if (!/^AIza[\w-]{35}$/.test(key)) throw new HttpError(400, 'That isn’t a Gemini API key. Keys start with AIza.');
+    const check = await checkGeminiKey(key);
+    if (check === 'refused') throw new HttpError(400, 'Google didn’t accept this key.');
+    await logins.cancel(loginTarget(profile));
+    if (getProfile(profile.id) !== profile) throw new HttpError(404, 'That sign-in was removed.');
+    saveGeminiApiKey(key, profile.id);
+    signedInAgain(profile);
+    await refreshAgents();
+    return { verified: check === 'accepted' };
+  }
+
+  function saveKey(profile: Profile, key: string): Promise<{ verified: boolean }> {
+    switch (profile.agent) {
+      case 'claude': return saveClaudeKey(profile, key);
+      case 'codex': return saveCodexKey(profile, key);
+      case 'gemini': return saveGeminiKey(profile, key);
+    }
+  }
+
   /** It could be another account now, so what was known about the last one doesn't hold. */
   function signedInAgain(profile: Profile): void {
     clearAgentRejected(profile.id);
@@ -550,12 +577,18 @@ export function createApi(me: AppState['me']): Router {
   async function signOut(profile: Profile): Promise<void> {
     // Finishing one that's under way would sign back in.
     await logins.cancel(loginTarget(profile));
-    if (profile.agent === 'codex') {
-      signOutCodex(profile.id);
-      applyCodexSetupEverywhere();
-    } else {
-      setClaudeCredential(profile.id, undefined);
-      publishSettings();
+    switch (profile.agent) {
+      case 'claude':
+        setClaudeCredential(profile.id, undefined);
+        publishSettings();
+        break;
+      case 'codex':
+        signOutCodex(profile.id);
+        applyCodexSetupEverywhere();
+        break;
+      case 'gemini':
+        signOutGemini(profile.id);
+        break;
     }
     signedInAgain(profile);
     await refreshAgents();
@@ -583,7 +616,7 @@ export function createApi(me: AppState['me']): Router {
   // Sign-ins. Each provider can have several, and each signs in and out on its own.
 
   api.post('/profiles', express.json(), (req, res) => {
-    const body = parse(z.object({ agent: z.enum(['claude', 'codex']), name: z.string(), firstName: z.string().optional() }), req.body);
+    const body = parse(z.object({ agent: agentSchema, name: z.string(), firstName: z.string().optional() }), req.body);
     res.status(201).json(createProfile(body.agent, body.name, body.firstName));
   });
 
@@ -598,8 +631,10 @@ export function createApi(me: AppState['me']): Router {
   });
 
   api.post('/profiles/:profile/login', express.json(), async (req, res) => {
-    const { method } = parse(z.object({ method: z.enum(['browser', 'device']).optional() }), req.body ?? {});
-    res.status(201).json(await logins.start(loginTarget(profileParam(req)), method));
+    const { method } = parse(z.object({ method: z.enum(['browser', 'device', 'code']).optional() }), req.body ?? {});
+    const profile = profileParam(req);
+    if (method && !LOGIN_METHODS[profile.agent].includes(method)) throw new HttpError(400, `${state.catalog[profile.agent].label} doesn’t sign in that way.`);
+    res.status(201).json(await logins.start(loginTarget(profile), method));
   });
 
   api.delete('/profiles/:profile/login', async (req, res) => {
@@ -625,7 +660,7 @@ export function createApi(me: AppState['me']): Router {
   api.put('/profiles/:profile/key', express.json(), async (req, res) => {
     const profile = profileParam(req);
     const { key } = parse(z.object({ key: z.string() }), req.body);
-    res.json(profile.agent === 'claude' ? await saveClaudeKey(profile, key) : await saveCodexKey(profile, key));
+    res.json(await saveKey(profile, key));
   });
 
   api.post('/agents/refresh', async (_req, res) => {

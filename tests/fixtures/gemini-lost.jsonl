@@ -1,0 +1,2 @@
+
+{"type": "lonca_exit", "code": 42, "stderr": "(node:29991) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created)\nError resuming session: Invalid session identifier \"0f0e0d0c-0b0a-4908-8706-050403020100\".\n  Searched for sessions in /var/tmp/lonca/gemini/s8/.gemini/tmp/workspace/chats.\n  Use --list-sessions to see available sessions, then use --resume {number}, --resume {uuid}, or --resume latest.\n", "timestamp": "2026-11-12T16:14:24.407Z"}

@@ -2197,6 +2197,7 @@ a.home-row:hover { background: var(--panel); }
 .sign-in-limit::before { content: '·'; margin-right: 5px; color: var(--text-3); }
 .sign-in-menu .menu-trigger { width: 30px; height: 30px; justify-content: center; }
 .sign-in-switch { display: flex; align-items: flex-start; gap: 8px; padding: 0 14px 11px; color: var(--text-3); font-size: 12.5px; cursor: pointer; }
+.sign-in-hint { margin: 0; padding: 0 14px 11px; color: var(--text-3); font-size: 12.5px; }
 .sign-in-switch input { flex: none; margin: 2px 0 0; accent-color: var(--accent); }
 .add-sign-in { display: inline-flex; align-items: center; gap: 5px; margin: 2px 0 2px 2px; color: var(--text-2); font-size: 13px; }
 .isolation-command {

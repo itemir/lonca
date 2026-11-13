@@ -5,7 +5,8 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { LoginMethod, LoginState } from '../../shared/types.ts';
 import {
-  LoginScreen, classifyCodexFailure, findClaudeLink, findClaudeToken, findCodexDevice, findRedirectLink, isClaudeCodeRejected, redact,
+  LoginScreen, askingConsent, classifyCodexFailure, classifyGeminiFailure, findClaudeLink, findClaudeToken, findCodexDevice, findGeminiCodeLink,
+  findRedirectLink, geminiIneligibility, geminiNeedsProject, isClaudeCodeRejected, isGeminiCodeRejected, isGeminiConsent, linkClientId, redact,
 } from '../../server/agents/login.ts';
 import { LOGIN_TIMINGS, type LoginDriver, LoginManager, type LoginProcess, type ReturnOutcome, listenForReturn } from '../../server/login.ts';
 
@@ -157,6 +158,55 @@ describe('reading the real CLIs’ screens', () => {
   });
 });
 
+describe('reading Gemini’s screens', () => {
+  it('finds its question before opening a browser, and the page that comes back, from the hyperlink it opens', async () => {
+    const screen = await render('gemini-redirect-success');
+    expect(isGeminiConsent(screen.text())).toBe(true);
+    const redirect = findRedirectLink(screen)!;
+    expect(new URL(redirect.url).hostname).toBe('accounts.google.com');
+    expect(redirect).toMatchObject({ path: '/oauth2callback', port: expect.any(Number), state: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(new URL(redirect.url).searchParams.get('redirect_uri')).toBe(`http://127.0.0.1:${redirect.port}/oauth2callback`);
+    expect(findGeminiCodeLink(screen.text())).toBeNull();
+    screen.dispose();
+  });
+
+  it('finds the page that shows a code, printed over two rows, once it asks for the code', async () => {
+    const data = recording('gemini-code-success');
+    const prompt = data.indexOf(Buffer.from('Enter the authorization code: '));
+    const screen = new LoginScreen();
+    await screen.write(data.subarray(0, prompt));
+    expect(findGeminiCodeLink(screen.text())).toBeNull();
+    await screen.write(data.subarray(prompt, prompt + 'Enter the authorization code: '.length));
+    const link = findGeminiCodeLink(screen.text())!;
+    expect(new URL(link).searchParams.get('redirect_uri')).toBe('https://codeassist.google.com/authcode');
+    expect(new URL(link).searchParams.get('code_challenge_method')).toBe('S256');
+    expect(link.length).toBeGreaterThan(500);
+    screen.dispose();
+  });
+
+  it('tells Gemini’s failures apart, and an account that needs a project from one Gemini won’t serve', async () => {
+    const reads: Record<string, [string, boolean, string | null]> = {
+      'gemini-redirect-rejected': ['rejected', false, null],
+      'gemini-redirect-denied': ['denied', false, null],
+      'gemini-code-rejected': ['rejected', false, null],
+      'gemini-redirect-project': ['stopped', true, null],
+      'gemini-code-ineligible': ['stopped', false, 'Your current account is not eligible for Gemini Code Assist for individuals because it is not currently available in your location.'],
+      'gemini-redirect-success': ['stopped', false, null],
+    };
+    for (const [name, [failure, project, ineligible]] of Object.entries(reads)) {
+      const screen = await render(name);
+      expect(classifyGeminiFailure(screen.text())).toBe(failure);
+      expect(geminiNeedsProject(screen.text())).toBe(project);
+      expect(geminiIneligibility(screen.text())).toBe(ineligible);
+      screen.dispose();
+    }
+    const refused = await render('gemini-code-rejected');
+    expect(isGeminiCodeRejected(refused.text())).toBe(true);
+    refused.dispose();
+    expect(classifyGeminiFailure('Authorization timed out after 5 minutes.')).toBe('expired');
+  });
+});
+
 class FakeProcess implements LoginProcess {
   written: string[] = [];
   delivered: { port: number; path: string }[] = [];
@@ -198,6 +248,7 @@ const TIMINGS = { ...LOGIN_TIMINGS, settledMs: 10, echoMs: 10 };
 // Each provider's first sign-in, whose id is the provider's.
 const CLAUDE = { agent: 'claude', profileId: 'claude' } as const;
 const CODEX = { agent: 'codex', profileId: 'codex' } as const;
+const GEMINI = { agent: 'gemini', profileId: 'gemini' } as const;
 
 function setup(overrides: Partial<LoginDriver> = {}, timings = TIMINGS) {
   const processes: FakeProcess[] = [];
@@ -221,6 +272,7 @@ function setup(overrides: Partial<LoginDriver> = {}, timings = TIMINGS) {
       saved.push(token);
     },
     finishCodexLogin: async () => true,
+    finishGeminiLogin: async (login) => Boolean(login),
     publish: (_agent, login) => published.push(login),
     ...overrides,
   };
@@ -920,6 +972,222 @@ describe('the port a browser comes back to', () => {
     finish('done');
     stop();
     expect((await answer).status).toBe(200);
+  });
+});
+
+/** Gemini's real frames up to the hyperlink it opens, or to where it asks for a code. */
+function geminiPrompt(name: string): Buffer {
+  const data = recording(name);
+  const asked = data.indexOf(Buffer.from('Enter the authorization code: '));
+  if (asked >= 0) return data.subarray(0, asked + 'Enter the authorization code: '.length);
+  const link = data.indexOf(Buffer.from('\x1b]8;;https://'));
+  return data.subarray(0, data.indexOf(Buffer.from('\x1b]8;;\x07'), link) + 4);
+}
+
+/** The link the CLI handed its browser in a recording. */
+function geminiLink(name: string): string {
+  const data = recording(name).toString('latin1');
+  return /\x1b\]8;;(https:\/\/[^\x07]+)\x07/.exec(data)![1];
+}
+
+describe('the Gemini sign-in', () => {
+  // As the recordings have it, in place of the CLI's own.
+  const RECORDED_CLIENT = '123456789012-loncamadeupclientforrecordings00.apps.googleusercontent.com';
+
+  it('says to go on to the browser, once, and finishes when the CLI has saved a login', async () => {
+    const finish = vi.fn(async () => true);
+    const { manager, processes, methods, ports, published } = setup({ finishGeminiLogin: finish });
+    await manager.start(GEMINI);
+    expect(methods).toEqual(['browser']);
+    const process = processes[0];
+    const prompt = geminiPrompt('gemini-redirect-success');
+    process.emit(prompt.subarray(0, prompt.indexOf(Buffer.from('\x1b]8;;'))));
+    await tick();
+    expect(process.written).toEqual(['\r']);
+    expect(manager.states().gemini?.phase).toBe('starting');
+    process.emit(prompt.subarray(prompt.indexOf(Buffer.from('\x1b]8;;'))));
+    await tick();
+    const waiting = manager.states().gemini!;
+    expect(waiting.phase).toBe('waiting');
+    expect(new URL(waiting.url!).hostname).toBe('accounts.google.com');
+    // Choosing the account, and so that Google gives a refresh token to one that has let the CLI in before.
+    expect(new URL(waiting.url!).searchParams.get('prompt')).toBe('select_account consent');
+    expect(waiting.url!.startsWith(geminiLink('gemini-redirect-success'))).toBe(true);
+    expect(waiting.pasteUrl).toBeUndefined();
+    const port = portOf(waiting.url!);
+    const target = returning(waiting.url!, 'code=4/the-code-from-the-page');
+    const outcome = ports.get(port)!(target);
+    await tick();
+    expect(manager.states().gemini?.phase).toBe('submitting');
+    expect(process.delivered).toEqual([{ port, path: target.pathname + target.search }]);
+    process.emit(recording('gemini-redirect-success').subarray(prompt.length));
+    process.exit(0);
+    expect(await outcome).toBe('done');
+    expect(finish).toHaveBeenCalledExactlyOnceWith('what the CLI saved', GEMINI, { clientId: RECORDED_CLIENT, needsProject: false, current: expect.any(Function) });
+    expect(manager.states().gemini).toMatchObject({ phase: 'done' });
+    expect(manager.states().gemini?.needsProject).toBeUndefined();
+    expect(process.written).toEqual(['\r']);
+    expect(ports.size).toBe(0);
+    expect(JSON.stringify(published)).not.toContain('the-code-from-the-page');
+  });
+
+  it('says so when the account needs a Google Cloud project, and keeps the login', async () => {
+    const finish = vi.fn(async () => true);
+    const { manager, processes, ports } = setup({ finishGeminiLogin: finish });
+    await manager.start(GEMINI);
+    processes[0].emit(geminiPrompt('gemini-redirect-project'));
+    await tick();
+    const { url } = manager.states().gemini!;
+    const outcome = ports.get(portOf(url!))!(returning(url!));
+    processes[0].emit(recording('gemini-redirect-project'));
+    processes[0].exit(0);
+    expect(await outcome).toBe('done');
+    // So that it's kept with the login, for Settings to say.
+    expect(finish).toHaveBeenCalledExactlyOnceWith('what the CLI saved', GEMINI, expect.objectContaining({ needsProject: true }));
+    expect(manager.states().gemini).toMatchObject({ phase: 'done', needsProject: true });
+  });
+
+  it('tells a refused or turned-down sign-in from one that worked, though the CLI ends well either way', async () => {
+    for (const [name, failure] of [['gemini-redirect-rejected', 'rejected'], ['gemini-redirect-denied', 'denied']] as const) {
+      const finish = vi.fn(async (login: string) => Boolean(login));
+      const { manager, processes, ports } = setup({ finishGeminiLogin: finish });
+      await manager.start(GEMINI);
+      processes[0].savedLogin = async () => '';
+      processes[0].emit(geminiPrompt(name));
+      await tick();
+      const { url } = manager.states().gemini!;
+      const outcome = ports.get(portOf(url!))!(returning(url!));
+      processes[0].emit(recording(name));
+      processes[0].exit(0);
+      expect(await outcome).toBe('failed');
+      expect(manager.states().gemini).toMatchObject({ phase: 'failed', failure });
+      expect(finish).toHaveBeenCalledExactlyOnceWith('', GEMINI, expect.objectContaining({ clientId: RECORDED_CLIENT }));
+      expect(ports.size).toBe(0);
+    }
+  });
+
+  it('won’t keep an account Gemini won’t serve, and says why', async () => {
+    const finish = vi.fn(async () => true);
+    const { manager, processes } = setup({ finishGeminiLogin: finish });
+    await manager.start(GEMINI, 'code');
+    processes[0].emit(recording('gemini-code-ineligible'));
+    processes[0].exit(0);
+    await tick();
+    expect(manager.states().gemini).toMatchObject({ phase: 'failed', failure: 'denied', message: expect.stringContaining('not eligible for Gemini Code Assist') });
+    expect(finish).not.toHaveBeenCalled();
+  });
+
+  it('reports a sign-in Google wouldn’t renew, which would stop working within the hour', async () => {
+    const { manager, processes, ports } = setup({ finishGeminiLogin: async () => { throw new Error('Google wouldn’t renew the sign-in (invalid_client)'); } });
+    await manager.start(GEMINI);
+    processes[0].emit(geminiPrompt('gemini-redirect-success'));
+    await tick();
+    const { url } = manager.states().gemini!;
+    const outcome = ports.get(portOf(url!))!(returning(url!));
+    processes[0].emit(recording('gemini-redirect-success'));
+    processes[0].exit(0);
+    expect(await outcome).toBe('failed');
+    expect(manager.states().gemini).toMatchObject({ phase: 'failed', failure: 'save-failed', message: expect.stringContaining('invalid_client') });
+  });
+
+  it('with a code: shows the page, types the code as a paste and then Return, and finishes', async () => {
+    const finish = vi.fn(async () => true);
+    const { manager, processes, methods } = setup({ finishGeminiLogin: finish });
+    await manager.start(GEMINI, 'code');
+    expect(methods).toEqual(['code']);
+    const process = processes[0];
+    const prompt = geminiPrompt('gemini-code-success');
+    process.emit(prompt.subarray(0, prompt.length - 10));
+    await tick();
+    expect(manager.states().gemini?.phase).toBe('starting');
+    process.emit(prompt.subarray(prompt.length - 10));
+    await tick();
+    const waiting = manager.states().gemini!;
+    expect(waiting).toMatchObject({ phase: 'waiting', method: 'code' });
+    expect(waiting.url).toBeUndefined();
+    expect(new URL(waiting.pasteUrl!).searchParams.get('redirect_uri')).toBe('https://codeassist.google.com/authcode');
+    expect(new URL(waiting.pasteUrl!).searchParams.get('prompt')).toBe('select_account consent');
+
+    await expect(manager.submitCode(GEMINI, `AIza${'k'.repeat(35)}`)).rejects.toThrow(/a key/);
+    const submitted = manager.submitCode(GEMINI, '4/0AbCdEf-the-code');
+    expect(manager.states().gemini?.phase).toBe('submitting');
+    await submitted;
+    expect(process.written).toEqual(['\x1b[200~4/0AbCdEf-the-code\x1b[201~', '\r']);
+    process.emit(recording('gemini-code-success').subarray(prompt.length));
+    process.exit(0);
+    await tick();
+    expect(finish).toHaveBeenCalledExactlyOnceWith('what the CLI saved', GEMINI, expect.objectContaining({ clientId: RECORDED_CLIENT }));
+    expect(manager.states().gemini?.phase).toBe('done');
+    expect(manager.states().gemini?.pasteUrl).toBeUndefined();
+  });
+
+  it('keeps nothing of an attempt that’s been cancelled or replaced while it finishes', async () => {
+    for (const end of ['cancel', 'replace'] as const) {
+      let attempt: import('../../server/login.ts').GeminiAttempt | undefined;
+      let finished = (_kept: boolean) => {};
+      const { manager, processes } = setup({
+        finishGeminiLogin: (_login, _target, given) => new Promise<boolean>((resolve) => {
+          attempt = given;
+          finished = resolve;
+        }),
+      });
+      await manager.start(GEMINI, 'code');
+      processes[0].emit(geminiPrompt('gemini-code-success'));
+      await tick();
+      await manager.submitCode(GEMINI, '4/the-code');
+      processes[0].emit(recording('gemini-code-success').subarray(geminiPrompt('gemini-code-success').length));
+      processes[0].exit(0);
+      await tick();
+      expect(manager.states().gemini?.phase).toBe('saving');
+      expect(attempt!.current()).toBe(true);
+      if (end === 'cancel') await manager.cancel(GEMINI);
+      else await manager.start(GEMINI);
+      expect(attempt!.current()).toBe(false);
+      finished(false);
+      await tick();
+      expect(manager.states().gemini?.phase).toBe(end === 'cancel' ? undefined : 'starting');
+    }
+  });
+
+  it('asks to choose the account and for consent, on a link that doesn’t already say how to prompt', () => {
+    const link = 'https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=https%3A%2F%2Fcodeassist.google.com%2Fauthcode&access_type=offline&scope=a%20b&client_id=x';
+    expect(askingConsent(link)).toBe(`${link}&prompt=select_account%20consent`);
+    expect(new URL(askingConsent(link)).searchParams.get('prompt')).toBe('select_account consent');
+    expect(askingConsent(`${link}&prompt=select_account`)).toBe(`${link}&prompt=select_account`);
+    expect(askingConsent('not a link')).toBe('not a link');
+    expect(linkClientId(link)).toBe('x');
+    expect(linkClientId('https://accounts.google.com/o/oauth2/v2/auth')).toBeUndefined();
+  });
+
+  it('with a code: reports one Google refused, and stops the CLI, which would ask again', async () => {
+    const finish = vi.fn(async () => true);
+    const { manager, processes } = setup({ finishGeminiLogin: finish });
+    await manager.start(GEMINI, 'code');
+    processes[0].emit(geminiPrompt('gemini-code-rejected'));
+    await tick();
+    await manager.submitCode(GEMINI, 'wrong');
+    processes[0].emit(recording('gemini-code-rejected').subarray(geminiPrompt('gemini-code-rejected').length));
+    await tick();
+    expect(manager.states().gemini).toMatchObject({ phase: 'failed', failure: 'rejected' });
+    expect(manager.states().gemini?.output).toContain('Failed to authenticate with authorization code');
+    expect(processes[0].killed).toBe(true);
+    expect(finish).not.toHaveBeenCalled();
+  });
+
+  it('says the port is taken, which a code doesn’t need, and moves over to the code', async () => {
+    const listen = vi.fn(async () => { throw new Error('EADDRINUSE'); });
+    const { manager, processes, methods } = setup({ listen });
+    await manager.start(GEMINI);
+    processes[0].emit(geminiPrompt('gemini-redirect-success'));
+    await tick();
+    expect(manager.states().gemini).toMatchObject({ phase: 'failed', failure: 'port-busy' });
+    expect(processes[0].killed).toBe(true);
+    await manager.start(GEMINI, 'code');
+    expect(methods).toEqual(['browser', 'code']);
+    processes[1].emit(geminiPrompt('gemini-code-success'));
+    await tick();
+    expect(manager.states().gemini).toMatchObject({ phase: 'waiting', pasteUrl: expect.stringContaining('accounts.google.com') });
+    expect(listen).toHaveBeenCalledOnce();
   });
 });
 

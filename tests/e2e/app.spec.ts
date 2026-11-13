@@ -16,6 +16,15 @@ let mock: MockLlm;
 let fixture: string;
 let page: Page;
 const pageErrors: string[] = [];
+// Google's token endpoint, which a Gemini sign-in is renewed with once before it's kept, so that
+// nothing here reaches Google.
+const googleTokens = http.createServer((req, res) => {
+  req.resume();
+  req.on('end', () => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ access_token: 'ya29.e2e-renewed-not-real', expires_in: 3599, token_type: 'Bearer' }));
+  });
+});
 
 async function shot(name: string): Promise<void> {
   await page.screenshot({ path: path.join(SHOTS, `${name}.png`) });
@@ -73,6 +82,8 @@ test.beforeAll(async ({ browser }) => {
   fs.mkdirSync(SHOTS, { recursive: true });
   mock = await startMockLlm();
   fixture = makeFixtureRepo();
+  await new Promise<void>((resolve) => googleTokens.listen(0, '127.0.0.1', resolve));
+  lonca.env = { GEMINI_REFRESH_TOKEN_URL_OVERRIDE: `http://127.0.0.1:${(googleTokens.address() as net.AddressInfo).port}/token` };
   await lonca.start();
   const context = await browser.newContext();
   page = await context.newPage();
@@ -88,6 +99,7 @@ test.beforeAll(async ({ browser }) => {
 test.afterAll(async () => {
   await lonca.destroy();
   await mock.close();
+  googleTokens.close();
   fs.rmSync(fixture, { recursive: true, force: true });
 });
 
@@ -144,6 +156,8 @@ test('first run guides you through setup', async () => {
   await expect(page.getByText('The workspace template is ready')).toBeVisible({ timeout: 300000 });
   await expect(page.getByText('VMs ready')).toBeVisible();
   await expect(page.getByText('Sign in to Claude')).toBeVisible({ timeout: 60000 });
+  await expect(page.getByText('Or sign in to Codex')).toBeVisible();
+  await expect(page.getByText('Or sign in to Gemini')).toBeVisible();
   await shot('home-first-run');
 });
 
@@ -227,7 +241,7 @@ test('shows when an agent isn’t signed in and goes straight to signing in', as
 test.describe('signing in', () => {
   const tools = () => `${lonca.prefix}-tools`;
   const codeBox = () => page.getByRole('textbox', { name: 'Sign-in code' });
-  const agentRow = (name: 'Claude' | 'Codex') => page.locator('.settings-row').filter({ hasText: name });
+  const agentRow = (name: 'Claude' | 'Codex' | 'Gemini') => page.locator('.settings-row').filter({ hasText: name });
 
   test.beforeAll(async () => {
     await lonca.startHelper();
@@ -513,6 +527,132 @@ test.describe('signing in', () => {
     await expect(dialog).toBeHidden();
   });
 
+  test('Gemini: approve on the page, and the browser comes back and the window closes by itself', async () => {
+    setFakeSignIn(tools(), { mode: 'ok' });
+    await fakeSignInPage('https://accounts.google.com/**', 'code=fakecode');
+    await expect(agentRow('Gemini')).toContainText('Not signed in');
+    await agentRow('Gemini').getByRole('button', { name: 'Sign in' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Sign in to Gemini' });
+    await expect(dialog.getByRole('tab', { name: 'Google account' })).toHaveAttribute('aria-selected', 'true');
+    await expect(dialog.getByRole('link', { name: 'Open sign-in page' })).toHaveAttribute('href', /^https:\/\/accounts\.google\.com\//, { timeout: 60000 });
+    await expect(dialog.getByRole('button', { name: 'paste a code instead' })).toBeVisible();
+    await shot('login-gemini-browser');
+    const tab = await approveOnPage(dialog);
+    const signedIn = page.getByRole('dialog', { name: 'Gemini is signed in' });
+    await Promise.all([
+      expect(signedIn).toContainText('Signed in with Google as probe@example.com', { timeout: 60000 }),
+      expect(tab.getByRole('heading', { name: 'You’re signed in' })).toBeVisible({ timeout: 60000 }),
+    ]);
+    expect(tab.url()).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/oauth2callback\?code=fakecode&state=/);
+    await tab.close();
+    expect(await page.locator('body').innerText()).not.toContain('ya29.');
+    await expect(signedIn).toBeHidden({ timeout: 5000 });
+    await expect(agentRow('Gemini')).toContainText('Signed in with Google as probe@example.com');
+    await agentRow('Gemini').getByRole('button', { name: 'Sign out' }).click();
+    await expect(agentRow('Gemini')).toContainText('Not signed in');
+  });
+
+  test('Gemini: where the page can’t come back, paste the code it shows instead', async () => {
+    setFakeSignIn(tools(), { mode: 'ok' });
+    await agentRow('Gemini').getByRole('button', { name: 'Sign in' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Sign in to Gemini' });
+    await dialog.getByRole('button', { name: 'paste a code instead' }).click({ timeout: 60000 });
+    const open = dialog.getByRole('link', { name: 'Open sign-in page' });
+    await expect(open).toBeVisible({ timeout: 60000 });
+    await expect(dialog).toContainText('Approve access on accounts.google.com');
+    expect(new URL((await open.getAttribute('href'))!).searchParams.get('redirect_uri')).toBe('https://codeassist.google.com/authcode');
+    await expect(dialog.getByRole('button', { name: 'Continue' })).toBeDisabled();
+    await shot('login-gemini-code');
+
+    // A key in the code box gets a way forward, not a dead end.
+    await codeBox().fill(`AIza${'PastedInTheWrongPlace'.padEnd(35, 'x')}`);
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await expect(dialog.getByRole('alert')).toContainText('That’s a key, not a sign-in code.');
+    await expect(dialog.getByRole('button', { name: 'Use it as a key' })).toBeVisible();
+    await codeBox().fill('sk-ant-api03-pasted-in-the-wrong-place');
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await expect(dialog.getByRole('alert')).toContainText('That’s a key for another service. Gemini keys start with AIza.');
+
+    await codeBox().fill('4/fakecode');
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    const signedIn = page.getByRole('dialog', { name: 'Gemini is signed in' });
+    await expect(signedIn).toContainText('Signed in with Google as probe@example.com', { timeout: 60000 });
+    await shot('login-gemini-success');
+    await expect(signedIn).toBeHidden({ timeout: 5000 });
+    await agentRow('Gemini').getByRole('button', { name: 'Sign out' }).click();
+    await expect(agentRow('Gemini')).toContainText('Not signed in');
+  });
+
+  test('Gemini: on a phone, which the page can’t come back to, starts with the code to paste', async () => {
+    const size = page.viewportSize()!;
+    await page.setViewportSize({ width: 390, height: 844 });
+    try {
+      await agentRow('Gemini').getByRole('button', { name: 'Sign in' }).click();
+      const dialog = page.getByRole('dialog', { name: 'Sign in to Gemini' });
+      const open = dialog.getByRole('link', { name: 'Open sign-in page' });
+      await expect(open).toBeVisible({ timeout: 60000 });
+      expect(new URL((await open.getAttribute('href'))!).searchParams.get('redirect_uri')).toBe('https://codeassist.google.com/authcode');
+      await expect(codeBox()).toBeVisible();
+      await shot('login-gemini-phone');
+      await dialog.getByRole('button', { name: 'Cancel' }).click();
+      await expect(dialog).toBeHidden();
+    } finally {
+      await page.setViewportSize(size);
+    }
+  });
+
+  test('Gemini: an account that needs a Google Cloud project is signed in, and says what it needs', async () => {
+    setFakeSignIn(tools(), { mode: 'project' });
+    await agentRow('Gemini').getByRole('button', { name: 'Sign in' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Sign in to Gemini' });
+    await dialog.getByRole('button', { name: 'paste a code instead' }).click({ timeout: 60000 });
+    await expect(dialog.getByRole('link', { name: 'Open sign-in page' })).toBeVisible({ timeout: 60000 });
+    await codeBox().fill('4/fakecode');
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    const signedIn = page.getByRole('dialog', { name: 'Gemini is signed in' });
+    await expect(signedIn).toContainText('GOOGLE_CLOUD_PROJECT', { timeout: 60000 });
+    await shot('login-gemini-needs-project');
+    // It stays until it's been read.
+    await page.waitForTimeout(3000);
+    await expect(signedIn).toBeVisible();
+    await signedIn.getByRole('button', { name: 'OK' }).click();
+    await expect(signedIn).toBeHidden();
+    await expect(agentRow('Gemini')).toContainText('Signed in with Google as probe@example.com');
+    // And Settings goes on saying so.
+    await expect(page.locator('.sign-in-card').filter({ has: agentRow('Gemini') })).toContainText('Turns on this account need a Google Cloud project');
+    await shot('settings-gemini-needs-project');
+    await agentRow('Gemini').getByRole('button', { name: 'Sign out' }).click();
+    await expect(agentRow('Gemini')).toContainText('Not signed in');
+    setFakeSignIn(tools(), { mode: 'ok' });
+  });
+
+  test('Gemini: an account Google won’t serve says why, and offers a key', async () => {
+    setFakeSignIn(tools(), { mode: 'ineligible' });
+    await agentRow('Gemini').getByRole('button', { name: 'Sign in' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Sign in to Gemini' });
+    await dialog.getByRole('button', { name: 'paste a code instead' }).click({ timeout: 60000 });
+    await expect(dialog.getByRole('link', { name: 'Open sign-in page' })).toBeVisible({ timeout: 60000 });
+    await codeBox().fill('4/fakecode');
+    await dialog.getByRole('button', { name: 'Continue' }).click();
+    await expect(dialog.getByRole('alert')).toContainText('Gemini won’t take this account. Your current account is not eligible', { timeout: 60000 });
+    await expect(dialog.getByRole('alert')).toContainText('To use another, choose it on Google’s page, or open the sign-in page in a private window.');
+    await shot('login-gemini-ineligible');
+    await dialog.getByRole('button', { name: 'Use an API key' }).click();
+    const field = dialog.getByRole('textbox', { name: 'Gemini API key' });
+    await expect(field).toBeFocused();
+    await expect(field).toHaveAttribute('placeholder', 'AIza…');
+    await expect(dialog.getByRole('link', { name: 'Create an API key' })).toHaveAttribute('href', 'https://aistudio.google.com/apikey');
+    await expect(dialog).toContainText('An API key bills its Google Cloud project');
+    await shot('login-gemini-key');
+    await field.fill('sk-ant-api03-not-for-gemini');
+    await dialog.getByRole('button', { name: 'Save' }).click();
+    await expect(dialog.getByRole('alert')).toContainText('That’s a key for Claude. Sign in to Claude with it instead.');
+    setFakeSignIn(tools(), { mode: 'ok' });
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(agentRow('Gemini')).toContainText('Not signed in');
+  });
+
   test('a sign-in comes back after reloading the page', async () => {
     await agentRow('Claude').getByRole('button', { name: 'Sign in' }).click();
     const dialog = page.getByRole('dialog', { name: 'Sign in to Claude' });
@@ -656,7 +796,7 @@ test.describe('with agents connected', () => {
     expect(found).toBe('remember this');
   });
 
-  test('lists both agents in the model picker and locks a started conversation to one', async () => {
+  test('lists every agent in the model picker and locks a started conversation to one', async () => {
     await page.getByRole('button', { name: 'New conversation' }).click();
     await expect(page.getByText('This conversation is your own')).toBeVisible();
     await sendAndWait('starting this conversation');
@@ -664,7 +804,9 @@ test.describe('with agents connected', () => {
     await shot('model-picker');
     await expect(page.locator('.model-popover')).toContainText('Opus 5.5');
     await expect(page.locator('.model-popover')).toContainText('Codex');
+    await expect(page.locator('.model-popover')).toContainText('Gemini 3.1 Pro');
     await expect(page.getByRole('button', { name: /^GPT/ }).first()).toBeDisabled();
+    await expect(page.getByRole('button', { name: /^Gemini/ }).first()).toBeDisabled();
     await page.getByRole('button', { name: 'Sonnet 5.5' }).click();
     await page.getByRole('button', { name: 'Low', exact: true }).click();
     await expect(page.locator('.model-button')).toContainText('Sonnet 5.5');

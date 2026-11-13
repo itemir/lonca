@@ -47,13 +47,18 @@ describe('what each sign-in gets', () => {
     expect(store.state.profiles).toEqual([
       { id: 'claude', agent: 'claude', name: '' },
       { id: 'codex', agent: 'codex', name: '' },
+      { id: 'gemini', agent: 'gemini', name: '' },
     ]);
     expect(boundary.placeholderFor({ id: 'claude', agent: 'claude' })).toBe('sk-ant-oat01-lonca-placeholder');
     expect(boundary.placeholderFor({ id: 'codex', agent: 'codex' })).toBe('oai-oat01-lonca-placeholder');
+    expect(boundary.placeholderFor({ id: 'gemini', agent: 'gemini' })).toBe('goog-lonca-placeholder');
     expect(boundary.proxySecrets()).toEqual([
       { service: 'github', file: boundaryFile('github') },
       { hosts: ['api.anthropic.com'], placeholder: 'sk-ant-oat01-lonca-placeholder', file: boundaryFile('claude') },
       { hosts: ['chatgpt.com', 'api.openai.com'], placeholder: 'oai-oat01-lonca-placeholder', file: boundaryFile('codex') },
+      // A Google account's token only where Gemini sends it, and a key only where a key goes.
+      { hosts: ['cloudcode-pa.googleapis.com'], placeholder: 'goog-lonca-placeholder', file: boundaryFile('gemini') },
+      { hosts: ['generativelanguage.googleapis.com'], placeholder: 'goog-key-lonca-placeholder', file: boundaryFile('gemini.key') },
     ]);
   });
 
@@ -61,14 +66,26 @@ describe('what each sign-in gets', () => {
     const work = profiles.createProfile('claude', 'personal', 'work');
     const second = profiles.createProfile('claude', 'spare');
     const codex = profiles.createProfile('codex', 'personal', 'work');
+    const gemini = profiles.createProfile('gemini', 'personal', 'work');
     expect(work.id).toMatch(/^claude-[a-f0-9]{12}$/);
+    expect(gemini.id).toMatch(/^gemini-[a-f0-9]{12}$/);
     expect(store.state.profiles.find((profile) => profile.id === 'claude')?.name).toBe('work');
     const secrets = boundary.proxySecrets().filter((secret) => 'placeholder' in secret) as { placeholder: string; file: string; hosts: string[] }[];
-    expect(secrets.map((secret) => secret.file)).toEqual(['claude', 'codex', work.id, second.id, codex.id].map(boundaryFile));
+    expect(secrets.map((secret) => secret.file)).toEqual(['claude', 'codex', 'gemini', 'gemini.key', work.id, second.id, codex.id, gemini.id, `${gemini.id}.key`].map(boundaryFile));
     const placeholders = secrets.map((secret) => secret.placeholder);
     expect(new Set(placeholders).size).toBe(placeholders.length);
     for (const one of placeholders) for (const other of placeholders) if (one !== other) expect(one.includes(other)).toBe(false);
     expect(secrets.find((secret) => secret.file === boundaryFile(codex.id))?.hosts).toEqual(['chatgpt.com', 'api.openai.com']);
+    expect(secrets.find((secret) => secret.file === boundaryFile(gemini.id))).toEqual({
+      hosts: ['cloudcode-pa.googleapis.com'],
+      placeholder: `goog-lonca-profile-${gemini.id.slice('gemini-'.length)}-placeholder`,
+      file: boundaryFile(gemini.id),
+    });
+    expect(secrets.find((secret) => secret.file === boundaryFile(`${gemini.id}.key`))).toEqual({
+      hosts: ['generativelanguage.googleapis.com'],
+      placeholder: `goog-key-lonca-profile-${gemini.id.slice('gemini-'.length)}-placeholder`,
+      file: boundaryFile(`${gemini.id}.key`),
+    });
   });
 
   it('wants two named apart, and names the first one when the second is added', () => {
@@ -129,7 +146,7 @@ describe('what each sign-in gets', () => {
     session.activeProfileId = undefined;
     session.hasMessages = true;
     await profiles.removeProfile(personal);
-    expect(store.state.profiles.map((profile) => profile.id)).toEqual(['claude', 'codex']);
+    expect(store.state.profiles.map((profile) => profile.id)).toEqual(['claude', 'codex', 'gemini']);
     expect(session.profileId).toBe('claude');
     expect(store.state.settings.leadDefault.profileId).toBe('claude');
     expect(store.claudeCredential(personal.id)).toBeUndefined();

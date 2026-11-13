@@ -1,0 +1,18 @@
+[?1049h[2J[H[?1006l[?1002l[<u[?7hPlease visit the following URL to authorize the application:
+
+https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=https%3A%2F%2Fcodeassist.google.com%2Fauthcode&access_type=offline&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.profile&code_challenge_method=S256&code_challenge=Peg7H-BwqWKQ4Yi1oi7eF7kAH_DEaiEGpOFNf0aMmvs&state=718be5d10e52637ffdceadbc44c92a02f3b3fb86660932e42e967177cc46ff69&response_type=code&client_id=123456789012-loncamadeupclientforrecordings00.apps.googleusercontent.com
+
+[1G[0JEnter the authorization code: [31GFAKECODE
+[?1049lNo previous sessions found for this project.Error authenticating: IneligibleTierError: Your current account is not eligible for Gemini Code Assist for individuals because it is not currently available in your location.
+    at throwIneligibleOrProjectIdError (file:///tmp/gemini-probe/node_modules/@google/gemini-cli/bundle/chunk-RCB6BI5H.js:312981:11)
+    at _doSetupUser (file:///tmp/gemini-probe/node_modules/@google/gemini-cli/bundle/chunk-RCB6BI5H.js:312919:7)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  ineligibleTiers: [
+    {
+      reasonCode: 'INELIGIBLE_ACCOUNT',
+      reasonMessage: 'Your current account is not eligible for Gemini Code Assist for individuals because it is not currently available in your location.',
+      tierId: 'free-tier',
+      tierName: 'Gemini Code Assist for individuals'
+    }
+  ]
+}

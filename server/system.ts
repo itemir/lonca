@@ -3,8 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { PROFILE_ID, limitEnds } from '../shared/profiles.ts';
 import type { AgentId, AgentStatus, Catalog, DockerLoginState, LoginMethod, ModelOption, Profile, ProfileStatus, SystemStatus } from '../shared/types.ts';
-import { LONCA_HOME, PREFIX, paths } from './config.ts';
+import { LONCA_HOME, PREFIX, TTY_DIR, paths } from './config.ts';
 import { publish } from './events.ts';
+import {
+  RENEW_WITHIN_MS as GEMINI_RENEW_WITHIN_MS, describeGeminiSignIn, geminiLoginSavedAt, geminiRenewalRefused, readGeminiLogin, renewGeminiLogin,
+  shareGeminiCredentialWithProxy,
+} from './gemini-login.ts';
 import { SandboxError, type TemplateImage, buildTemplate, cleanUpTemplateBuild, detectSandboxes, ensureSandbox, exec, imageNamed, isSandboxRunning, listTemplates, ownTemplateImages, removableImages, removeSandbox, removeTemplateImage, templateLoaded, templateTag } from './sandbox.ts';
 import { claudeCredential, saveState, setBoundaryValue, state, writeAtomic } from './store.ts';
 import { KeyedQueue, errorMessage } from './util.ts';
@@ -465,13 +469,22 @@ function describeProfile(profile: Profile): ProfileStatus {
   const previous = system.profiles[profile.id];
   const limit = state.profileLimits?.[profile.id];
   const limitFields = limit ? { limitedAt: limit.at, limitResetsAt: limit.resetsAt } : {};
-  if (profile.agent === 'claude') {
-    const token = claudeCredential(profile.id);
-    return { signedIn: Boolean(token), ...describeClaudeSignIn(token), rejected: token ? previous?.rejected : undefined, ...limitFields };
+  switch (profile.agent) {
+    case 'claude': {
+      const token = claudeCredential(profile.id);
+      return { signedIn: Boolean(token), ...describeClaudeSignIn(token), rejected: token ? previous?.rejected : undefined, ...limitFields };
+    }
+    case 'codex': {
+      const login = readCodexLogin(profile.id);
+      const signedIn = codexCredential(login) !== null;
+      return { signedIn, ...(signedIn ? describeCodexSignIn(login) : {}), rejected: signedIn ? previous?.rejected : undefined, ...limitFields };
+    }
+    case 'gemini': {
+      const login = readGeminiLogin(profile.id);
+      const rejected = login ? previous?.rejected || geminiRenewalRefused(profile.id) || undefined : undefined;
+      return { signedIn: Boolean(login), ...describeGeminiSignIn(login), rejected, ...limitFields };
+    }
   }
-  const login = readCodexLogin(profile.id);
-  const signedIn = codexCredential(login) !== null;
-  return { signedIn, ...(signedIn ? describeCodexSignIn(login) : {}), rejected: signedIn ? previous?.rejected : undefined, ...limitFields };
 }
 
 /** Every sign-in's status from what's saved, without asking anything that takes a while. */
@@ -494,7 +507,39 @@ async function readAgentStatus(): Promise<void> {
     await renewCodexLogin(profile.id);
     shareCodexCredentialWithProxy(profile.id);
   }
+  for (const profile of geminiProfiles()) shareGeminiCredentialWithProxy(profile.id);
+  await renewGeminiLogins();
   describeProfiles();
+}
+
+const geminiProfiles = () => state.profiles.filter((profile) => profile.agent === 'gemini');
+
+/**
+ * Renews a Google account's access token if it's due. Google refusing means signing in again, which
+ * the page then offers, if what it refused is still what's saved by the time that's known.
+ */
+export async function renewGemini(profileId: string): Promise<void> {
+  if (await renewGeminiLogin(profileId) === 'refused' && geminiRenewalRefused(profileId)) markAgentRejected(profileId);
+}
+
+/** Often, since an access token lasts an hour. Each only goes to Google when it's due. */
+export async function renewGeminiLogins(): Promise<void> {
+  await Promise.all(geminiProfiles().map((profile) => renewGemini(profile.id)));
+}
+
+/**
+ * A turn on this sign-in was refused. A Google account's access token may only have run out while
+ * Lonca wasn't running to renew it, so that one counts as refused if Google won't renew it, or if
+ * the token the turn had should still have worked.
+ */
+export async function signInRefused(profileId: string, turnStartedAt: number): Promise<void> {
+  if (getProfile(profileId)?.agent !== 'gemini') return markAgentRejected(profileId);
+  // The turn may have had an older token than the one there is now, or another kind of sign-in.
+  if (geminiLoginSavedAt(profileId) > turnStartedAt) return;
+  const login = readGeminiLogin(profileId);
+  if (login?.kind !== 'google') return markAgentRejected(profileId);
+  if (login.expiry_date - Date.now() > GEMINI_RENEW_WITHIN_MS) return markAgentRejected(profileId);
+  await renewGemini(profileId);
 }
 
 let checking: Promise<void> | null = null;
@@ -588,6 +633,18 @@ export async function checkCodexKey(key: string): Promise<CredentialCheck> {
   }
 }
 
+/** Listing models is free, and Google refuses a key it doesn't know with a 400 that says so. */
+export async function checkGeminiKey(key: string): Promise<CredentialCheck> {
+  if (CHECKS_DISABLED) return 'accepted';
+  try {
+    const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models', { headers: { 'x-goog-api-key': key }, signal: AbortSignal.timeout(20000) });
+    if (response.ok) return 'accepted';
+    return response.status === 400 && /API_KEY_INVALID/.test(await response.text()) ? 'refused' : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 export function parseCodexCatalog(output: string): ModelOption[] {
   const parsed = JSON.parse(output) as {
     models?: {
@@ -629,9 +686,33 @@ export async function refreshCodexCatalog(): Promise<void> {
   }
 }
 
+/**
+ * Gemini's CLI opens a browser with a program it starts apart from its terminal, so the one in
+ * here writes the link to that terminal by its name.
+ */
+export const GEMINI_OPENER = `${TTY_DIR}/login-open`;
+
+// Gemini's CLI has no command that only signs in. It signs in on its way to listing the
+// conversations of a home that has none. The settings every VM has take the kind of sign-in
+// from LONCA_GEMINI_AUTH, and the attempt's own say it too, for a helper that couldn't be given them.
+const GEMINI_LOGIN = String.raw`
+mkdir -p "$GEMINI_CLI_HOME/.gemini"
+printf '%s' '{"security":{"auth":{"selectedType":"oauth-personal"}}}' > "$GEMINI_CLI_HOME/.gemini/settings.json"
+export LONCA_TTY=$(tty)
+PATH="$0:$PATH" exec gemini --list-sessions "$@"
+`;
+
 export function agentLoginCommand(agent: AgentId, method: LoginMethod): string[] {
-  if (agent === 'claude') return ['claude', 'setup-token'];
-  return method === 'device' ? ['codex', 'login', '--device-auth'] : ['codex', 'login'];
+  switch (agent) {
+    case 'claude':
+      return ['claude', 'setup-token'];
+    case 'codex':
+      return method === 'device' ? ['codex', 'login', '--device-auth'] : ['codex', 'login'];
+    case 'gemini':
+      // A prompt, which is never run, has it ask whether to open a browser on a line of its own
+      // rather than its full screen. Taking a code to paste needs it to have none.
+      return ['bash', '-c', GEMINI_LOGIN, GEMINI_OPENER, ...(method === 'code' ? [] : ['--prompt', 'unused'])];
+  }
 }
 
 export function signOutCodex(profileId = 'codex'): void {

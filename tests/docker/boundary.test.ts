@@ -18,22 +18,40 @@ let session: Session;
 const CLAUDE = 'sk-ant-oat01-boundary-test-not-real';
 const GITHUB = 'gho_boundary_test_not_real';
 const CODEX = 'sk-boundary-test-not-real-key';
-const REAL_VALUES = [CLAUDE, GITHUB, CODEX];
+// What signing in with Google leaves, which a Gemini turn is running on while the VM is read.
+const GOOGLE_ACCESS = 'ya29.boundary-test-access-not-real';
+const GOOGLE_REFRESH = '1//boundary-test-refresh-not-real';
+const GOOGLE_CLIENT_SECRET = 'made-up-client-secret-for-the-boundary-test';
+const GEMINI_KEY = `AIza${'BoundaryTestKeyNotReal'.padEnd(35, 'x')}`;
+const REAL_VALUES = [CLAUDE, GITHUB, CODEX, GOOGLE_ACCESS, GOOGLE_REFRESH, GOOGLE_CLIENT_SECRET, GEMINI_KEY];
 
 const state = () => lonca.api<AppState>('GET', '/state');
 const forProxy = (name: string) => path.join(lonca.home, 'boundary', name);
 const tools = () => `${lonca.prefix}-tools`;
+
+function signInWithGoogle(): void {
+  const dir = path.join(lonca.home, 'helper-credentials', 'gemini');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dir, 'login.json'), JSON.stringify({
+    kind: 'google', access_token: GOOGLE_ACCESS, refresh_token: GOOGLE_REFRESH, expiry_date: Date.now() + 3600e3, token_type: 'Bearer',
+    client_id: 'made-up-client.apps.googleusercontent.com', client_secret: GOOGLE_CLIENT_SECRET,
+  }), { mode: 0o600 });
+}
 
 beforeAll(async () => {
   mock = await startMockLlm();
   fixture = makeFixtureRepo();
   await lonca.start();
   project = await lonca.waitForProject((await lonca.api('POST', '/projects', { path: fixture })).id);
-  await lonca.api('PATCH', `/projects/${project.id}`, { settings: { network: 'host', env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}` } } });
+  await lonca.api('PATCH', `/projects/${project.id}`, {
+    settings: { network: 'host', env: { ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`, CODE_ASSIST_ENDPOINT: `http://host.docker.internal:${mock.port}` } },
+  });
   await until('sign-in status', async () => (await state()).system.agentsChecked, 120000);
   await lonca.api('PUT', '/profiles/claude/key', { key: CLAUDE });
   await lonca.api('PUT', '/secrets/github', { token: GITHUB });
   await lonca.api('PUT', '/profiles/codex/key', { key: CODEX });
+  signInWithGoogle();
+  await lonca.api('POST', '/agents/refresh');
   const created = await lonca.api<{ workspace: Workspace; session: Session }>('POST', `/projects/${project.id}/workspaces`, {});
   session = created.session;
   workspace = await lonca.waitForWorkspace(created.workspace.id);
@@ -45,9 +63,16 @@ afterAll(async () => {
   fs.rmSync(fixture, { recursive: true, force: true });
 });
 
-/** Everything a process in the VM could read: every environment and every small file. */
+/** What a process in the VM could read: every environment, and every small file in its home, temporary directories and Lonca's. */
 function readableInVm(): string {
   return sandboxExec(workspace.sandboxName, String.raw`cat /proc/[0-9]*/environ 2>/dev/null; find "$HOME" /tmp /var/tmp /var/lib/lonca -xdev -type f -size -1024k 2>/dev/null | xargs cat 2>/dev/null; true`).output;
+}
+
+/** Files of the agents' CLIs, installed for every workspace, that hold any of these. The Gemini CLI's own OAuth client is in its own. */
+function inCliInstalls(values: string[]): string {
+  const installs = '/usr/local/lib/node_modules';
+  expect(sandboxExec(workspace.sandboxName, `test -d ${installs}/@google/gemini-cli/bundle`).code).toBe(0);
+  return sandboxExec(workspace.sandboxName, `grep -rlF ${values.map((value) => `-e '${value}'`).join(' ')} ${installs} 2>/dev/null; true`).output;
 }
 
 /** What the proxy was told to swap in this sandbox, and on which hosts. */
@@ -68,16 +93,28 @@ async function terminalEnv(): Promise<string> {
 }
 
 describe('what a workspace can read', () => {
-  it('has none of the real values, in any process or file', async () => {
+  it('has none of the real values in any process’s environment, the small files in its home, temporary directories and Lonca’s, or the agents’ CLIs, even while Gemini works', async () => {
+    const gemini = await lonca.api<Session>('POST', `/workspaces/${workspace.id}/sessions`, { agent: 'gemini', model: 'gemini-3.1-pro-preview', effort: 'low' });
+    const before = mock.requests.length;
+    await lonca.api('POST', `/sessions/${gemini.id}/messages`, { text: 'SLOW: take your time' });
+    await until('Gemini to be working', () => sandboxExec(workspace.sandboxName, 'pgrep -f "[g]emini --output-format"').code === 0, 60000);
     const listing = await terminalEnv();
     const scan = readableInVm();
     for (const value of REAL_VALUES) {
       expect(listing).not.toContain(value);
       expect(scan).not.toContain(value);
     }
+    expect(inCliInstalls(REAL_VALUES)).toBe('');
+    await lonca.waitForIdle(gemini.id);
+    // What its CLI asked Google with, which the proxy would have swapped.
+    const asked = mock.requests.slice(before).filter((request) => request.path.includes(':'));
+    expect(asked.length).toBeGreaterThan(0);
+    for (const request of asked) expect(request.auth).toBe('Bearer goog-lonca-placeholder');
+    expect(readableInVm()).not.toContain(GOOGLE_REFRESH);
     expect(fs.readFileSync(forProxy('claude'), 'utf8')).toBe(CLAUDE);
     expect(fs.readFileSync(forProxy('github'), 'utf8')).toBe(GITHUB);
     expect(fs.readFileSync(forProxy('codex'), 'utf8')).toBe(CODEX);
+    expect(fs.readFileSync(forProxy('gemini'), 'utf8')).toBe(GOOGLE_ACCESS);
   });
 
   it('has nothing of the sign-ins mounted', () => {
@@ -91,13 +128,27 @@ describe('what a workspace can read', () => {
   });
 
   it('has a placeholder for each, with Codex at the usual address for an API key', async () => {
-    expect(await terminalEnv()).toContain('CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-lonca-placeholder');
+    const listing = await terminalEnv();
+    expect(listing).toContain('CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-lonca-placeholder');
+    for (const variable of ['GOOGLE_GENAI_USE_GCA=true', 'GOOGLE_CLOUD_ACCESS_TOKEN=goog-lonca-placeholder', 'LONCA_GEMINI_AUTH=oauth-personal']) expect(listing).toContain(variable);
     expect(JSON.parse(sandboxExec(workspace.sandboxName, 'cat ~/.codex/auth.json').output)).toEqual({ OPENAI_API_KEY: 'oai-oat01-lonca-placeholder' });
     expect(sandboxExec(workspace.sandboxName, 'cat ~/.codex/config.toml').output.trim()).toBe('cli_auth_credentials_store = "file"');
+  });
+
+  it('has Gemini settings a checkout can’t override, which only root can change', () => {
+    expect(sandboxExec(workspace.sandboxName, 'stat -c "%U %a" /etc/gemini-cli /etc/gemini-cli/settings.json').output.split('\n')).toEqual(['root 755', 'root 644']);
+    expect(JSON.parse(sandboxExec(workspace.sandboxName, 'cat /etc/gemini-cli/settings.json').output).security.auth.selectedType).toBe('${LONCA_GEMINI_AUTH:-}');
+    expect(sandboxExec(workspace.sandboxName, 'echo {} > /etc/gemini-cli/settings.json').code).not.toBe(0);
   });
 });
 
 describe('what the proxy is told', () => {
+  it('swaps a Google account’s token only where Gemini sends it, and a Gemini key only where a key goes', () => {
+    const placeholders = placeholdersIn(workspace.sandboxName);
+    expect(placeholders.find((entry) => entry.placeholder === 'goog-lonca-placeholder')?.targets).toEqual(['cloudcode-pa.googleapis.com']);
+    expect(placeholders.find((entry) => entry.placeholder === 'goog-key-lonca-placeholder')?.targets).toEqual(['generativelanguage.googleapis.com']);
+  });
+
   it('reads each from a file, for this sandbox alone, and never gets a value', () => {
     if (FAKE_SANDBOX) {
       const calls = fs.readFileSync(path.join(FAKE_SBX_DIR, 'calls.log'), 'utf8').split('\n').filter((line) => line.startsWith('secret ') && line.includes(workspace.sandboxName));
@@ -107,7 +158,7 @@ describe('what the proxy is told', () => {
     } else {
       const listed = JSON.parse(sbx('secret', 'ls', '--sandbox', workspace.sandboxName, '--json')) as { secrets?: { name: string; secret?: string }[]; custom_secrets?: { placeholder: string; targets: string[]; kind?: string; source?: string }[] };
       expect(listed.secrets?.map((entry) => entry.name)).toContain('github');
-      expect(listed.custom_secrets?.map((entry) => entry.placeholder).sort()).toEqual(['oai-oat01-lonca-placeholder', 'sk-ant-oat01-lonca-placeholder']);
+      expect(listed.custom_secrets?.map((entry) => entry.placeholder).sort()).toEqual(['goog-key-lonca-placeholder', 'goog-lonca-placeholder', 'oai-oat01-lonca-placeholder', 'sk-ant-oat01-lonca-placeholder']);
       expect(listed.custom_secrets?.find((entry) => entry.placeholder.startsWith('sk-ant'))?.targets).toEqual(['api.anthropic.com']);
       expect(JSON.stringify(listed)).toContain(forProxy('claude'));
       for (const value of REAL_VALUES) expect(JSON.stringify(listed)).not.toContain(value);
@@ -130,10 +181,22 @@ describe('what the proxy is told', () => {
     expect(fs.existsSync(forProxy('github'))).toBe(false);
     await lonca.api('POST', '/profiles/codex/logout');
     expect(fs.existsSync(forProxy('codex'))).toBe(false);
+    await lonca.api('POST', '/profiles/gemini/logout');
+    expect(fs.existsSync(forProxy('gemini'))).toBe(false);
+    expect(fs.existsSync(path.join(lonca.home, 'helper-credentials', 'gemini', 'login.json'))).toBe(false);
     await lonca.api('PUT', '/secrets/github', { token: GITHUB });
     await lonca.api('PUT', '/profiles/codex/key', { key: CODEX });
+    await lonca.api('PUT', '/profiles/gemini/key', { key: GEMINI_KEY });
     expect(fs.readFileSync(forProxy('github'), 'utf8')).toBe(GITHUB);
     expect(fs.readFileSync(forProxy('codex'), 'utf8')).toBe(CODEX);
+    // In the file for a key, with the one for a Google account's token left empty.
+    expect(fs.readFileSync(forProxy('gemini.key'), 'utf8')).toBe(GEMINI_KEY);
+    expect(fs.existsSync(forProxy('gemini'))).toBe(false);
+    // A terminal opened now is given the variable for a key, with the key's placeholder.
+    const listing = await terminalEnv();
+    expect(listing).toContain('GEMINI_API_KEY=goog-key-lonca-placeholder');
+    expect(listing).toContain('LONCA_GEMINI_AUTH=gemini-api-key');
+    expect(listing).not.toContain(GEMINI_KEY);
   });
 });
 

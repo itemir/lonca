@@ -13,7 +13,9 @@ rm -rf /var/lib/apt/lists/*
 
 # The newest Claude Code, but no older than the first that knows every model in shared/catalog.ts.
 # Raising the floor changes this file, so servers build a new template when they next start.
-npm install -g --silent --prefix /usr/local '@anthropic-ai/claude-code@>=2.1.321' @openai/codex
+# Gemini's CLI is pinned, since Lonca depends on its flags, settings and output, which change often.
+# Raising it is a change of its own, with its tests.
+npm install -g --silent --prefix /usr/local '@anthropic-ai/claude-code@>=2.1.321' @openai/codex @google/gemini-cli@0.68.0
 npm cache clean --force --silent
 
 install -m 644 "$here/gitconfig" /etc/gitconfig

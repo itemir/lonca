@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Check, MoreHorizontal, PanelLeft, Plus } from 'lucide-react';
-import { isReady, profileName, profileStatus, profilesOf } from '../../../shared/profiles.ts';
+import { AGENTS, isReady, profileName, profileStatus, profilesOf } from '../../../shared/profiles.ts';
 import type { AgentId, AppSettings, Profile } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { CLAUDE_ACCOUNT_HINT } from '../components/LoginDialog.tsx';
@@ -142,6 +142,11 @@ function SignInCard({ profile, several, isDefault }: { profile: Profile; several
           />
         )}
       </div>
+      {status.signedIn && status.needsProject && (
+        <p className="sign-in-hint">
+          Turns on this account need a Google Cloud project. Add <code>GOOGLE_CLOUD_PROJECT</code> with its ID to the environment variables of each project that uses it.
+        </p>
+      )}
       {several && (
         <label className="sign-in-switch">
           <input
@@ -338,7 +343,7 @@ function ImageCard() {
         </div>
         <button type="button" className="button" disabled={image.state === 'building'} onClick={() => void attempt(() => api.rebuildImage())}>Update agent CLIs</button>
       </div>
-      <p className="field-help">Rebuilding installs the latest Claude Code and Codex. Existing workspaces move to the new template when you rebuild them.</p>
+      <p className="field-help">Rebuilding installs the latest Claude Code and Codex, and the version of the Gemini CLI that Lonca works with. Existing workspaces move to the new template when you rebuild them.</p>
       {image.log && <pre className="build-log">{image.log.split('\n').slice(-30).join('\n')}</pre>}
     </div>
   );
@@ -389,7 +394,7 @@ function LeadSettings() {
 
 export function Settings() {
   const settings = useStore((store) => store.settings);
-  const several = useStore((store) => profilesOf(store.profiles, 'claude').length > 1 || profilesOf(store.profiles, 'codex').length > 1);
+  const several = useStore((store) => AGENTS.some((agent) => profilesOf(store.profiles, agent).length > 1));
   const { sidebarOpen, toggleSidebar } = useLayout();
   type Field = 'branchPrefix' | 'gitName' | 'gitEmail';
   const [drafts, setDrafts] = useState<Partial<Pick<AppSettings, Field>>>({});
@@ -420,8 +425,7 @@ export function Settings() {
         <h1 className="page-title">Settings</h1>
         <section className="settings-section">
           <h2>Sign-ins</h2>
-          <ProviderSignIns agent="claude" />
-          <ProviderSignIns agent="codex" />
+          {AGENTS.map((agent) => <ProviderSignIns key={agent} agent={agent} />)}
           <p className="field-help">Sign in once and every workspace can use the agent. Your logins on this computer are left alone.</p>
           {several && <p className="field-help">{TERMS}</p>}
         </section>

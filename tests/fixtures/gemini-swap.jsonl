@@ -1,0 +1,7 @@
+{"type":"init","timestamp":"2026-11-12T16:14:23.775Z","session_id":"a0cab49a-48ed-4d92-9e1f-4a280161c106","model":"auto-gemini-2.5"}
+{"type":"message","timestamp":"2026-11-12T16:14:23.775Z","role":"user","content":"Which model?"}
+{"type":"message","timestamp":"2026-11-12T16:14:23.786Z","role":"assistant","content":"Mock Gemini ","delta":true}
+{"type":"message","timestamp":"2026-11-12T16:14:23.801Z","role":"assistant","content":"here. You sa","delta":true}
+{"type":"message","timestamp":"2026-11-12T16:14:23.816Z","role":"assistant","content":"id: Which mo","delta":true}
+{"type":"message","timestamp":"2026-11-12T16:14:23.831Z","role":"assistant","content":"del?","delta":true}
+{"type":"result","timestamp":"2026-11-12T16:14:23.850Z","status":"success","stats":{"total_tokens":270,"input_tokens":240,"output_tokens":30,"cached":0,"input":240,"duration_ms":75,"tool_calls":0,"models":{"gemini-3.1-flash-lite":{"total_tokens":135,"input_tokens":120,"output_tokens":15,"cached":0,"input":120},"gemini-3-flash":{"total_tokens":135,"input_tokens":120,"output_tokens":15,"cached":0,"input":120}}}}

@@ -1,0 +1,8 @@
+{"type":"init","timestamp":"2026-11-12T16:14:06.125Z","session_id":"9e7ba741-0a0a-46ed-b631-9094a2f2f553","model":"gemini-3.1-pro-preview"}
+{"type":"message","timestamp":"2026-11-12T16:14:06.126Z","role":"user","content":"And a follow-up question"}
+{"type":"message","timestamp":"2026-11-12T16:14:06.133Z","role":"assistant","content":"Mock Gemini ","delta":true}
+{"type":"message","timestamp":"2026-11-12T16:14:06.151Z","role":"assistant","content":"here. You sa","delta":true}
+{"type":"message","timestamp":"2026-11-12T16:14:06.165Z","role":"assistant","content":"id: And a fo","delta":true}
+{"type":"message","timestamp":"2026-11-12T16:14:06.184Z","role":"assistant","content":"llow-up ques","delta":true}
+{"type":"message","timestamp":"2026-11-12T16:14:06.200Z","role":"assistant","content":"tion","delta":true}
+{"type":"result","timestamp":"2026-11-12T16:14:06.219Z","status":"success","stats":{"total_tokens":135,"input_tokens":120,"output_tokens":15,"cached":0,"input":120,"duration_ms":96,"tool_calls":0,"models":{"gemini-3.1-pro-preview":{"total_tokens":135,"input_tokens":120,"output_tokens":15,"cached":0,"input":120}}}}

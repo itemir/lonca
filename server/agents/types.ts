@@ -36,7 +36,8 @@ export interface TurnContext {
 
 export interface AgentAdapter {
   command(context: TurnContext): string[];
-  parser(runId: string): AgentParser;
+  /** For a turn of this session, which says what model it asked for. */
+  parser(runId: string, session: Pick<Session, 'model'>): AgentParser;
   /** Its CLI reads messages from the run's inbox while it works, and echoes each one it reads. */
   readsWhileWorking: boolean;
 }

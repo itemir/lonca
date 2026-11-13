@@ -1,6 +1,6 @@
 import { Link, useNavigate } from 'react-router-dom';
 import { Check, CircleDashed, GitBranch, PanelLeft, Plus, X } from 'lucide-react';
-import { isReady, profileStatus, profilesOf } from '../../../shared/profiles.ts';
+import { AGENTS, isReady, profileStatus, profilesOf } from '../../../shared/profiles.ts';
 import type { AgentId, Workspace } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { IconButton, Avatar, Spinner } from '../components/ui.tsx';
@@ -29,16 +29,15 @@ function Setup() {
   const setAddProjectOpen = useStore((store) => store.setAddProjectOpen);
   const setLoginAgent = useStore((store) => store.setLoginAgent);
   const profiles = useStore((store) => store.profiles);
+  const catalog = useStore((store) => store.catalog);
   const { sandbox, image } = system;
   // Any of a provider's sign-ins is enough for it.
   const ready = (agent: AgentId) => profilesOf(profiles, agent).some((profile) => isReady(profileStatus(system, profile.id)));
-  const claudeReady = ready('claude');
-  const codexReady = ready('codex');
-  const anyAgent = claudeReady || codexReady;
+  const anyAgent = AGENTS.some(ready);
   const blocker = signInBlocker(system);
-  // The one white button goes on the next thing to do. Either agent is enough.
+  // The one white button goes on the next thing to do. Any one agent is enough.
   const nextIsSignIn = !anyAgent;
-  const signIn = (agent: 'claude' | 'codex', primary: boolean) => (blocker
+  const signIn = (agent: AgentId, primary: boolean) => (blocker
     ? <span className="setup-waiting">{blocker}</span>
     : <button type="button" className={`button button-small ${primary ? 'button-primary' : ''}`} onClick={() => setLoginAgent(agent)}>Sign in</button>);
   if (sandbox.state === 'ready' && image.state === 'ready' && anyAgent && projects.length > 0) return null;
@@ -62,18 +61,14 @@ function Setup() {
             {image.state === 'error' && `The workspace template failed to build: ${image.error}`}
           </SetupRow>
         )}
-        <SetupRow
-          state={claudeReady ? 'done' : 'todo'}
-          action={!claudeReady && signIn('claude', nextIsSignIn)}
-        >
-          {claudeReady ? 'Claude is signed in' : codexReady ? 'Sign in to Claude (optional)' : 'Sign in to Claude'}
-        </SetupRow>
-        <SetupRow
-          state={codexReady ? 'done' : 'todo'}
-          action={!codexReady && signIn('codex', false)}
-        >
-          {codexReady ? 'Codex is signed in' : claudeReady ? 'Sign in to Codex (optional)' : 'Or sign in to Codex'}
-        </SetupRow>
+        {AGENTS.map((agent, index) => {
+          const { label } = catalog[agent];
+          return (
+            <SetupRow key={agent} state={ready(agent) ? 'done' : 'todo'} action={!ready(agent) && signIn(agent, nextIsSignIn && index === 0)}>
+              {ready(agent) ? `${label} is signed in` : anyAgent ? `Sign in to ${label} (optional)` : index === 0 ? `Sign in to ${label}` : `Or sign in to ${label}`}
+            </SetupRow>
+          );
+        })}
         <SetupRow
           state={projects.length > 0 ? 'done' : 'todo'}
           action={projects.length === 0 && <button type="button" className={`button button-small ${nextIsSignIn ? '' : 'button-primary'}`} onClick={() => setAddProjectOpen(true)}>Add a project</button>}
