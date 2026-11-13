@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Duplex, PassThrough } from 'node:stream';
 import type { SandboxStatus } from '../shared/types.ts';
+import { GEMINI_SYSTEM_SETTINGS } from './agents/gemini.ts';
 import { LONCA_HOME, PORTS_PER_WORKSPACE, PREFIX, TEMPLATE_DIR, TEMPLATE_NAME, TTY_DIR } from './config.ts';
 import { forgetSbxLogin, recordSbxLogin } from './sbx-login-pid.ts';
 import { emptyAgent } from './ssh-agent.ts';
@@ -432,7 +433,7 @@ export async function buildTemplate(tag: string, options: { fresh?: boolean }, o
     onLog('Starting a virtual machine to build it in…\n');
     await sbx(['run', '--detach', '--name', name, '--template', BASE_TEMPLATE, '--pull', options.fresh ? 'always' : 'missing', '--skills', 'off', 'shell', staging], { timeoutMs: BUILD_TIMEOUT_MS });
     await sbx(['policy', 'allow', 'network', '--sandbox', name, '**']);
-    onLog('Installing Claude Code and Codex…\n');
+    onLog('Installing Claude Code, Codex and Gemini CLI…\n');
     const build = await exec(name, ['bash', path.join(staging, 'build.sh'), staging], { user: 'root', timeoutMs: BUILD_TIMEOUT_MS });
     onLog(build.stdout.toString('utf8') + build.stderr.toString('utf8'));
     if (build.code !== 0) throw new SandboxError(`Installing into the template failed with code ${build.code}`);
@@ -553,9 +554,20 @@ mkdir -p "$HOME/.claude" "$HOME/.codex"
 sudo -n mount -o remount,discard /var/lib/docker 2>/dev/null || true
 
 # Rebuilding a workspace replaces its VM, and conversations have to outlive that to be resumed.
-mkdir -p "$state/claude-projects" "$state/codex-sessions"
+# Each Gemini conversation's home links to what it keeps here before every turn.
+mkdir -p "$state/claude-projects" "$state/codex-sessions" "$state/gemini-chats"
 ln -sfn "$state/claude-projects" "$HOME/.claude/projects"
 ln -sfn "$state/codex-sessions" "$HOME/.codex/sessions"
+
+# Gemini's CLI only puts settings before a checkout's own when root owns them. Best effort, since
+# only sudo can write them there.
+gemini='${GEMINI_SYSTEM_SETTINGS}'
+if [ "$(cat /etc/gemini-cli/settings.json 2>/dev/null)" != "$gemini" ]; then
+  { sudo -n install -d -o root -g root -m 755 /etc/gemini-cli &&
+    printf '%s\n' "$gemini" | sudo -n tee /etc/gemini-cli/.settings.json.tmp >/dev/null &&
+    sudo -n chmod 644 /etc/gemini-cli/.settings.json.tmp &&
+    sudo -n mv -f /etc/gemini-cli/.settings.json.tmp /etc/gemini-cli/settings.json; } 2>/dev/null || true
+fi
 
 # Terminal attachments end at reboot. Agent output survives until Lonca has read and saved it.
 boot=$(cat /proc/sys/kernel/random/boot_id)

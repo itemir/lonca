@@ -1,0 +1,7 @@
+
+Opening authentication page in your browser. Do you want to continue? [Y/n]: 
+]8;;https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=http%3A%2F%2F127.0.0.1%3A39683%2Foauth2callback&access_type=offline&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.profile&state=4f76bac2a6673894b8b63d977a4d76d41a08e51d6d9bd2799d0e2bfd4a09b666&response_type=code&client_id=123456789012-loncamadeupclientforrecordings00.apps.googleusercontent.com]8;;No previous sessions found for this project.Error authenticating: FatalAuthenticationError: Failed to exchange authorization code for tokens: invalid_grant
+    at Server.<anonymous> (file:///tmp/gemini-probe/node_modules/@google/gemini-cli/bundle/chunk-RCB6BI5H.js:279992:20)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  exitCode: 41
+}

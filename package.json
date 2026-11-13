@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A coordinator that lets you run a team of Claude and Codex coding agents from your browser. Each workspace gets an isolated virtual machine to reduce security risks.",
+  "description": "A coordinator that lets you run a team of Claude, Codex and Gemini coding agents from your browser. Each workspace gets an isolated virtual machine to reduce security risks.",
   "license": "MIT",
   "engines": {
     "node": ">=22.18"

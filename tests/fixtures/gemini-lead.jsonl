@@ -1,0 +1,9 @@
+{"type":"init","timestamp":"2026-11-12T16:15:12.907Z","session_id":"613f58e2-124a-410f-94ae-57692ba8ff09","model":"gemini-3.1-pro-preview"}
+{"type":"message","timestamp":"2026-11-12T16:15:12.908Z","role":"user","content":"TOOL: team_status {}\nTOOL: spawn_agent {\"label\":\"Analysis\",\"model\":\"gemini-3.5-flash\",\"job\":\"analyze\",\"task\":\"look around\"}"}
+{"type":"tool_use","timestamp":"2026-11-12T16:15:12.927Z","tool_name":"mcp_lonca_team_status","tool_id":"mcp_lonca_team_status__call_1_0","parameters":{}}
+{"type":"tool_use","timestamp":"2026-11-12T16:15:12.928Z","tool_name":"mcp_lonca_spawn_agent","tool_id":"mcp_lonca_spawn_agent__call_2_1","parameters":{"label":"Analysis","model":"gemini-3.5-flash","job":"analyze","task":"look around"}}
+{"type":"tool_result","timestamp":"2026-11-12T16:15:12.936Z","tool_id":"mcp_lonca_team_status__call_1_0","status":"success","output":"No agents yet."}
+{"type":"tool_result","timestamp":"2026-11-12T16:15:12.936Z","tool_id":"mcp_lonca_spawn_agent__call_2_1","status":"success","output":"Started Analysis"}
+{"type":"message","timestamp":"2026-11-12T16:15:12.941Z","role":"assistant","content":"The command ","delta":true}
+{"type":"message","timestamp":"2026-11-12T16:15:12.959Z","role":"assistant","content":"finished.","delta":true}
+{"type":"result","timestamp":"2026-11-12T16:15:12.978Z","status":"success","stats":{"total_tokens":270,"input_tokens":240,"output_tokens":30,"cached":0,"input":240,"duration_ms":71,"tool_calls":2,"models":{"gemini-3.1-pro-preview":{"total_tokens":270,"input_tokens":240,"output_tokens":30,"cached":0,"input":240}}}}

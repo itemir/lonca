@@ -5,6 +5,7 @@ import type { ChatItem, ResultItem } from '../../shared/types.ts';
 import { createClaudeParser, describeClaudeTool } from '../../server/agents/claude.ts';
 import { claudeAdapter } from '../../server/agents/claude.ts';
 import { codexAdapter, createCodexParser, unwrapShellCommand } from '../../server/agents/codex.ts';
+import { createGeminiParser, describeGeminiTool, exitReason, resetTime } from '../../server/agents/gemini.ts';
 import { sanitizeItem } from '../../server/agents/sanitize.ts';
 import type { AgentParser, ChatOp } from '../../server/agents/types.ts';
 
@@ -293,5 +294,155 @@ describe('output from a misbehaving agent', () => {
   it('drops numbers that aren’t numbers', () => {
     const dirty = { id: 'r', ts: 1, type: 'result', durationMs: '5s', costUsd: {}, inputTokens: NaN, outputTokens: 3 } as unknown as ChatItem;
     expect(sanitizeItem(dirty)).toMatchObject({ durationMs: undefined, costUsd: undefined, inputTokens: undefined, outputTokens: 3 });
+  });
+});
+
+describe('Gemini parser', () => {
+  const asked = { model: 'gemini-3.1-pro-preview' };
+
+  it('turns a captured turn into text, a shell command, more text and a result', () => {
+    const { items, resume } = replay(createGeminiParser('run', asked), fixture('gemini-1'));
+    expect(items.map((item) => item.type)).toEqual(['text', 'tool', 'text', 'result']);
+    expect(items[0]).toMatchObject({ text: 'Running that now.', streaming: false });
+    expect(items[1]).toMatchObject({
+      kind: 'command', name: 'run_shell_command', title: 'Run the requested command', detail: 'echo hello from the shell', status: 'done', output: 'hello from the shell',
+    });
+    expect(items[2]).toMatchObject({ text: 'The command finished.', streaming: false });
+    expect(items[3]).toMatchObject({ failed: false, inputTokens: 240, outputTokens: 30, durationMs: 95 });
+    expect(resume).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('streams text as deltas, and continues the same conversation on the next turn', () => {
+    const first = replay(createGeminiParser('one', asked), fixture('gemini-1'));
+    const parser = createGeminiParser('two', asked);
+    const ops = fixture('gemini-2').slice(0, 4).flatMap((event) => parser.line(event));
+    expect(ops.filter((op) => op.op === 'delta').map((op) => (op as { text: string }).text)).toEqual(['Mock Gemini ', 'here. You sa']);
+    expect(ops.find((op) => op.op === 'upsert' && op.item.type === 'text')).toMatchObject({ item: { streaming: true, text: '' } });
+    const second = replay(createGeminiParser('two', asked), fixture('gemini-2'));
+    expect(second.resume).toBe(first.resume);
+    expect(second.items.map((item) => item.type)).toEqual(['text', 'result']);
+    expect(second.items[0]).toMatchObject({ text: 'Mock Gemini here. You said: And a follow-up question' });
+  });
+
+  it('ends a turn the helper stopped at a usage limit as one, with when it resets, and no cancellation', () => {
+    const events = fixture('gemini-limit');
+    const { items } = replay(createGeminiParser('run', asked), events);
+    expect(items.map((item) => item.type)).toEqual(['result', 'notice']);
+    const limit = events.at(-1) as { timestamp: string };
+    expect(items.find((item) => item.type === 'notice')).toMatchObject({
+      level: 'error', code: 'limit', text: expect.stringContaining('exhausted your capacity'),
+      resetsAt: Date.parse(limit.timestamp) + ((19 * 60 + 14) * 60 + 47) * 1000,
+    });
+    expect(items.find((item) => item.type === 'result')).toMatchObject({ failed: true });
+  });
+
+  it('counts an API key’s daily quota as a usage limit with no end it can tell', () => {
+    const { items } = replay(createGeminiParser('run', { model: 'gemini-3.5-flash' }), fixture('gemini-daily'));
+    expect(items.map((item) => item.type)).toEqual(['notice', 'result']);
+    expect(items[0]).toMatchObject({ code: 'limit', text: expect.stringContaining('exhausted your daily quota') });
+    expect((items[0] as { resetsAt?: number }).resetsAt).toBeUndefined();
+    expect(items[1]).toMatchObject({ failed: true });
+  });
+
+  it('counts a refusal as one, whether the CLI said so in its result or only on stderr', () => {
+    const key = replay(createGeminiParser('run', { model: 'gemini-3.5-flash' }), fixture('gemini-refused-key'));
+    expect(key.items.map((item) => item.type)).toEqual(['notice', 'result']);
+    expect(key.items[0]).toMatchObject({ code: 'auth', text: expect.stringContaining('UNAUTHENTICATED') });
+    // A Google account's token is first used before the turn begins, so all there is is stderr.
+    const account = replay(createGeminiParser('run', asked), fixture('gemini-refused'));
+    expect(account.resume).toBeNull();
+    expect(account.items.map((item) => item.type)).toEqual(['notice', 'result']);
+    expect(account.items[0]).toMatchObject({
+      code: 'auth', text: 'Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential.',
+    });
+    expect(account.items[1]).toMatchObject({ failed: true });
+  });
+
+  it('shows a Lead’s calls to Lonca’s tools as the team’s', () => {
+    const { items } = replay(createGeminiParser('run', asked), fixture('gemini-lead'));
+    const tools = items.filter((item) => item.type === 'tool');
+    expect(tools).toMatchObject([
+      { kind: 'team', title: 'Checked on the agents', status: 'done', output: 'No agents yet.' },
+      { kind: 'team', title: 'Started Analysis', detail: 'look around', status: 'done', output: 'Started Analysis' },
+    ]);
+  });
+
+  it('says when the CLI swapped the model for one the sign-in can use', () => {
+    const { items } = replay(createGeminiParser('run', asked), fixture('gemini-swap'));
+    expect(items[0]).toMatchObject({ type: 'notice', level: 'info', text: expect.stringContaining('auto-gemini-2.5') });
+    expect(items[0]).toMatchObject({ text: expect.stringContaining('gemini-3.1-pro-preview') });
+    expect(replay(createGeminiParser('run', asked), fixture('gemini-1')).items.some((item) => item.type === 'notice')).toBe(false);
+  });
+
+  it('reports a conversation the CLI can’t find with what it said', () => {
+    const { items } = replay(createGeminiParser('run', asked), fixture('gemini-lost'));
+    expect(items[0]).toMatchObject({ type: 'notice', text: expect.stringContaining('Invalid session identifier') });
+    expect(items[0]).toMatchObject({ text: expect.not.stringContaining('UNDICI') });
+  });
+
+  it('ends a turn stopped before the CLI said anything as interrupted, not failed', () => {
+    const { items } = replay(createGeminiParser('run', asked), [
+      { type: 'init', session_id: 's', model: asked.model },
+      { type: 'result', status: 'error', error: { type: 'FatalCancellationError', message: 'Operation cancelled.' } },
+      { type: 'lonca_exit', code: 130, stderr: '' },
+    ]);
+    expect(items).toMatchObject([{ type: 'result', interrupted: true }]);
+    expect(replay(createGeminiParser('run', asked), [{ type: 'lonca_exit', code: 130, stderr: '' }]).items).toMatchObject([{ type: 'result', interrupted: true }]);
+  });
+
+  it('closes text and running tools when the process ends partway', () => {
+    const parser = createGeminiParser('run', asked);
+    parser.line({ type: 'message', role: 'assistant', content: 'Half a', delta: true });
+    parser.line({ type: 'tool_use', tool_name: 'read_file', tool_id: 'read_file__1', parameters: { file_path: 'a.ts' } });
+    parser.line({ type: 'message', role: 'assistant', content: '   ', delta: true });
+    const ops = parser.finish();
+    expect(ops).toEqual(expect.arrayContaining([
+      { op: 'remove', itemId: 'run:text:2' },
+      expect.objectContaining({ op: 'upsert', item: expect.objectContaining({ type: 'tool', status: 'error', title: 'Read', detail: 'a.ts' }) }),
+    ]));
+  });
+
+  it('shows warnings, and a tool that failed with what it said', () => {
+    const { items } = replay(createGeminiParser('run', asked), [
+      { type: 'tool_use', tool_name: 'replace', tool_id: 'replace__1', parameters: { file_path: 'a.ts', old_string: 'a', new_string: 'b' } },
+      { type: 'tool_result', tool_id: 'replace__1', status: 'error', error: { type: 'edit_no_occurrence_found', message: 'Failed to edit, 0 occurrences found.' } },
+      { type: 'error', severity: 'warning', message: 'Loop detected, stopping execution' },
+      { type: 'error', severity: 'error', message: 'Model stream ended with empty response text.' },
+      { type: 'result', status: 'error', stats: {} },
+    ]);
+    expect(items).toMatchObject([
+      { type: 'tool', kind: 'edit', status: 'error', output: 'Failed to edit, 0 occurrences found.', edits: [{ path: 'a.ts', removed: 'a', added: 'b' }] },
+      { type: 'notice', level: 'warning', text: 'Loop detected, stopping execution' },
+      { type: 'notice', level: 'error', text: 'Model stream ended with empty response text.' },
+      { type: 'result', failed: true },
+    ]);
+  });
+
+  it('describes the CLI’s tools, and Lonca’s by the names it knows', () => {
+    expect(describeGeminiTool('write_file', { file_path: 'b.ts', content: 'x' })).toEqual({ kind: 'edit', title: 'Wrote', detail: 'b.ts' });
+    expect(describeGeminiTool('read_many_files', { include: ['a.ts', 'b.ts'] })).toEqual({ kind: 'read', title: 'Read files', detail: 'a.ts, b.ts' });
+    expect(describeGeminiTool('grep_search', { pattern: 'TODO' })).toEqual({ kind: 'search', title: 'Searched for', detail: 'TODO' });
+    expect(describeGeminiTool('google_web_search', { query: 'lonca' })).toEqual({ kind: 'web', title: 'Searched the web for', detail: 'lonca' });
+    expect(describeGeminiTool('invoke_agent', { agent_name: 'codebase_investigator', prompt: 'look' })).toMatchObject({ kind: 'agent', detail: 'look' });
+    expect(describeGeminiTool('mcp_lonca_message_agent', { id: 'a1', text: 'hi', wait_for_previous: true })).toEqual({ kind: 'team', title: 'Messaged', detail: 'hi', agentId: 'a1' });
+    expect(describeGeminiTool('mcp_lonca_forward_port', { port: 3000 })).toMatchObject({ kind: 'web', title: 'Forwarded port 3000' });
+    expect(describeGeminiTool('mcp_lonca_tools_extra', {})).toEqual({ kind: 'other', title: 'lonca_tools_extra' });
+    expect(describeGeminiTool('mcp_github_create_issue', {})).toEqual({ kind: 'other', title: 'github_create_issue' });
+    expect(describeGeminiTool('get_internal_docs', {})).toEqual({ kind: 'other', title: 'Get internal docs' });
+    const parser = createGeminiParser('run', asked);
+    const [todos] = parser.line({
+      type: 'tool_use', tool_name: 'write_todos', tool_id: 'write_todos__1',
+      parameters: { todos: [{ description: 'Read', status: 'completed' }, { description: 'Write', status: 'in_progress' }, { description: 'Skip', status: 'cancelled' }] },
+    });
+    expect(todos).toMatchObject({ item: { kind: 'todos', todos: [{ text: 'Read', status: 'completed' }, { text: 'Write', status: 'in_progress' }, { text: 'Skip', status: 'pending' }] } });
+  });
+
+  it('reads when a limit resets, and why a CLI stopped', () => {
+    expect(resetTime('Your quota will reset after 1h2m3s.', 1000)).toBe(1000 + 3723000);
+    expect(resetTime('reset after 45s', 0)).toBe(45000);
+    expect(resetTime('reset after soon', 0)).toBeUndefined();
+    expect(exitReason('YOLO mode is enabled.\nPlease set an Auth method in your settings.json\n', 41)).toBe('Please set an Auth method in your settings.json');
+    expect(exitReason('\x1b[31mError in settings.json: bad\x1b[0m\n', 52)).toBe('Error in settings.json: bad');
+    expect(exitReason('', 3)).toBe('Gemini exited with code 3.');
   });
 });

@@ -2,8 +2,9 @@ import crypto from 'node:crypto';
 import { profileIdOf, profileName, profilesOf } from '../shared/profiles.ts';
 import type { AgentId, Profile } from '../shared/types.ts';
 import { notice, persistSession } from './agents/runner.ts';
-import { profileSecret } from './boundary.ts';
+import { profileSecrets } from './boundary.ts';
 import { publish } from './events.ts';
+import { forgetGeminiLogin } from './gemini-login.ts';
 import { logins } from './logins.ts';
 import { saveState, secretsStatus, setClaudeCredential, state } from './store.ts';
 import { clearProfileLimit, describeProfiles, forgetCodexLogin, getProfile, publishSystem } from './system.ts';
@@ -56,7 +57,7 @@ export function createProfile(agent: AgentId, name: string, firstName?: string):
   publishProfiles();
   statusChanged();
   // Running workspaces only get the sign-ins there were when they started.
-  void addProxySecretEverywhere(profileSecret(profile));
+  for (const secret of profileSecrets(profile)) void addProxySecretEverywhere(secret);
   return profile;
 }
 
@@ -81,6 +82,14 @@ export function updateProfile(profile: Profile, patch: { name?: string; autoSwit
   publishProfiles();
   statusChanged();
   return profile;
+}
+
+function forgetCredentials(profile: Profile): void {
+  switch (profile.agent) {
+    case 'claude': return setClaudeCredential(profile.id, undefined);
+    case 'codex': return forgetCodexLogin(profile.id);
+    case 'gemini': return forgetGeminiLogin(profile.id);
+  }
 }
 
 /**
@@ -108,8 +117,7 @@ export async function removeProfile(profile: Profile): Promise<void> {
   }
   // Its credentials go first, then what was on it, and the sign-in last, so that removing it
   // again finishes anything that was cut short.
-  if (profile.agent === 'claude') setClaudeCredential(profile.id, undefined);
-  else forgetCodexLogin(profile.id);
+  forgetCredentials(profile);
   const fallback = profilesOf(state.profiles, profile.agent).find((entry) => entry !== profile)!;
   const fallbackName = profileName(fallback, state.catalog);
   for (const session of state.sessions.filter((entry) => entry.agent === profile.agent && !entry.closedAt && profileIdOf(entry) === profile.id)) {

@@ -61,3 +61,5 @@ export const RUNS_DIR = '/var/tmp/lonca/agent-runs';
 export const TTY_DIR = '/var/tmp/lonca/tty';
 /** Where a Lead's agent keeps its notes, away from the checkout everyone reads. */
 export const SCRATCH_DIR = '/var/tmp/lonca/agent-scratch';
+/** A home for each Gemini conversation's CLI, which is set up before every turn. */
+export const GEMINI_HOMES_DIR = '/var/tmp/lonca/gemini';

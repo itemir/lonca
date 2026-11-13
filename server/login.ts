@@ -1,8 +1,9 @@
 import http from 'node:http';
 import type { AgentId, LoginFailure, LoginMethod, LoginState } from '../shared/types.ts';
 import {
-  LoginScreen, type RedirectLink, classifyCodexFailure, findClaudeLink, findClaudeToken, findCodexDevice, findRedirectLink,
-  isClaudeCodeRejected, isClaudeStuck, loginLinkState, redact,
+  LoginScreen, type RedirectLink, askingConsent, classifyCodexFailure, classifyGeminiFailure, findClaudeLink, findClaudeToken, findCodexDevice,
+  findGeminiCodeLink, findRedirectLink, geminiIneligibility, geminiNeedsProject, isClaudeCodeRejected, isClaudeStuck, isGeminiCodeRejected,
+  isGeminiConsent, linkClientId, loginLinkState, redact,
 } from './agents/login.ts';
 import { HttpError, errorMessage, sleep } from './util.ts';
 
@@ -37,6 +38,16 @@ export interface LoginTarget {
   profileId: string;
 }
 
+/** What a Gemini sign-in knows that its login may not say, and whether it's still the one to keep. */
+export interface GeminiAttempt {
+  /** The OAuth client in the link the CLI printed. */
+  clientId?: string;
+  /** The CLI said the account's turns need a Google Cloud project. */
+  needsProject: boolean;
+  /** False once it's been cancelled, replaced or has ended, after which nothing of it may be kept. */
+  current: () => boolean;
+}
+
 export interface LoginDriver {
   spawn(agent: AgentId, method: LoginMethod): Promise<LoginProcess>;
   /** Answers on a port of this computer until the function it gives is called. Fails if the port is taken. */
@@ -46,6 +57,12 @@ export interface LoginDriver {
   saveClaudeToken(token: string, target: LoginTarget): Promise<void>;
   /** With what `codex login` saved once it's exited: keeps it if it's a login, and reports whether it was. */
   finishCodexLogin(login: string, target: LoginTarget): Promise<boolean>;
+  /**
+   * With what Gemini's CLI saved once it's exited, which may be nothing: keeps it if it's a whole
+   * login that Google will renew and the attempt is still current, reports whether it was kept,
+   * and throws if it won't be renewed.
+   */
+  finishGeminiLogin(login: string, target: LoginTarget, attempt: GeminiAttempt): Promise<boolean>;
   publish(target: LoginTarget, login: LoginState | null): void;
 }
 
@@ -110,6 +127,10 @@ class LoginSession {
     this.settle = resolve;
   });
   private agent: AgentId;
+  /** Gemini has asked before opening a browser, and been told to go on. */
+  private consented = false;
+  /** The client in the link Gemini's CLI printed. */
+  private geminiClient: string | undefined;
   private target: LoginTarget;
   private driver: LoginDriver;
   private timings: typeof LOGIN_TIMINGS;
@@ -182,6 +203,22 @@ class LoginSession {
       const device = findCodexDevice(text);
       if (device) this.update({ phase: 'waiting', url: device.url, code: device.code });
     }
+    if (this.agent === 'gemini' && this.state.method === 'browser' && !this.consented && isGeminiConsent(text)) {
+      this.consented = true;
+      this.process?.write('\r');
+    }
+    if (this.state.method === 'code' && this.state.phase === 'starting') {
+      const pasteUrl = findGeminiCodeLink(text);
+      if (pasteUrl) {
+        this.geminiClient = linkClientId(pasteUrl);
+        this.update({ phase: 'waiting', pasteUrl: askingConsent(pasteUrl) });
+      }
+    }
+    if (this.agent === 'gemini' && this.state.phase === 'submitting' && isGeminiCodeRejected(text)) {
+      // It would ask again, with another page.
+      await this.fail('rejected');
+      return;
+    }
     if (this.state.method === 'browser' && this.isWaiting) {
       const redirect = this.portOpened ? null : findRedirectLink(this.screen);
       if (redirect) this.portOpened = this.openReturnPort(redirect);
@@ -211,13 +248,14 @@ class LoginSession {
     try {
       stop = await this.driver.listen(link.port, (target) => this.onReturn(link, target));
     } catch {
-      // Claude's other page doesn't need the port. Codex's other way in means starting over.
-      if (this.agent === 'codex') await this.fail('port-busy', String(link.port));
+      // Claude's other page doesn't need the port. Codex's and Gemini's other ways in mean starting over.
+      if (this.agent !== 'claude') await this.fail('port-busy', String(link.port));
       return;
     }
     if (this.finished || this.cancelled) return stop();
     this.stopListening = stop;
-    this.update({ phase: 'waiting', url: link.url });
+    if (this.agent === 'gemini') this.geminiClient = linkClientId(link.url);
+    this.update({ phase: 'waiting', url: this.agent === 'gemini' ? askingConsent(link.url) : link.url });
   }
 
   private async onReturn(link: RedirectLink, target: URL): Promise<ReturnOutcome> {
@@ -274,6 +312,10 @@ class LoginSession {
       if (!(await this.saveTokenIfPrinted()) && !this.finished) await this.fail('stopped');
       return;
     }
+    if (this.agent === 'gemini') {
+      await this.finishGemini(process);
+      return;
+    }
     if (code === 0) {
       this.update({ phase: 'saving', ...NO_LINKS });
       try {
@@ -289,6 +331,30 @@ class LoginSession {
     await this.fail(classifyCodexFailure(this.screen.text()));
   }
 
+  /**
+   * Gemini's CLI ends well whether or not it signed in, and goes on to its account after saving a
+   * login, so what it saved and what it said are what tell how it went.
+   */
+  private async finishGemini(process: LoginProcess): Promise<void> {
+    const text = this.screen.text();
+    const ineligible = geminiIneligibility(text);
+    if (ineligible) {
+      await this.fail('denied', ineligible);
+      return;
+    }
+    this.update({ phase: 'saving', ...NO_LINKS });
+    try {
+      const login = await process.savedLogin();
+      if (this.finished || this.cancelled) return;
+      // Renewing it first takes a while, in which the sign-in can be cancelled, signed out of or removed.
+      const attempt = { clientId: this.geminiClient, needsProject: geminiNeedsProject(text), current: () => !this.finished && !this.cancelled };
+      if (await this.driver.finishGeminiLogin(login, this.target, attempt)) await this.succeed(attempt.needsProject ? { needsProject: true } : {});
+      else await this.fail(classifyGeminiFailure(text));
+    } catch (error) {
+      await this.fail('save-failed', errorMessage(error));
+    }
+  }
+
   /** Whoever came back from the sign-in page gets their answer, and the port is free again. */
   private stopWaiting(): void {
     this.settle();
@@ -296,11 +362,11 @@ class LoginSession {
     this.stopListening = null;
   }
 
-  private async succeed(): Promise<void> {
+  private async succeed(patch: Partial<LoginState> = {}): Promise<void> {
     // Saving takes a while, and this attempt may have ended meanwhile and another begun.
     if (this.finished || this.cancelled) return;
     this.clearTimers();
-    this.update({ phase: 'done', ...NO_LINKS });
+    this.update({ phase: 'done', ...NO_LINKS, ...patch });
     this.stopWaiting();
     this.screen.dispose();
     await this.process?.kill().catch(() => {});
@@ -320,7 +386,8 @@ class LoginSession {
   }
 
   async submitCode(code: string): Promise<void> {
-    // Claude takes a few seconds to get to its prompt, and shows this page when it has.
+    // Claude takes a few seconds to get to its prompt, and shows this page when it has. Gemini's
+    // page that shows a code is its only one when it signs in that way.
     if (this.state.phase !== 'waiting' || !this.process || !this.state.pasteUrl) {
       throw new HttpError(409, 'This sign-in isn’t waiting for a code. Start again to get a new one.');
     }
@@ -328,7 +395,7 @@ class LoginSession {
     // A pasted escape sequence could end the bracketed paste and type anything into the CLI.
     // eslint-disable-next-line no-control-regex
     if (!trimmed || /[\x00-\x1f\x7f]/.test(trimmed)) throw new HttpError(400, 'That doesn’t look like a sign-in code. Copy it again from the page.');
-    if (/^sk-/.test(trimmed)) throw new HttpError(400, 'That’s a key, not a sign-in code.');
+    if (/^(sk-|AIza)/.test(trimmed)) throw new HttpError(400, 'That’s a key, not a sign-in code.');
     const expected = loginLinkState(this.state.pasteUrl);
     const given = trimmed.includes('#') ? trimmed.slice(trimmed.indexOf('#') + 1) : null;
     if (expected && given && expected !== given) {

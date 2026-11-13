@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { AgentId, AgentJob, AgentWork, Attachment, ChatItem, LeadChoice, Project, Session, ToolItem, TurnOutcome, UserItem, Workspace } from '../../shared/types.ts';
+import type { AgentId, AgentJob, AgentWork, Attachment, ChatItem, LeadChoice, Profile, Project, Session, ToolItem, TurnOutcome, UserItem, Workspace } from '../../shared/types.ts';
 import { MAX_AUTONOMOUS_TURNS, staysHeld } from '../../shared/lead.ts';
 import { defaultProfile, profileIdOf } from '../../shared/profiles.ts';
 import { codexTurn, turnProfile } from '../boundary.ts';
@@ -9,12 +9,15 @@ import { exec, execStream, execText, isSandboxRunning, sandboxState, type Output
 import { publish } from '../events.ts';
 import { refreshDiffStat } from '../inspect.ts';
 import { deleteTranscript, flushState, flushTranscript, getProject, getSession, getWorkspace, saveState, state } from '../store.ts';
-import { clearProfileLimit, getProfile, markAgentRejected, markProfileLimited, system } from '../system.ts';
+import { clearProfileLimit, getProfile, markProfileLimited, renewGemini, signInRefused, system } from '../system.ts';
 import { dropTranscript, transcriptFor } from '../transcript.ts';
 import { HttpError, KeyedQueue, errorMessage, newId, sleep } from '../util.ts';
 import { onWorkspaceReady, onWorkspaceTeardown, publishWorkspace, runningSandbox, setUpCodex, startWorkspace } from '../workspaces.ts';
 import { claudeAdapter } from './claude.ts';
 import { codexAdapter } from './codex.ts';
+import {
+  GEMINI_LEAD_UNPROTECTED, GEMINI_MISSING, GEMINI_UNPROTECTED, geminiAdapter, geminiAttachments, geminiSettingsUnprotected, geminiSetup, geminiTurnEnv,
+} from './gemini.ts';
 import { playbookFor } from './playbook.ts';
 import { agentProcessCommand, inboxCommand, leadToolsScript, messageUuid, parseOutputReceipt, parseToolCall, type ToolCall } from './process.ts';
 import { currentJobNote, scratchDir, sessionPrompt, userPrompt } from './prompt.ts';
@@ -22,7 +25,7 @@ import { sanitizeItem } from './sanitize.ts';
 import { TEAM_TOOLS } from './team-tools.ts';
 import { type AgentAdapter, type AgentParser, type ChatOp, resultId } from './types.ts';
 
-const adapters: Record<AgentId, AgentAdapter> = { claude: claudeAdapter, codex: codexAdapter };
+const adapters: Record<AgentId, AgentAdapter> = { claude: claudeAdapter, codex: codexAdapter, gemini: geminiAdapter };
 
 const STOP_GRACE_MS = 4000;
 const TITLE_LENGTH = 48;
@@ -93,6 +96,8 @@ interface ActiveRun {
   reportedStopped?: boolean;
   /** The sign-in it runs on, which its limits and refusals belong to. None for a project's own key. */
   profileId?: string;
+  /** When its CLI was started, after anything done to its sign-in beforehand. Unknown for one picked up after a restart. */
+  launchedAt?: number;
   /** Its CLI reads messages from `<dir>/inbox` while it works, until it closes that. */
   readsInbox: boolean;
   /** Messages its CLI has read. They're no longer queued, even if saving that failed. */
@@ -242,7 +247,9 @@ function apply(sessionId: string, run: ActiveRun | null, ops: ChatOp[]): void {
         }
         // Which sign-in refused it or reached a limit, which isn't the conversation's for long.
         if (item.type === 'notice' && item.code && run?.profileId) item.profileId = run.profileId;
-        if (item.type === 'notice' && item.code === 'auth' && run?.profileId) markAgentRejected(run.profileId);
+        if (item.type === 'notice' && item.code === 'auth' && run?.profileId) {
+          void signInRefused(run.profileId, run.launchedAt ?? run.startedAt).catch((error) => console.error('could not check a refused sign-in:', errorMessage(error)));
+        }
         if (item.type === 'notice' && item.code === 'limit' && run) {
           run.limited = true;
           run.limitResetsAt = item.resetsAt;
@@ -590,7 +597,7 @@ async function follow(run: ActiveRun): Promise<void> {
 
 // A turn cut off before the CLI saved its conversation leaves an ID that can't be continued, and
 // every later message would fail the same way.
-const LOST_CONVERSATION = /No conversation found with session ID|no rollout found for thread id/i;
+const LOST_CONVERSATION = /No conversation found with session ID|no rollout found for thread id|Invalid session identifier|No previous sessions found for this project/i;
 
 function isLead(run: ActiveRun): boolean {
   return getSession(run.sessionId)?.role === 'lead';
@@ -779,6 +786,8 @@ function outcomeOf(run: ActiveRun, session: Session): Partial<Session> {
 function playbookUpdate(session: Session, run: ActiveRun, content: string | undefined): string | undefined {
   if (content === undefined) return undefined;
   run.playbookVersion = crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
+  // Gemini's CLI is given its instructions afresh by every turn, so it already has these.
+  if (session.agent === 'gemini') return undefined;
   const changed = session.playbookVersion !== run.playbookVersion;
   // The CLI may retain this edit even if the turn stops or the server crashes. Invalidate the
   // old acknowledgment before delivery, so reverting the edit will still be sent next time.
@@ -787,14 +796,30 @@ function playbookUpdate(session: Session, run: ActiveRun, content: string | unde
     ? `Update from Lonca: this is your current playbook. From now on, follow this instead of the one you started with:\n\n${content}` : undefined;
 }
 
-/** What a turn's processes are given, which isn't the same for a Lead and the agents it starts, or on every sign-in. */
-export function turnEnv(session: Session, project: Project, profileId: string): string[] {
+function agentEnv(session: Session, project: Project, profile: Pick<Profile, 'id' | 'agent'>): string[] {
+  switch (session.agent) {
+    case 'claude': return execEnv(project, profile);
+    case 'codex': return [...execEnv(project), ...codexTurn(profile, project).env];
+    case 'gemini': return execEnv(project, profile, geminiTurnEnv(session.id));
+  }
+}
+
+/**
+ * What a turn's processes are given, which isn't the same for a Lead and the agents it starts, or on
+ * every sign-in. A Lead's turn is given its directory, where its tools are.
+ */
+export function turnEnv(session: Session, project: Project, profileId: string, runDir?: string): string[] {
   const profile = getProfile(profileId) ?? { id: profileId, agent: session.agent };
-  const env = session.agent === 'claude'
-    ? execEnv(project, profile)
-    : [...execEnv(project), ...codexTurn(profile, project).env];
-  // Claude would otherwise leave the Lead's tools to be looked up, and it might not bother.
-  if (session.role === 'lead') return [...env, 'ENABLE_TOOL_SEARCH=false'];
+  const env = agentEnv(session, project, profile);
+  if (session.role === 'lead') {
+    return [
+      ...env,
+      // Claude would otherwise leave the Lead's tools to be looked up, and it might not bother.
+      'ENABLE_TOOL_SEARCH=false',
+      // Gemini's settings start the tools from there. After the project's own, which can't move them.
+      ...(session.agent === 'gemini' && runDir ? [`LONCA_RUN_DIR=${runDir}`] : []),
+    ];
+  }
   if (session.role !== 'agent') return env;
   return [
     ...env,
@@ -802,6 +827,24 @@ export function turnEnv(session: Session, project: Project, profileId: string): 
     // It's shared across a repository, which would let agents read each other's notes.
     'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1',
   ];
+}
+
+/**
+ * Writes the conversation's home for Gemini's CLI, which a VM made before Lonca could run Gemini
+ * doesn't have. A turn still runs without the settings a checkout can't change, but says so,
+ * except a Lead's, whose tools a checkout's own settings could replace without them.
+ */
+async function setUpGemini(sandbox: string, context: Parameters<typeof geminiSetup>[0], runId: string): Promise<void> {
+  const { command, stdin } = geminiSetup(context);
+  const result = await exec(sandbox, command, { stdin, timeoutMs: 60000 });
+  if (result.code === GEMINI_MISSING) {
+    throw new Error('This workspace’s virtual machine was made before Lonca could run Gemini. Rebuild the workspace from its ⋯ menu to use Gemini. Its files and conversations are kept.');
+  }
+  if (result.code !== 0) throw new Error(result.stderr.toString('utf8').trim() || `Gemini couldn’t be set up (code ${result.code}).`);
+  if (geminiSettingsUnprotected(result.stdout.toString('utf8'))) {
+    if (context.session.role === 'lead') throw new Error(GEMINI_LEAD_UNPROTECTED);
+    notice(context.session.id, runId, 'warning', GEMINI_UNPROTECTED);
+  }
 }
 
 async function startRun(session: Session, workspace: Workspace, item: UserItem): Promise<void> {
@@ -812,7 +855,7 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
   const profileId = profileIdOf(session);
   const run: ActiveRun = {
     runId, sessionId: session.id, workspaceId: workspace.id, sandbox: '', dir: `${RUNS_DIR}/${runId}`,
-    parser: adapter.parser(runId),
+    parser: adapter.parser(runId, session),
     startedAt: Date.now(), offset: 0, interrupted: false, holdQueue: false, launched: false, sawResult: false, outputLimitHit: false, output: null,
     item, resumedFrom: session.resumeId, toolCalls: new Set(), toolQueue: Promise.resolve(), limited: false, reportedFailure: false, stopped: false,
     profileId: turnProfile(session.agent, profileId, project),
@@ -842,24 +885,35 @@ async function startRun(session: Session, workspace: Workspace, item: UserItem):
     const playbook = session.role === 'lead' ? playbookFor(project).content : undefined;
     await execText(sandbox, ['mkdir', '-p', run.dir, ...(run.readsInbox ? [`${run.dir}/inbox`] : []), ...(session.work ? [scratchDir(session.id)] : [])]);
     await execText(sandbox, ['bash', '-c', 'cat > "$0"', `${run.dir}/prompt`], {
-      stdin: userPrompt([playbookUpdate(session, run, playbook), item.context, item.text, currentJobNote(session)].filter(Boolean).join('\n\n'), attachments),
+      stdin: userPrompt(
+        [playbookUpdate(session, run, playbook), item.context, item.text, currentJobNote(session)].filter(Boolean).join('\n\n'),
+        session.agent === 'gemini' ? geminiAttachments(workspace, session.id, attachments) : attachments,
+      ),
     });
     if (session.role === 'lead') {
       await execText(sandbox, ['bash', '-c', 'mkdir -p "$0/replies" && cat > "$0/lonca-tools.py"', run.dir], { stdin: leadToolsScript(TEAM_TOOLS) });
     }
     if (session.work && session.work.job !== 'implement') session.work.filesBefore = await filesFingerprint(sandbox, workspace);
+    const systemPrompt = sessionPrompt(session, workspace, project, playbook);
+    const tools = session.role === 'lead' ? { command: 'python3', args: ['-I', `${run.dir}/lonca-tools.py`, run.dir] } : undefined;
+    if (session.agent === 'gemini') {
+      // A Google account's access token is renewed on this computer, so a turn starts with one that works.
+      if (run.profileId) await renewGemini(run.profileId).catch((error) => console.error('could not renew a Gemini sign-in:', errorMessage(error)));
+      await setUpGemini(sandbox, { session, workspace, systemPrompt, attachments, tools }, runId);
+    }
     if (run.interrupted) {
       await finishRun(run, { code: null, stderr: '' });
       return;
     }
     const command = adapter.command({
-      session, workspace, project, attachments, systemPrompt: sessionPrompt(session, workspace, project, playbook),
-      ...(session.role === 'lead' ? { tools: { command: 'python3', args: ['-I', `${run.dir}/lonca-tools.py`, run.dir] } } : {}),
+      session, workspace, project, attachments, systemPrompt,
+      ...(tools ? { tools } : {}),
       ...(session.agent === 'codex' ? { config: codexTurn(getProfile(profileId), project).config } : {}),
     });
     launchAttempted = true;
+    run.launchedAt = Date.now();
     await execText(sandbox, ['lonca-run', run.dir, ...(run.readsInbox ? inboxCommand(run.dir, messageUuid(item.id), command) : command)], {
-      env: turnEnv(session, project, profileId),
+      env: turnEnv(session, project, profileId, run.dir),
       workdir: workspace.path,
       timeoutMs: 20000,
     });
@@ -1231,7 +1285,7 @@ async function resumeRun(session: Session): Promise<void> {
     const previous = transcript.items.filter((entry) => entry.runId === runId).map((entry) => ({ ...entry }));
     const run: ActiveRun = {
       runId, sessionId: session.id, workspaceId: workspace.id, sandbox: workspace.sandboxName, dir: `${RUNS_DIR}/${runId}`,
-      parser: adapters[session.agent].parser(runId),
+      parser: adapters[session.agent].parser(runId, session),
       startedAt: session.updatedAt, offset: 0, interrupted: Boolean(session.stopRequested), holdQueue: session.stopRequested?.holdQueue ?? false, launched: true, sawResult: false, outputLimitHit: false, output: null,
       item: item?.type === 'user' ? item : undefined, resumedFrom: session.resumeId,
       replay: { previous, seen: new Set() }, toolCalls: new Set(), toolQueue: Promise.resolve(), limited: false, reportedFailure: false, stopped: Boolean(session.stopRequested),

@@ -358,20 +358,21 @@ export class Lonca {
 
 /** Points the real CLIs in a sandbox at tests/support/fake-signin.mjs instead of the real services. */
 export function installFakeSignIn(sandbox: string): void {
-  // Claude is told not to check certificates. Codex does check them, so it gets a CA to trust.
+  // Claude is told not to check certificates. Codex and Gemini do check them, so they get a CA to trust.
   sandboxExec(sandbox, `mkdir -p /tmp/fake-signin && cd /tmp/fake-signin \
     && openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=fake-signin -keyout ca-key.pem -out ca.pem 2>/dev/null \
     && openssl req -newkey rsa:2048 -nodes -subj /CN=auth.openai.com -keyout key.pem -out cert.csr 2>/dev/null \
-    && printf 'subjectAltName=DNS:auth.openai.com,DNS:platform.claude.com,DNS:claude.com,DNS:api.anthropic.com\nbasicConstraints=CA:FALSE\n' > cert.ext \
+    && printf 'subjectAltName=DNS:auth.openai.com,DNS:platform.claude.com,DNS:claude.com,DNS:api.anthropic.com,DNS:oauth2.googleapis.com,DNS:www.googleapis.com,DNS:cloudcode-pa.googleapis.com,DNS:play.googleapis.com\nbasicConstraints=CA:FALSE\n' > cert.ext \
     && openssl x509 -req -days 2 -in cert.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -extfile cert.ext -out cert.pem 2>/dev/null`);
   sbx('cp', path.join(REPO_ROOT, 'tests', 'support', 'fake-signin.mjs'), `${sandbox}:/tmp/fake-signin/server.mjs`);
   // As root, because in a VM only root can have port 443.
   asRoot(sandbox, '(nohup node /tmp/fake-signin/server.mjs </dev/null) >/dev/null 2>&1 &');
   sandboxExec(sandbox, 'for _ in $(seq 1 100); do curl -s -o /dev/null http://127.0.0.1:8080/ && exit 0; sleep 0.1; done; exit 1');
   asRoot(sandbox, `
-    echo '127.0.0.1 platform.claude.com claude.com api.anthropic.com auth.openai.com' >> /etc/hosts
+    echo '127.0.0.1 platform.claude.com claude.com api.anthropic.com auth.openai.com oauth2.googleapis.com www.googleapis.com cloudcode-pa.googleapis.com play.googleapis.com' >> /etc/hosts
     claude=$(command -v claude)
     codex=$(command -v codex)
+    gemini=$(command -v gemini)
     mv "$claude" "$claude.real"
     mv "$codex" "$codex.real"
     # The VM's proxy would go to the real service, whatever /etc/hosts says.
@@ -379,10 +380,16 @@ export function installFakeSignIn(sandbox: string): void {
     printf '#!/bin/bash\\n%s\\nexport NODE_TLS_REJECT_UNAUTHORIZED=0\\nexec %s.real "$@"\\n' "$direct" "$claude" > "$claude"
     printf '#!/bin/bash\\n%s\\nexport CODEX_CA_CERTIFICATE=/tmp/fake-signin/ca.pem\\nif [ "$1 $2" = "login --device-auth" ]; then exec %s.real login --device-auth --experimental_issuer http://127.0.0.1:8080; fi\\nexec %s.real "$@"\\n' "$direct" "$codex" "$codex" > "$codex"
     chmod +x "$claude" "$codex"
+    # Gemini's stays in its bundle, where Lonca looks for its client by following the command there.
+    bundle=$(dirname "$(readlink -f "$gemini")")
+    printf '#!/bin/bash\\n%s\\nexport NODE_EXTRA_CA_CERTS=/tmp/fake-signin/ca.pem\\nexec node %s/gemini.js "$@"\\n' "$direct" "$bundle" > "$bundle/fake-signin-gemini"
+    chmod +x "$bundle/fake-signin-gemini"
+    mv "$gemini" "$gemini.real"
+    ln -s "$bundle/fake-signin-gemini" "$gemini"
   `);
 }
 
-export function setFakeSignIn(sandbox: string, options: { mode?: 'ok' | 'rejected' | 'disabled' | 'denied'; approved?: boolean }): void {
+export function setFakeSignIn(sandbox: string, options: { mode?: 'ok' | 'rejected' | 'disabled' | 'denied' | 'project' | 'ineligible' | 'no-id-token' | 'no-refresh'; approved?: boolean }): void {
   const lines = [];
   if (options.mode) lines.push(`echo ${options.mode} > /tmp/fake-signin/mode`);
   if (options.approved === true) lines.push('touch /tmp/fake-signin/approved');
@@ -395,8 +402,11 @@ export function removeFakeSignIn(sandbox: string): void {
     pkill -f '^node /tmp/fake-signin/server.mjs'
     claude=$(command -v claude)
     codex=$(command -v codex)
+    gemini=$(command -v gemini)
     mv -f "$claude.real" "$claude"
     mv -f "$codex.real" "$codex"
+    rm -f "$(dirname "$(readlink -f "$gemini")")/fake-signin-gemini"
+    mv -f "$gemini.real" "$gemini"
     grep -v platform.claude.com /etc/hosts > /tmp/hosts.clean && cat /tmp/hosts.clean > /etc/hosts
     rm -rf /tmp/hosts.clean /tmp/fake-signin
     true

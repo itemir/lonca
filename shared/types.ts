@@ -1,6 +1,6 @@
 // Types shared by the server and the web app.
 
-export type AgentId = 'claude' | 'codex';
+export type AgentId = 'claude' | 'codex' | 'gemini';
 
 export interface ModelOption {
   id: string;
@@ -333,6 +333,8 @@ export interface AgentStatus {
   usesKey?: boolean;
   /** A turn just failed because the agent's service refused these credentials. */
   rejected?: boolean;
+  /** Signed in to a Google account whose turns need a Google Cloud project, which a project's environment variables give. */
+  needsProject?: boolean;
 }
 
 export interface ProfileStatus extends AgentStatus {
@@ -355,8 +357,11 @@ export type LoginFailure =
   | 'unavailable'
   | 'port-busy';
 
-/** Whether the sign-in page sends the browser back to Lonca, or Codex's one-time code is entered on it. */
-export type LoginMethod = 'browser' | 'device';
+/**
+ * Whether the sign-in page sends the browser back to Lonca, Codex's one-time code is entered on
+ * it, or it shows Gemini a code to paste here.
+ */
+export type LoginMethod = 'browser' | 'device' | 'code';
 
 /** A sign-in under way. It never includes a credential, so it's safe to send to the browser. */
 export interface LoginState {
@@ -367,7 +372,7 @@ export interface LoginState {
   phase: LoginPhase;
   /** The page to open in a browser. It sends the browser back to Lonca, unless there's a `code`. */
   url?: string;
-  /** Claude's other page, which shows a code to paste instead, for a browser that can't get back. */
+  /** A page that shows a code to paste here: Claude's other page, for a browser that can't get back, or Gemini's. */
   pasteUrl?: string;
   /** Codex's one-time code, which the user enters on that page. */
   code?: string;
@@ -375,6 +380,8 @@ export interface LoginState {
   message?: string;
   /** What the CLI had printed when it failed, with anything secret removed. */
   output?: string;
+  /** Signed in, but to an account whose turns need a Google Cloud project, which a project's environment variables give. */
+  needsProject?: boolean;
 }
 
 /** Whether workspaces can run, which takes Docker Sandboxes, and if not, why not. */

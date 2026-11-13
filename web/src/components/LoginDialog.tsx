@@ -18,7 +18,36 @@ const CHATGPT_SECURITY = 'https://chatgpt.com/#settings/Security';
 const KEY_PAGES: Record<AgentId, string> = {
   claude: 'https://console.anthropic.com/settings/keys',
   codex: 'https://platform.openai.com/api-keys',
+  gemini: 'https://aistudio.google.com/apikey',
 };
+
+const KEY_PREFIXES: Record<AgentId, string> = { claude: 'sk-ant-', codex: 'sk-', gemini: 'AIza' };
+
+const KEY_LABELS: Record<AgentId, string> = { claude: 'API key or token', codex: 'OpenAI API key', gemini: 'Gemini API key' };
+
+const ACCOUNT_LABELS: Record<AgentId, string> = { claude: 'Claude subscription', codex: 'ChatGPT account', gemini: 'Google account' };
+
+/** Where the sign-in page is, before its link has come. */
+const SIGN_IN_HOSTS: Record<AgentId, string> = { claude: 'claude.com', codex: 'auth.openai.com', gemini: 'accounts.google.com' };
+
+/** Whose keys these are, in "That’s a key for another service. Claude keys start with sk-ant-." */
+const KEY_OWNERS: Record<AgentId, string> = { claude: 'Claude', codex: 'OpenAI', gemini: 'Gemini' };
+
+/** A sign-in of its own that doesn't need the page to come back to this computer. Claude's code to paste is part of its browser's. */
+const OTHER_WAYS: Partial<Record<AgentId, { method: LoginMethod; button: string; link: string }>> = {
+  codex: { method: 'device', button: 'Use a one-time code', link: 'use a one-time code instead' },
+  gemini: { method: 'code', button: 'Paste a code instead', link: 'paste a code instead' },
+};
+
+/** Which agent a key is for, going by how it starts. */
+function keyOwner(value: string): AgentId | null {
+  if (value.startsWith('sk-ant-')) return 'claude';
+  if (value.startsWith('sk-')) return 'codex';
+  if (value.startsWith('AIza')) return 'gemini';
+  return null;
+}
+
+const anotherServiceKey = (agent: AgentId) => `That’s a key for another service. ${KEY_OWNERS[agent]} keys start with ${KEY_PREFIXES[agent]}.`;
 
 interface FailureCopy {
   text: string;
@@ -27,11 +56,13 @@ interface FailureCopy {
   showOutput?: boolean;
   /** Trying again won't help until this has been dealt with. */
   turnOn?: { label: string; href: string };
-  /** Codex's one-time code doesn't need the browser to get back. */
+  /** The other way in doesn't need the browser to get back. */
   offerCode?: boolean;
+  /** Another account may do, or a key. */
+  offerKey?: boolean;
 }
 
-function failureCopy(failure: LoginFailure | undefined, name: string, message?: string): FailureCopy {
+function failureCopy(failure: LoginFailure | undefined, name: string, agent: AgentId, message?: string): FailureCopy {
   switch (failure) {
     case 'rejected':
       return { text: `${name} didn’t accept that sign-in. It may have expired or already been used.`, action: 'Start again' };
@@ -44,6 +75,14 @@ function failureCopy(failure: LoginFailure | undefined, name: string, message?: 
         turnOn: { label: 'Open ChatGPT settings', href: CHATGPT_SECURITY },
       };
     case 'denied':
+      // Gemini's says why an account can't use it.
+      if (message) {
+        return {
+          text: `${name} won’t take this account. ${message} To use another, choose it on Google’s page, or open the sign-in page in a private window.`,
+          action: 'Try another account',
+          offerKey: true,
+        };
+      }
       return { text: 'The sign-in page didn’t approve this. If you cancelled it there, you can try again.', action: 'Try again' };
     case 'no-link':
       return { text: `Lonca couldn’t get a sign-in link from ${name}.`, action: 'Try again', showOutput: true };
@@ -53,7 +92,10 @@ function failureCopy(failure: LoginFailure | undefined, name: string, message?: 
       return { text: `Lonca couldn’t start the sign-in${message ? `: ${message}` : '.'}`, action: 'Try again' };
     case 'port-busy':
       return {
-        text: `The sign-in page comes back to port ${message} on this computer, and something else is using it. Close that and try again, or use a one-time code.`,
+        text: agent === 'gemini'
+          // Each try has a port of its own.
+          ? `The sign-in page comes back to port ${message} on this computer, and something else took it. Try again, or paste a code instead.`
+          : `The sign-in page comes back to port ${message} on this computer, and something else is using it. Close that and try again, or use a one-time code.`,
         action: 'Try again',
         offerCode: true,
       };
@@ -132,10 +174,10 @@ function BrowserSteps({ login, otherWay, onOtherWay }: {
   );
 }
 
-const ANOTHER_SERVICE_KEY = 'That’s a key for another service. Claude keys start with sk-ant-.';
-
-function ClaudeSteps({ profileId, login, code, setCode, codeError, setCodeError, onUseAsKey }: {
+/** A page that shows a code, and where to paste it: Claude's, when its page can't come back, and Gemini's other way in. */
+function PasteSteps({ profileId, agent, login, code, setCode, codeError, setCodeError, onUseAsKey }: {
   profileId: string;
+  agent: AgentId;
   login: LoginState | undefined;
   code: string;
   setCode: (value: string) => void;
@@ -147,8 +189,9 @@ function ClaudeSteps({ profileId, login, code, setCode, codeError, setCodeError,
   const input = useRef<HTMLInputElement>(null);
   const url = safeUrl(login?.pasteUrl);
   const working = login?.phase === 'submitting' || login?.phase === 'saving';
-  const looksLikeKey = /^sk-/.test(code.trim());
-  const someOtherKey = /^sk-(?!ant-)/.test(code.trim());
+  const owner = keyOwner(code.trim());
+  const looksLikeKey = owner !== null;
+  const someOtherKey = looksLikeKey && owner !== agent;
   // Having a code in hand means the page has been dealt with, however it got here.
   const active = opened || working || Boolean(code.trim());
   // Pressing Continue again would only repeat the error. The way on is its link, or a new value.
@@ -158,7 +201,7 @@ function ClaudeSteps({ profileId, login, code, setCode, codeError, setCodeError,
     event.preventDefault();
     if (!code.trim() || working) return;
     if (looksLikeKey) {
-      setCodeError(someOtherKey ? ANOTHER_SERVICE_KEY : 'That’s a key, not a sign-in code.');
+      setCodeError(someOtherKey ? anotherServiceKey(agent) : 'That’s a key, not a sign-in code.');
       input.current?.select();
       return;
     }
@@ -176,7 +219,7 @@ function ClaudeSteps({ profileId, login, code, setCode, codeError, setCodeError,
       <li className={`login-step ${active ? 'step-past' : 'step-now'}`}>
         <span className="login-step-number" aria-hidden="true">1</span>
         <div className="login-step-body">
-          <div className="login-step-title">Approve access on {hostOf(url) || 'claude.com'}</div>
+          <div className="login-step-title">Approve access on {hostOf(url) || SIGN_IN_HOSTS[agent]}</div>
           <div className="login-actions">
             {url ? (
               <a
@@ -310,18 +353,21 @@ function CodexSteps({ login }: { login: LoginState | undefined }) {
   );
 }
 
-function KeyForm({ profileId, agent, name, initial, onSaved, onCancel, onUseAsCode, onChecking }: {
+function KeyForm({ profileId, agent, name, initial, canUseAsCode, onSaved, onCancel, onUseAsCode, onChecking }: {
   profileId: string;
   agent: AgentId;
   name: string;
   initial: string;
+  /** There's a sign-in under way that's waiting for a code to be pasted. */
+  canUseAsCode: boolean;
   onSaved: (verified: boolean) => void;
   onCancel: () => void;
   onUseAsCode: (value: string) => void;
   onChecking: (checking: boolean) => void;
 }) {
   const isClaude = agent === 'claude';
-  const prefix = isClaude ? 'sk-ant-' : 'sk-';
+  const prefix = KEY_PREFIXES[agent];
+  const catalog = useStore((store) => store.catalog);
   const [value, setValue] = useState(initial);
   const [error, setError] = useState<string | null>(null);
   const [notAKey, setNotAKey] = useState(false);
@@ -338,12 +384,13 @@ function KeyForm({ profileId, agent, name, initial, onSaved, onCancel, onUseAsCo
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!trimmed || checking) return;
-    if (isClaude && /^sk-(?!ant-)/.test(trimmed)) return refuse(ANOTHER_SERVICE_KEY);
-    if (!isClaude && trimmed.startsWith('sk-ant-')) return refuse('That’s a key for Claude. Sign in to Claude with it instead.');
+    const owner = keyOwner(trimmed);
+    if (isClaude && owner === 'codex') return refuse(anotherServiceKey(agent));
+    if (owner && owner !== agent) return refuse(`That’s a key for ${catalog[owner].label}. Sign in to ${catalog[owner].label} with it instead.`);
     if (!trimmed.startsWith(prefix)) {
-      return refuse(isClaude
-        ? `That isn’t a key. Keys start with ${prefix}.`
-        : `That isn’t a key. Keys start with ${prefix}. A sign-in code goes in your browser.`);
+      return refuse(agent === 'codex'
+        ? `That isn’t a key. Keys start with ${prefix}. A sign-in code goes in your browser.`
+        : `That isn’t a key. Keys start with ${prefix}.`);
     }
     setChecking(true);
     onChecking(true);
@@ -364,7 +411,7 @@ function KeyForm({ profileId, agent, name, initial, onSaved, onCancel, onUseAsCo
   return (
     <form onSubmit={save}>
       <label className="field login-key-field">
-        <span className="field-label">{isClaude ? 'API key or token' : 'OpenAI API key'}</span>
+        <span className="field-label">{KEY_LABELS[agent]}</span>
         <input
           ref={input}
           className={`input input-mono ${error ? 'input-error' : ''}`}
@@ -385,13 +432,13 @@ function KeyForm({ profileId, agent, name, initial, onSaved, onCancel, onUseAsCo
       {error && (
         <p className="form-error" role="alert">
           {error}
-          {notAKey && isClaude && !/^sk-/.test(trimmed) && <> <button type="button" className="link-button" onClick={() => onUseAsCode(trimmed)}>Use it as the sign-in code</button></>}
+          {notAKey && canUseAsCode && !keyOwner(trimmed) && <> <button type="button" className="link-button" onClick={() => onUseAsCode(trimmed)}>Use it as the sign-in code</button></>}
         </p>
       )}
       <p className="login-hint login-key-help">
-        {isClaude
-          ? <>An API key bills your Anthropic account directly, separately from any Claude subscription. A token from <code>claude setup-token</code> uses your subscription instead. </>
-          : 'An API key bills your OpenAI account directly, separately from ChatGPT. '}
+        {isClaude && <>An API key bills your Anthropic account directly, separately from any Claude subscription. A token from <code>claude setup-token</code> uses your subscription instead. </>}
+        {agent === 'codex' && 'An API key bills your OpenAI account directly, separately from ChatGPT. '}
+        {agent === 'gemini' && 'An API key bills its Google Cloud project, or uses its free tier, separately from any Google AI subscription. '}
         Lonca keeps it on this computer and gives it to every workspace.
       </p>
       <a className="link-button" href={KEY_PAGES[agent]} target="_blank" rel="noreferrer">Create an API key</a>
@@ -418,9 +465,10 @@ function LoginFlow({ profileId, agent }: { profileId: string; agent: AgentId }) 
   const catalog = useStore((store) => store.catalog);
   const several = useStore((store) => hasSeveral(store.profiles, agent));
   const isClaude = agent === 'claude';
-  const name = profile ? profileName(profile, catalog) : isClaude ? 'Claude' : 'Codex';
+  const name = profile ? profileName(profile, catalog) : catalog[agent].label;
   // A phone is rarely the computer Lonca runs on, which the sign-in page comes back to.
   const phone = useIsPhone();
+  const otherWay = OTHER_WAYS[agent];
   const [route, setRoute] = useState<'account' | 'key'>(status.rejected && status.usesKey ? 'key' : 'account');
   const [savedKey, setSavedKey] = useState<{ verified: boolean } | null>(null);
   const [pasting, setPasting] = useState(phone && isClaude);
@@ -451,9 +499,9 @@ function LoginFlow({ profileId, agent }: { profileId: string; agent: AgentId }) 
   }, [profileId, applyEvent]);
 
   useEffect(() => {
-    if (route === 'account' && !started.current && !login) start(phone && !isClaude ? 'device' : 'browser');
+    if (route === 'account' && !started.current && !login) start(phone && otherWay ? otherWay.method : 'browser');
     if (login) started.current = true;
-  }, [route, login, start, phone, isClaude]);
+  }, [route, login, start, phone, otherWay]);
 
   // The page that comes back couldn't be offered, so the code is the way in.
   useEffect(() => {
@@ -466,10 +514,12 @@ function LoginFlow({ profileId, agent }: { profileId: string; agent: AgentId }) 
   }, [profileId, setLoginProfile]);
 
   const finished = login?.phase === 'done' || savedKey?.verified === true;
+  // Signed in, but with something left to do, which mustn't vanish before it's been read.
+  const needsProject = login?.phase === 'done' && login.needsProject === true;
 
   // Codex finishes while the person is on another tab, so the message waits for them to return.
   useEffect(() => {
-    if (!finished) return;
+    if (!finished || needsProject) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const arm = () => {
       if (!timer && document.visibilityState === 'visible') timer = setTimeout(close, SUCCESS_HOLD_MS);
@@ -480,7 +530,7 @@ function LoginFlow({ profileId, agent }: { profileId: string; agent: AgentId }) 
       clearTimeout(timer);
       document.removeEventListener('visibilitychange', arm);
     };
-  }, [finished, close]);
+  }, [finished, needsProject, close]);
 
   const failed = login?.phase === 'failed';
   const missing = route === 'account' && started.current && !login && !startFailure && !starting;
@@ -490,9 +540,9 @@ function LoginFlow({ profileId, agent }: { profileId: string; agent: AgentId }) 
     if (missing && !lostServer.current) setLoginProfile(null);
   }, [missing, setLoginProfile]);
   const failure = failed
-    ? failureCopy(login.failure, name, login.message)
+    ? failureCopy(login.failure, name, agent, login.message)
     : startFailure
-      ? failureCopy('unavailable', name, startFailure)
+      ? failureCopy('unavailable', name, agent, startFailure)
       : interrupted
         ? { text: 'Lonca restarted during this sign-in.', action: 'Start again' }
         : null;
@@ -506,6 +556,23 @@ function LoginFlow({ profileId, agent }: { profileId: string; agent: AgentId }) 
     if (!showOutput && !login?.output) void api.loginOutput(profileId).then(setOutput, () => {});
     setOutputOpen(!showOutput);
   };
+
+  if (needsProject) {
+    return (
+      <Modal title={`${name} is signed in`} onClose={close} closeOnBackdrop className="login-modal">
+        <div className="login-done login-unchecked" role="status">
+          <AlertTriangle size={15} />
+          <div>
+            <div>This account can only use Gemini through a Google Cloud project. To use it in a project here, add <code>GOOGLE_CLOUD_PROJECT</code> with the Cloud project’s ID to that project’s environment variables.</div>
+            <div className="login-hint">{status.summary}</div>
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="button button-primary" onClick={close}>OK</button>
+        </div>
+      </Modal>
+    );
+  }
 
   if (finished) {
     return (
@@ -541,7 +608,7 @@ function LoginFlow({ profileId, agent }: { profileId: string; agent: AgentId }) 
     <Modal title={`Sign in to ${name}`} onClose={checkingKey ? () => {} : close} closeOnBackdrop={false} className="login-modal">
       <div className="segmented" role="tablist" aria-label={`How to sign in to ${name}`}>
         <button type="button" role="tab" aria-selected={route === 'account'} className={route === 'account' ? 'active' : ''} disabled={checkingKey} onClick={() => setRoute('account')}>
-          {isClaude ? 'Claude subscription' : 'ChatGPT account'}
+          {ACCOUNT_LABELS[agent]}
         </button>
         <button type="button" role="tab" aria-selected={route === 'key'} className={route === 'key' ? 'active' : ''} disabled={checkingKey} onClick={() => setRoute('key')}>
           API key
@@ -554,6 +621,7 @@ function LoginFlow({ profileId, agent }: { profileId: string; agent: AgentId }) 
           agent={agent}
           name={name}
           initial={keyDraft}
+          canUseAsCode={isClaude || (login?.method === 'code' && login.phase === 'waiting')}
           onSaved={(verified) => setSavedKey({ verified })}
           onChecking={setCheckingKey}
           onCancel={close}
@@ -574,13 +642,14 @@ function LoginFlow({ profileId, agent }: { profileId: string; agent: AgentId }) 
               <div className="login-failure-actions">
                 {'turnOn' in failure && failure.turnOn && <a className="button button-primary" href={failure.turnOn.href} target="_blank" rel="noreferrer">{failure.turnOn.label}</a>}
                 <button type="button" className={`button ${'turnOn' in failure && failure.turnOn ? '' : 'button-primary'}`} onClick={() => start(login?.method ?? 'browser')}>{failure.action}</button>
-                {'offerCode' in failure && failure.offerCode && <button type="button" className="button" onClick={() => start('device')}>Use a one-time code</button>}
-                {'turnOn' in failure && failure.turnOn && <button type="button" className="button" onClick={() => setRoute('key')}>Use an API key</button>}
+                {'offerCode' in failure && failure.offerCode && otherWay && <button type="button" className="button" onClick={() => start(otherWay.method)}>{otherWay.button}</button>}
+                {(('turnOn' in failure && failure.turnOn) || ('offerKey' in failure && failure.offerKey)) && <button type="button" className="button" onClick={() => setRoute('key')}>Use an API key</button>}
               </div>
             </div>
-          ) : isClaude && pasting ? (
-            <ClaudeSteps
+          ) : (isClaude && pasting) || login?.method === 'code' ? (
+            <PasteSteps
               profileId={profileId}
+              agent={agent}
               login={login}
               code={code}
               setCode={setCode}
@@ -598,7 +667,7 @@ function LoginFlow({ profileId, agent }: { profileId: string; agent: AgentId }) 
           ) : login?.method === 'device' ? (
             <CodexSteps login={login} />
           ) : (
-            <BrowserSteps login={login} otherWay={login?.url ? 'use a one-time code instead' : null} onOtherWay={() => start('device')} />
+            <BrowserSteps login={login} otherWay={login?.url && otherWay ? otherWay.link : null} onOtherWay={() => otherWay && start(otherWay.method)} />
           )}
           {isClaude && several && !failure && <p className="login-hint login-account-hint">{CLAUDE_ACCOUNT_HINT}</p>}
           <div className="login-footer">
