@@ -138,6 +138,7 @@ function UserMessage({ item, sessionId }: { item: UserItem; sessionId: string })
   return (
     <div className={`user-message ${item.queued ? 'queued' : ''} ${item.from === 'lead' ? 'from-lead' : ''}`}>
       {item.from === 'lead' && <div className="message-from">From Lead <span className="from-note">Private to this agent, the Lead and you.</span></div>}
+      {item.via === 'slack' && <div className="message-from">From Slack</div>}
       <div className="user-text">{item.text}</div>
       {item.attachments && item.attachments.length > 0 && (
         <div className="attachment-list">

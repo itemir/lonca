@@ -198,6 +198,8 @@ export class Lonca {
         LONCA_NO_NOTIFY: '1',
         // Saving a made-up key shouldn't need the real service to accept it. Most tests want that.
         LONCA_SKIP_CREDENTIAL_CHECK: '1',
+        // Nowhere, so that no test can reach Slack. One that needs Slack gives tests/support/fake-slack.ts's address.
+        LONCA_SLACK_API_URL: 'http://127.0.0.1:9/slack-api',
         ...(REAL_SANDBOX ? {} : fakeSbxEnv),
         PORT: String(this.port),
         ...this.env,

@@ -18,6 +18,7 @@ import { attachTerminal, closeWorkspaceTerminals, reconcileTerminals, runSetupSc
 import { reapLeftoverLogins } from './logins.ts';
 import { reapSbxLogin } from './sbx-login-pid.ts';
 import { reconcileProjects, stopHostGit } from './projects.ts';
+import { startSlack } from './slack/index.ts';
 import { errorMessage } from './util.ts';
 import { markInterruptedWork, onWorkspaceTeardown, reconcileWorkspaces, setSetupScriptStarter } from './workspaces.ts';
 
@@ -154,6 +155,8 @@ reapSbxLogin();
 reconcileProjects();
 markInterruptedWork();
 rememberUiPort(HTTP_PORT);
+// An outbound connection, which works whatever Docker Sandboxes is doing.
+startSlack();
 
 server.listen(HTTP_PORT, '127.0.0.1', () => {
   const url = launchUrl();

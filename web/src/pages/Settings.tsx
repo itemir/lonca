@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Check, MoreHorizontal, PanelLeft, Plus } from 'lucide-react';
 import { AGENTS, isReady, profileName, profileStatus, profilesOf } from '../../../shared/profiles.ts';
-import type { AgentId, AppSettings, Profile } from '../../../shared/types.ts';
+import { SLACK_MANIFEST } from '../../../shared/slack.ts';
+import type { AgentId, AppSettings, Profile, SlackStatus } from '../../../shared/types.ts';
 import { api } from '../api.ts';
 import { CLAUDE_ACCOUNT_HINT } from '../components/LoginDialog.tsx';
 import { ModelPicker } from '../components/ModelPicker.tsx';
@@ -246,6 +247,183 @@ function SettingSwitch({ title, note, on, onChange }: { title: string; note: str
   );
 }
 
+const SLACK_NEW_APP = 'https://api.slack.com/apps?new_app=1';
+const MANIFEST = JSON.stringify(SLACK_MANIFEST, null, 2);
+
+function useCopied(): [boolean, (text: string) => void] {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  return [copied, (text) => {
+    void navigator.clipboard.writeText(text).catch(() => {});
+    setCopied(true);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 2000);
+  }];
+}
+
+/** What the error means for the user, and what they can do about it, with the code Slack gave. */
+function slackProblem({ error, stopped }: SlackStatus): string {
+  if (error === 'link_disabled') return 'Socket Mode was turned off in the app’s settings (link_disabled). Turn it on, then save the tokens again.';
+  if (error === 'missing_scope') return 'The app doesn’t have a permission Lonca needs (missing_scope). Make it again from the manifest, then paste its tokens.';
+  if (stopped) return `Slack stopped accepting the app’s tokens (${error}). Paste new ones to connect again.`;
+  return `Lonca can’t connect to Slack (${error}). It keeps trying.`;
+}
+
+function SlackTokens({ onSaved }: { onSaved?: () => void }) {
+  const [bot, setBot] = useState('');
+  const [app, setApp] = useState('');
+  const [saving, setSaving] = useState(false);
+  const ready = bot.trim() && app.trim() && !saving;
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!ready) return;
+    setSaving(true);
+    const saved = await attempt(() => api.saveSlack(bot, app));
+    setSaving(false);
+    if (!saved) return;
+    setBot('');
+    setApp('');
+    onSaved?.();
+  };
+  return (
+    <form className="slack-tokens" onSubmit={save}>
+      <label className="field">
+        <span className="field-label">Bot token</span>
+        <input className="input input-mono" type="password" autoComplete="off" placeholder="xoxb-…" value={bot} onChange={(event) => setBot(event.target.value)} />
+      </label>
+      <label className="field">
+        <span className="field-label">App-level token</span>
+        <div className="input-row">
+          <input className="input input-mono" type="password" autoComplete="off" placeholder="xapp-…" value={app} onChange={(event) => setApp(event.target.value)} />
+          <button type="submit" className="button" disabled={!ready}>{saving ? <><Spinner size={12} /> Checking…</> : 'Save tokens'}</button>
+        </div>
+      </label>
+    </form>
+  );
+}
+
+function SlackSetup() {
+  const [copied, copy] = useCopied();
+  return (
+    <div className="settings-block">
+      <ol className="slack-steps">
+        <li>
+          <a href={SLACK_NEW_APP} target="_blank" rel="noreferrer">Create a Slack app</a> from a manifest, in the Slack workspace you use, with this one. It asks only for what a DM with you needs, and nothing about channels.
+          <div className="slack-manifest">
+            <pre className="isolation-command">{MANIFEST}</pre>
+            <button type="button" className="button button-small" onClick={() => copy(MANIFEST)}>{copied ? 'Copied' : 'Copy'}</button>
+          </div>
+        </li>
+        <li>Under <strong>Basic Information</strong>, generate an app-level token with the <code>connections:write</code> scope.</li>
+        <li>Under <strong>Install App</strong>, install it to your workspace, which gives it a bot token.</li>
+        <li>Paste both tokens here. Lonca checks them with Slack before saving them.</li>
+      </ol>
+      <SlackTokens />
+    </div>
+  );
+}
+
+const PAIRING_ENDED: Record<NonNullable<SlackStatus['pairingEnded']>, string> = {
+  expired: 'The last code expired. ',
+  attempts: 'The last code stopped working after five wrong ones. ',
+  otherApp: 'The last code reached a different Slack app than the bot token’s, so the tokens are from two apps. Paste both from the same app, then pair. ',
+};
+
+function SlackPairing() {
+  const slack = useStore((store) => store.slack);
+  const [copied, copy] = useCopied();
+  const pair = () => void attempt(() => api.pairSlack());
+  const { pairing, owner } = slack;
+  if (pairing) {
+    const until = new Date(pairing.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return (
+      <div className="slack-pairing">
+        <p className="field-help">Open the app in Slack, under Apps, and send it this code. It works once, until {until}. {owner ? 'Whoever sends it becomes who Lonca answers to.' : ''}</p>
+        <div className="login-code-box">
+          <span className="login-code">{pairing.code}</span>
+          <button type="button" className="button button-small" onClick={() => copy(pairing.code)}>{copied ? 'Copied' : 'Copy'}</button>
+        </div>
+      </div>
+    );
+  }
+  const ended = slack.pairingEnded ? PAIRING_ENDED[slack.pairingEnded] : '';
+  if (owner) {
+    return (
+      <p className="field-help slack-paired">
+        Paired with the Slack user <code>{owner.user}</code>. Lonca answers only them, and only in their DM with the app. {ended}
+        <button type="button" className="link-button" onClick={pair}>Pair again</button>
+      </p>
+    );
+  }
+  return (
+    <div className="settings-row">
+      <div className="settings-row-text">
+        <strong>Pairing</strong>
+        <span className="settings-note">{ended}Until you pair, Lonca doesn’t answer anyone in Slack.</span>
+      </div>
+      <button type="button" className="button button-primary" onClick={pair}>Get a code</button>
+    </div>
+  );
+}
+
+function SlackSettings() {
+  const slack = useStore((store) => store.slack);
+  const secrets = useStore((store) => store.secrets);
+  const replies = useStore((store) => store.settings.slackReplies);
+  const [replacing, setReplacing] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const configured = Boolean(secrets.slackBotToken && secrets.slackAppToken);
+  return (
+    <section className="settings-section">
+      <h2>Slack</h2>
+      <p className="field-help slack-intro">
+        Talk to your Leads from Slack. When a Lead needs you, its reply arrives in your DM with your own Slack app, in a thread for its workspace, and what you write in that thread reaches it as if you’d typed it here. Lonca never uses a channel, and the app’s tokens stay on this computer.
+      </p>
+      {slack.postMayArrive && <p className="field-help field-warning">A post Lonca had already sent hadn’t been answered by Slack when it stopped waiting, so it may still arrive where it was going.</p>}
+      {!configured ? <SlackSetup /> : (
+        <div className="settings-block">
+          <div className="settings-row">
+            <div className="settings-row-text">
+              <strong>Slack app</strong>
+              <span className={`settings-note ${slack.connection === 'error' ? 'settings-note-error' : ''}`}>
+                {slack.connection === 'connected' && <><Check size={13} className="check-success" /> Connected to {slack.team ?? 'Slack'}</>}
+                {slack.connection === 'connecting' && <><Spinner size={12} /> Connecting{slack.team ? ` to ${slack.team}` : ''}…</>}
+                {slack.connection === 'error' && slackProblem(slack)}
+                {slack.connection === 'off' && 'Not connected'}
+              </span>
+            </div>
+            <button type="button" className="button" onClick={() => setConfirm(true)}>Disconnect</button>
+          </div>
+          {slack.postError && <p className="field-help field-warning slack-paired">Slack hasn’t taken a post yet ({slack.postError}). Lonca keeps trying, and posts what’s waiting in order once it does.</p>}
+          <SlackPairing />
+          {slack.owner && (
+            <SettingSwitch
+              title="Send Leads’ replies to Slack"
+              note="When a Lead needs you, its reply goes to its workspace’s thread, whether or not Lonca is open."
+              on={replies}
+              onChange={(slackReplies) => void attempt(() => api.updateSettings({ slackReplies }))}
+            />
+          )}
+          {replacing
+            ? <SlackTokens onSaved={() => setReplacing(false)} />
+            : <p className="field-help">The bot token ends in {secrets.slackBotToken?.replace(/•/g, '')} and the app-level token in {secrets.slackAppToken?.replace(/•/g, '')}. <button type="button" className="link-button" onClick={() => setReplacing(true)}>Replace them</button></p>}
+        </div>
+      )}
+      {confirm && (
+        <ConfirmDialog
+          title="Disconnect Slack?"
+          body="Lonca forgets the app’s tokens, who it’s paired with and each workspace’s thread, and drops anything still waiting to be posted. What’s already in Slack stays there."
+          action="Disconnect"
+          danger
+          onConfirm={() => void attempt(() => api.disconnectSlack())}
+          onClose={() => setConfirm(false)}
+        />
+      )}
+    </section>
+  );
+}
+
 const SANDBOX_DOCS = 'https://docs.docker.com/ai/sandboxes/';
 
 function SignOutWarning() {
@@ -434,6 +612,7 @@ export function Settings() {
           <h2>Integrations</h2>
           <GithubCard />
         </section>
+        <SlackSettings />
         <section className="settings-section">
           <h2>Commits and branches</h2>
           <div className="field-row">

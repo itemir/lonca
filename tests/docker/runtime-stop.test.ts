@@ -132,6 +132,9 @@ it.skipIf(REAL_SANDBOX)('does not discard a workspace run while its runtime cann
     lonca.setOffline(false);
     await lonca.start();
   }
+  // The server answers a moment before it has reconnected, and until then a retry is told, rightly,
+  // that Lonca is still reconnecting to the agent.
+  await until('Lonca to reconnect', async () => (await lonca.api<AppState>('GET', '/state')).system.sandbox.state === 'ready');
   await lonca.api('POST', `/workspaces/${workspace.id}/retry`);
   await until('deletion after reconnecting', async () => !await lonca.workspace(workspace.id));
   expect(sandboxRunning(workspace.sandboxName)).toBeNull();

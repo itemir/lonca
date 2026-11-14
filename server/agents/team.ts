@@ -8,6 +8,7 @@ import {
 } from '../../shared/profiles.ts';
 import { notifyUser } from '../notify.ts';
 import { closePort, forwardPort, listPorts } from '../ports.ts';
+import { type NeedsYou, postLeadReply } from '../slack/index.ts';
 import { getProject, getSession, getWorkspace, state } from '../store.ts';
 import { getProfile, system } from '../system.ts';
 import { transcriptFor } from '../transcript.ts';
@@ -424,11 +425,19 @@ function wakeLead(workspaceId: string): void {
   clearReported(unreported);
 }
 
-function needsYou(lead: Session, text: string): void {
+const NEEDS_YOU: Record<NeedsYou, string> = {
+  finished: 'finished.',
+  paused: 'paused and needs you to let it continue.',
+  limit: 'reached a usage limit.',
+  failed: 'stopped with an error.',
+};
+
+export function needsYou(lead: Session, why: NeedsYou): void {
   lead.unread = true;
   publishSession(lead);
   const workspace = getWorkspace(lead.workspaceId);
-  if (workspace) notifyUser(`The Lead in ${workspace.name} ${text}`);
+  if (workspace) notifyUser(`The Lead in ${workspace.name} ${NEEDS_YOU[why]}`);
+  postLeadReply(lead, why);
 }
 
 function settled(workspaceId: string, session?: Session): void {
@@ -439,10 +448,10 @@ function settled(workspaceId: string, session?: Session): void {
     console.error('could not wake a Lead:', error instanceof Error ? error.message : error);
   }
   if (session?.role !== 'lead' || session.closedAt || session.status === 'running') return;
-  if (session.lastOutcome === 'limit') needsYou(session, 'reached a usage limit.');
-  else if (session.lastOutcome === 'failed') needsYou(session, 'stopped with an error.');
+  if (session.lastOutcome === 'limit') needsYou(session, 'limit');
+  else if (session.lastOutcome === 'failed') needsYou(session, 'failed');
   // It's waiting for its agents, or has more to do, so this isn't the end of its work.
-  else if (session.lastOutcome === 'completed' && session.queue.length === 0 && !agentsOf(workspaceId).some(isWorking)) needsYou(session, 'finished.');
+  else if (session.lastOutcome === 'completed' && session.queue.length === 0 && !agentsOf(workspaceId).some(isWorking)) needsYou(session, 'finished');
 }
 
 function handover(workspace: Workspace): string | undefined {
@@ -535,7 +544,7 @@ setTeamHooks({
   handover,
   paused(lead, why) {
     notice(lead.id, undefined, 'warning', why);
-    needsYou(lead, 'paused and needs you to let it continue.');
+    needsYou(lead, 'paused');
   },
   limitReached,
 });

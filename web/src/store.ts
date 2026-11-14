@@ -3,7 +3,7 @@ import { DEFAULT_CATALOG } from '../../shared/catalog.ts';
 import { defaultProfile } from '../../shared/profiles.ts';
 import type {
   AgentId, AppSettings, AppState, Catalog, ChatItem, ClientEvent, LoginState, Me, Profile, Project, SecretsStatus, ServerEvent, Session,
-  SystemStatus, TerminalInfo, Workspace,
+  SlackStatus, SystemStatus, TerminalInfo, Workspace,
 } from '../../shared/types.ts';
 import { api, onUnauthorized } from './api.ts';
 import { accessToken, socketUrl, tokenAccepted, tokenRejected } from './auth.ts';
@@ -60,6 +60,7 @@ interface Store {
   catalog: Catalog;
   settings: AppSettings;
   secrets: SecretsStatus;
+  slack: SlackStatus;
   transcripts: Record<string, Transcript>;
   /** Why a chat's last load failed. An open chat keeps retrying while this is set. */
   transcriptErrors: Record<string, string>;
@@ -153,9 +154,10 @@ export const useStore = create<Store>((set, get) => ({
   settings: {
     branchPrefix: '', gitName: '', gitEmail: '', defaultAgent: 'claude', defaultModel: 'claude-opus-5-5', defaultEffort: 'high',
     leadDefault: { agent: 'claude', model: 'claude-opus-5-5', effort: 'high' }, leadMaxAgents: 4, notifications: true,
-    confirmArchive: true,
+    confirmArchive: true, slackReplies: true,
   },
-  secrets: { claudeToken: null, githubToken: null },
+  secrets: { claudeToken: null, githubToken: null, slackBotToken: null, slackAppToken: null },
+  slack: { connection: 'off' },
   transcripts: {},
   transcriptErrors: {},
   tabs: loadTabs(),
@@ -212,6 +214,9 @@ export const useStore = create<Store>((set, get) => ({
         break;
       case 'settings':
         set({ settings: event.settings, secrets: event.secrets });
+        break;
+      case 'slack':
+        set({ slack: event.slack });
         break;
       case 'chat.item':
       case 'chat.delta':

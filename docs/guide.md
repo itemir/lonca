@@ -27,7 +27,49 @@ A workspace has one Lead at a time. Close it and you can start another, which is
 - **Ports.** Besides a workspace's ten [published ports](#ports), the Lead can forward a port on your `localhost` to any port in its virtual machine, so that you can open a server it's running there. Ask it to, and it gives you the link. It's told what's listening there, and to restart a server that only listens on `localhost` inside the VM, which you couldn't reach. Forwards are listed at the top of its conversation and in the menu beside the trash icon, each with a button to close it. They all close when the workspace stops.
 - **Stopping.** Stop on the Lead stops its turn. **Stop the agents**, or Stop in an agent's tab, stops them until you say otherwise, and the Lead can't restart an agent you stopped.
 - **The playbook.** What Leads are told about how to work, in Markdown: when to delegate, who to use, how to treat reviews. Lonca ships a template. Edit it in Settings, which saves `~/.lonca/lead.md`. A project can have its own in place of that, in its settings, saved as `~/.lonca/projects/<project>/lead.md`. Neither is inside a workspace, so agents can't change them. Leads follow a change from their next turn.
-- **When it needs you.** A dot appears on the tab, the sidebar and the page's title. If you aren't looking at Lonca, your computer also shows a notification, which you can turn off in Settings. On macOS these come from Script Editor, so it has to be allowed under System Settings > Notifications.
+- **When it needs you.** A dot appears on the tab, the sidebar and the page's title. If you aren't looking at Lonca, your computer also shows a notification, which you can turn off in Settings. On macOS these come from Script Editor, so it has to be allowed under System Settings > Notifications. With [Slack](#slack) set up, its reply goes to your DM there too.
+
+## Slack
+
+You can talk to your Leads from Slack. When a Lead needs you, its reply arrives in your DM with a Slack app of your own, in a thread for its workspace, and what you write in that thread reaches the Lead as if you'd typed it in Lonca. It's for when you're away from Lonca, on a phone say.
+
+### Setting it up
+
+Settings > Slack shows the steps:
+
+1. Create a Slack app [from a manifest](https://api.slack.com/apps?new_app=1), in your Slack workspace, with the one Settings shows. It asks only for what a DM with you needs: to open one, read it, post and add a reaction. It uses Socket Mode, a connection Lonca opens to Slack, so nothing on your computer has to be reachable from the internet.
+2. Under **Basic Information**, generate an app-level token with the `connections:write` scope.
+3. Under **Install App**, install it to your workspace, which gives it a bot token.
+4. Paste both tokens into Settings and save. Lonca checks them with Slack first, and shows the Slack workspace's name once it's connected.
+
+Then open the app in Slack, under Apps, and send it the code Settings shows. It works once, for ten minutes, and five wrong codes end it, so nobody can guess it. That tells Lonca who you are. Until then, and for anyone else, Lonca doesn't answer in Slack. A code sent to a different app than the bot token's can't pair, and Settings says the tokens are from two apps. **Pair again** in Settings gives a new code, and whoever sends it becomes who Lonca answers to. **Disconnect** forgets the tokens, who's paired, and every workspace's thread. A post Slack has already been sent can't be called back, so Disconnect, or pairing someone else, waits up to ten seconds for Slack to answer for it, and Settings says if one may still arrive after that.
+
+The tokens are kept with Lonca's others, in `~/.lonca/secrets.json`. They never enter a workspace, and Leads have no access to them or to Lonca's connection to Slack, though like any agent they can reach the public internet, which includes Slack.
+
+### What's posted, and when
+
+Lonca posts when a Lead needs you, at the moments the dot appears: it finished, with none of its agents still working, it paused after 30 turns without a word from you, it reached a usage limit, or it stopped with an error. A limit or an error is posted even while its agents work, since the Lead can't carry on without you. It posts the Lead's last reply from its latest turn, with a line saying why for the last three. Never its thinking, its tool calls or its agents' tabs. It posts whether or not Lonca is open in a browser.
+
+The first time a workspace needs you, a message naming it, its project and its title starts its thread. A long reply is split between paragraphs. One that would take more than four messages is cut short, and the rest is in Lonca. A reply is a model's words, so nothing in it can notify anyone: a mention such as `@here` shows as text. Links aren't unfurled. The switch under Settings > Slack stops replies being posted.
+
+A post that can't be made when it's due, because Slack can't be reached, asks Lonca to slow down or refuses it, waits and is tried again, in order, through a restart, and Settings says what Slack said. One Slack won't take at all, as too long say, is replaced by a note that the reply is in Lonca. When a request goes unanswered, Lonca waits a minute and a half, then looks for the post in the thread before making it again, so it isn't posted twice. Slack offers no way to rule that out entirely, so a request that lands even later can still post it twice.
+
+### Replying
+
+Reply in the workspace's thread. Your message goes to the Lead exactly as one typed in Lonca does: it lets a paused Lead continue, clears the dot, and wakes a stopped workspace. Claude reads it at its next step if it's working, and Codex and Gemini once their turn ends. The Lead is told the message came from Slack, and that you'll read its answer there, possibly on a phone. Your words are left as you wrote them, and the chat marks them **From Slack**. An eyes reaction says your message reached Lonca. If it can't go to the Lead, because the workspace is archived or has no Lead, Lonca says why in the thread.
+
+Your messages reach the Lead in the order you wrote them. Lonca keeps each one Slack announces, and passes it on as the thread shows it. If the thread still doesn't show one after a minute and a half, Lonca passes it on as Slack announced it, and what you wrote after it waits until then. What you write while Lonca is stopped, or can't reach Slack, is picked up when it reconnects. Slack doesn't promise to announce every message, so Lonca also reads threads with something recent in them every few minutes. Lonca passes each message on once, however often Slack sends it, as it first reads it: one you edited before then goes as edited, and one you deleted before then isn't passed on.
+
+### What isn't passed on
+
+- Files. A message with one has its text passed on, and Lonca says the file wasn't. Attach it in Lonca instead.
+- Edits and deletions once a message has been passed on, which don't change what the Lead was sent.
+- Anything outside your DM with the app, and anything from anyone but you.
+- What you type in Lonca, which isn't copied into Slack.
+
+Lonca never uses channels. The app can't read one, or post in one it hasn't been added to, and Lonca only reads and posts in your DM with the app. If the app is added to a channel anyway, Lonca does nothing there: it doesn't read, post, react or leave.
+
+What's posted is in your Slack workspace from then on, under its retention settings and exports, which your workspace's admins may control.
 
 ## Changes and pull requests
 
@@ -95,7 +137,7 @@ The sign-in pages send your browser to a port on `localhost`, as they do for the
 
 None of these ever enter a workspace. Docker Sandboxes' proxy, on your computer, adds them to requests as they leave a virtual machine, and all that's inside is a placeholder. Claude's goes only to `api.anthropic.com`, Codex's only to `chatgpt.com` and `api.openai.com`, Gemini's only to `cloudcode-pa.googleapis.com` for a Google account and `generativelanguage.googleapis.com` for a key, and GitHub's only to GitHub's own hosts. Signing in or out takes effect straight away, in workspaces that are already running, though a terminal opened before you first signed in to Claude needs reopening. In a virtual machine, a connected GitHub account is used for GitHub even if the project sets its own `GH_TOKEN`.
 
-On your computer, the Claude and GitHub tokens are in `~/.lonca/secrets.json`, each Codex login and each Gemini login or key is in `~/.lonca/helper-credentials`, and `~/.lonca/boundary` holds what the proxy reads. All are readable only by you and none is mounted into a virtual machine. Lonca renews Codex's logins before they run out. A Google account's access token lasts an hour, so Lonca renews a Gemini login every hour, on this computer, with its refresh token, which no virtual machine ever has, and the Gemini CLI's own client ID and secret, which Google publishes in every copy of the CLI. It also renews one as you sign in, so a login that couldn't be renewed fails then, rather than an hour later.
+On your computer, the Claude, GitHub and [Slack](#slack) tokens are in `~/.lonca/secrets.json`, each Codex login and each Gemini login or key is in `~/.lonca/helper-credentials`, and `~/.lonca/boundary` holds what the proxy reads. All are readable only by you and none is mounted into a virtual machine. Lonca renews Codex's logins before they run out. A Google account's access token lasts an hour, so Lonca renews a Gemini login every hour, on this computer, with its refresh token, which no virtual machine ever has, and the Gemini CLI's own client ID and secret, which Google publishes in every copy of the CLI. It also renews one as you sign in, so a login that couldn't be renewed fails then, rather than an hour later.
 
 On a phone, signing in starts with a code to paste for Claude and Gemini and a one-time code for Codex, since a phone is rarely the computer the sign-in page comes back to.
 

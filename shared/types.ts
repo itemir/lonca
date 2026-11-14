@@ -104,6 +104,26 @@ export interface PortForward {
   since: number;
 }
 
+/**
+ * A workspace's thread in the user's Slack DM, which Lonca starts the first time its Lead needs
+ * them there. What's been handled is kept with it, so that a message is passed on once, even
+ * after a restart.
+ */
+export interface SlackThread {
+  /** The root message, which replies go under. Missing until it's posted. */
+  thread?: string;
+  /** Every message in the thread up to this one has been handled. */
+  handled?: string;
+  /** Messages after `handled` that have been, as they arrived. */
+  done?: string[];
+  /** The last moment Lonca decided to post, so that the same one isn't posted twice. */
+  last?: string;
+  /** The Lead's reply that was last posted, which a later moment doesn't post again. */
+  lastItem?: string;
+  /** When Lonca last posted, or passed something on, in the thread, which makes it worth reading now and then. */
+  active?: number;
+}
+
 export interface Workspace {
   id: string;
   projectId: string;
@@ -135,6 +155,8 @@ export interface Workspace {
   diff: DiffStat | null;
   /** The branch's pull request when GitHub was last asked, kept for when it can't be asked. */
   pr?: PrSummary | null;
+  /** Its thread in the user's Slack DM. */
+  slack?: SlackThread;
   createdAt: number;
   updatedAt: number;
 }
@@ -162,6 +184,8 @@ export interface UserItem extends ChatItemBase {
   queued?: boolean;
   /** Who wrote it, when it wasn't the user. */
   from?: 'lead' | 'lonca';
+  /** The user wrote it in Slack, rather than in Lonca. */
+  via?: 'slack';
   /** Shown instead of `text`, which Lonca writes for the Lead to read. */
   summary?: string;
   /** Sent ahead of `text` without being shown. */
@@ -439,6 +463,8 @@ export interface AppSettings {
   notifications: boolean;
   /** Ask before the trash icon archives a workspace. Deleting one for good always asks. */
   confirmArchive: boolean;
+  /** Post a Lead's reply to the user's Slack DM when it needs them, once Slack is paired. */
+  slackReplies: boolean;
 }
 
 /** Instructions for Leads, from a project's file, the global file or the shipped template. */
@@ -451,6 +477,32 @@ export interface Playbook {
 export interface SecretsStatus {
   claudeToken: string | null;
   githubToken: string | null;
+  slackBotToken: string | null;
+  slackAppToken: string | null;
+}
+
+/** Lonca's connection to the user's Slack app. It never includes a token. */
+export interface SlackStatus {
+  /** Off until both tokens are saved. An error is Slack's error code, or Lonca's own for what isn't Slack's. */
+  connection: 'off' | 'connecting' | 'connected' | 'error';
+  error?: string;
+  /** Slack refused a token, or Socket Mode is off, so Lonca has stopped trying until the tokens are saved again. */
+  stopped?: boolean;
+  /** Slack's error code for a post it hasn't taken yet, which Lonca keeps trying. */
+  postError?: string;
+  /**
+   * Slack hadn't answered for a post it was asked to make before Disconnect, or pairing someone else,
+   * by the time Lonca stopped waiting, so it may still arrive where it was going.
+   */
+  postMayArrive?: boolean;
+  /** The Slack workspace the app is installed in, once Slack has said. */
+  team?: string;
+  /** The Slack user Lonca answers to, in their DM with the app. */
+  owner?: { user: string };
+  /** A one-time code for the user to DM to the app, while one is on offer. */
+  pairing?: { code: string; expiresAt: number };
+  /** Why the last code stopped working before it was used: `otherApp` if it reached another app than the bot token's. */
+  pairingEnded?: 'expired' | 'attempts' | 'otherApp';
 }
 
 export interface Me {
@@ -471,6 +523,7 @@ export interface AppState {
   catalog: Catalog;
   settings: AppSettings;
   secrets: SecretsStatus;
+  slack: SlackStatus;
 }
 
 export interface SessionSnapshot {
@@ -614,7 +667,8 @@ export type ServerEvent =
   | { type: 'login'; profileId: string; login: LoginState | null }
   | { type: 'profiles'; profiles: Profile[] }
   | { type: 'system'; system: SystemStatus; catalog: Catalog }
-  | { type: 'settings'; settings: AppSettings; secrets: SecretsStatus };
+  | { type: 'settings'; settings: AppSettings; secrets: SecretsStatus }
+  | { type: 'slack'; slack: SlackStatus };
 
 /** Sent over the events WebSocket: nothing needs to interrupt someone who's looking at the page. */
 export type ClientEvent = { type: 'focus'; focused: boolean };
