@@ -316,7 +316,9 @@ cat > "$0/.$1.tmp" && mv -f "$0/.$1.tmp" "$0/$1"`;
 /** Whether the message's file is in the inbox, can't be, or might be. */
 async function writeInbox(run: ActiveRun, item: UserItem, seq: number): Promise<'written' | 'closed' | 'unknown'> {
   const name = `${String(seq).padStart(12, '0')}.json`;
-  const content = JSON.stringify({ uuid: messageUuid(item.id), text: userPrompt(item.text, item.attachments ?? []) });
+  // What it says about where it came from goes with it, as it does for a turn that starts with it.
+  const text = [item.context, item.text].filter(Boolean).join('\n\n');
+  const content = JSON.stringify({ uuid: messageUuid(item.id), text: userPrompt(text, item.attachments ?? []) });
   for (let attempt = 1; attempt <= 3 && runs.get(run.sessionId) === run; attempt++) {
     try {
       // Writing it mustn't boot a VM that stopped while this was being handled.
@@ -1015,6 +1017,10 @@ export interface MessageOptions {
   receipt?: ToolReceipt;
   /** Saved in the same write as the message, so that nothing can come between the two. */
   patch?: Partial<Session>;
+  /** Where the user wrote it, when it wasn't in Lonca. */
+  via?: UserItem['via'];
+  /** Told to the agent ahead of the message, without being shown. */
+  context?: string;
 }
 
 /** Releasing a queue also applies to a Stop whose process is still being retired or recovered. */
@@ -1043,7 +1049,9 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
   const item: UserItem = {
     id: options.id ?? newId(), ts: Date.now(), type: 'user', text, attachments, queued: true,
     ...(options.from ? { from: options.from } : {}),
+    ...(options.via ? { via: options.via } : {}),
     ...(options.summary ? { summary: options.summary } : {}),
+    ...(options.context ? { context: options.context } : {}),
   };
   const locksLead = session.role === 'lead' && !workspace.leadLockedAt;
   const fromUser = !options.from;
@@ -1053,7 +1061,7 @@ export async function sendMessage(sessionId: string, text: string, attachments: 
     if (session.role === 'lead' && !session.hasMessages) {
       const handover = team.handover(workspace);
       if (handover) {
-        item.context = handover;
+        item.context = [handover, options.context].filter(Boolean).join('\n\n');
         notice(session.id, undefined, 'info', `What this Lead was told:\n\n${handover}`);
       }
     }

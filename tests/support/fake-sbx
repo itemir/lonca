@@ -93,6 +93,39 @@ start_relays() {
   done < "$(ports_file "$1")"
 }
 
+# The first of the ports the sandbox was made with that something is listening on, which can be the
+# sandbox itself if another command has just started it.
+taken_port() {
+  local ip host
+  while read -r ip host; do
+    [ -n "$host" ] || continue
+    if (exec 3<>"/dev/tcp/$ip/$host") 2>/dev/null; then
+      echo "$ip:$host"
+      return 0
+    fi
+  done < <(docker inspect --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{range $bindings}}{{if .HostIp}}{{.HostIp}}{{else}}127.0.0.1{{end}} {{.HostPort}}{{println}}{{end}}{{end}}' "$1")
+  return 1
+}
+
+# Like the real one, it won't start a sandbox when one of the ports it was made with has been taken
+# meanwhile. Docker refuses as well, but Docker 29.9 on Linux has been seen to do so only the first
+# time: started again, the container ran without that port. So the stand-in looks for itself first.
+# When another command has just started the same sandbox, those are its ports, and this one restores
+# its forwards as that one does, so that both fail if one can't be restored.
+start_sandbox() {
+  local taken
+  if taken=$(taken_port "$1"); then
+    sleep 1
+    if [ "$(docker inspect --format '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; then
+      start_relays "$1"
+      return
+    fi
+    echo "error: cannot start sandbox: start runtime: request failed: 409 Conflict: republish port: port not available: mapping ports: failed to bind host port $taken: address already in use" >&2
+    return 1
+  fi
+  docker start "$1" >/dev/null && start_relays "$1"
+}
+
 # [HOST_IP:]HOST_PORT:SANDBOX_PORT[/PROTOCOL]. Lonca always names the host port.
 parse_spec() {
   local parts=()
@@ -113,8 +146,7 @@ publish_port() {
   # Like the real one, it starts a stopped sandbox.
   if [ "$(docker inspect --format '{{.State.Running}}' "$1")" != true ]; then
     echo "ports-start $1" >> "$state/calls.log"
-    docker start "$1" >/dev/null || exit 1
-    start_relays "$1" || exit 1
+    start_sandbox "$1" || exit 1
   fi
   if ! start_relay "$1" "$spec_ip" "$spec_host" "$spec_port"; then
     echo "error: host $spec_ip:$spec_host is already in use; choose a different host port with --publish" >&2
@@ -190,7 +222,11 @@ run_sandbox() {
   fi
   if docker inspect "$name" >/dev/null 2>&1; then
     [ ! -e "$state/slow-start" ] || sleep 2
-    if docker start "$name" >/dev/null; then start_relays "$name" || exit 1; fi
+    if [ "$(docker inspect --format '{{.State.Running}}' "$name")" != true ]; then
+      start_sandbox "$name" || exit 1
+    else
+      start_relays "$name" || exit 1
+    fi
     echo "$name"
     return
   fi
@@ -245,8 +281,7 @@ exec_in_sandbox() {
       case "$arg" in lonca-process|follow|lonca-boot|lonca-terminal-ready) purpose=$arg ;; esac
     done
     echo "exec-start $name $purpose" >> "$state/calls.log"
-    docker start "$name" >/dev/null || exit 125
-    start_relays "$name" || exit 125
+    start_sandbox "$name" || exit 125
   fi
   # Like the real one, it gives a command a pipe for stdin even without --interactive.
   if [[ " ${flags[*]-} " != *" --interactive "* ]]; then

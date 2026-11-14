@@ -8,6 +8,7 @@ import type {
 import { DEFAULT_CATALOG } from '../shared/catalog.ts';
 import { AGENTS, PROFILE_ID } from '../shared/profiles.ts';
 import { paths } from './config.ts';
+import type { SlackState } from './slack/state.ts';
 
 interface StateFile {
   version: 1;
@@ -22,6 +23,8 @@ interface StateFile {
   catalog: Catalog;
   /** The template `catalog` was read from. */
   catalogTemplate?: string;
+  /** Who Slack is paired with, and posts waiting to be made there. Its tokens are in secrets.json. */
+  slack?: SlackState;
 }
 
 export interface Secrets {
@@ -30,6 +33,9 @@ export interface Secrets {
   /** Every other Claude sign-in's, by id. */
   claudeTokens?: Record<string, string>;
   githubToken?: string;
+  /** The user's Slack app's bot token, `xoxb-`, and app-level token, `xapp-`. Nothing outside this computer gets them. */
+  slackBotToken?: string;
+  slackAppToken?: string;
 }
 
 /** Before there could be several, each provider had one sign-in, which keeps the provider's id. */
@@ -56,6 +62,7 @@ function defaultSettings(): AppSettings {
     leadMaxAgents: 4,
     notifications: true,
     confirmArchive: true,
+    slackReplies: true,
   };
 }
 
@@ -221,7 +228,12 @@ function mask(secret: string | undefined): string | null {
 }
 
 export function secretsStatus(): SecretsStatus {
-  return { claudeToken: mask(secrets.claudeToken), githubToken: mask(secrets.githubToken) };
+  return {
+    claudeToken: mask(secrets.claudeToken),
+    githubToken: mask(secrets.githubToken),
+    slackBotToken: mask(secrets.slackBotToken),
+    slackAppToken: mask(secrets.slackAppToken),
+  };
 }
 
 /** Every port Lonca has served its pages on, so that no forward is ever given one. */

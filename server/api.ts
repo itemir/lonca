@@ -23,6 +23,7 @@ import {
 } from './projects.ts';
 import { saveGeminiApiKey, signOutGemini } from './gemini-login.ts';
 import { dockerLogins, logins } from './logins.ts';
+import { disconnectSlack, offerPairing, saveSlackTokens, slackStatus } from './slack/index.ts';
 import { flushState, getProject, getSession, getWorkspace, isClaudeCredential, saveState, secretsStatus, setClaudeCredential, state, updateSecrets } from './store.ts';
 import {
   checkClaudeCredential, checkCodexKey, checkGeminiKey, checkSandboxes, clearAgentRejected, clearProfileLimit, getProfile, rebuildImage, refreshAgents,
@@ -120,6 +121,7 @@ const appSettingsSchema = z.object({
   leadMaxAgents: z.number().int().min(1).max(8),
   notifications: z.boolean(),
   confirmArchive: z.boolean(),
+  slackReplies: z.boolean(),
 }).partial();
 
 // The whole file goes on the CLI's command line each turn, and that has limits.
@@ -150,6 +152,7 @@ export function snapshot(me: AppState['me']): AppState {
     catalog: state.catalog,
     settings: state.settings,
     secrets: secretsStatus(),
+    slack: slackStatus(),
   };
 }
 
@@ -609,6 +612,25 @@ export function createApi(me: AppState['me']): Router {
     } catch (error) {
       throw new HttpError(400, `Could not read a token from the gh CLI: ${errorMessage(error)}`);
     }
+    publishSettings();
+    res.status(204).end();
+  });
+
+  // Slack. Its tokens are checked with Slack before they're saved, and never sent back.
+
+  api.put('/slack', express.json(), async (req, res) => {
+    const { botToken, appToken } = parse(z.object({ botToken: z.string(), appToken: z.string() }), req.body);
+    const status = await saveSlackTokens(stripSpace(botToken), stripSpace(appToken));
+    publishSettings();
+    res.json(status);
+  });
+
+  api.post('/slack/pairing', (_req, res) => {
+    res.json(offerPairing());
+  });
+
+  api.delete('/slack', async (_req, res) => {
+    await disconnectSlack();
     publishSettings();
     res.status(204).end();
   });

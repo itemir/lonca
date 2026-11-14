@@ -1,6 +1,6 @@
 import type {
   AgentId, Attachment, ChangeSet, Checks, DockerLoginState, FileContent, FileEntry, LeadChoice, LoginMethod, LoginState, MergeMethod, MergeReply, Playbook, Profile,
-  Project, ProjectSettings, SearchHit, Session, SessionSnapshot, TerminalInfo, UserItem, Workspace, AppState, AppSettings,
+  Project, ProjectSettings, SearchHit, Session, SessionSnapshot, SlackStatus, TerminalInfo, UserItem, Workspace, AppState, AppSettings,
 } from '../../shared/types.ts';
 import { accessToken } from './auth.ts';
 
@@ -117,6 +117,9 @@ export const api = {
   updateSettings: (patch: Partial<AppSettings>) => request<AppSettings>('PATCH', '/settings', patch),
   saveGithubToken: (token: string) => request<void>('PUT', '/secrets/github', { token }),
   importGithubToken: () => request<void>('POST', '/secrets/github/import'),
+  saveSlack: (botToken: string, appToken: string) => request<SlackStatus>('PUT', '/slack', { botToken, appToken }),
+  pairSlack: () => request<SlackStatus>('POST', '/slack/pairing'),
+  disconnectSlack: () => request<void>('DELETE', '/slack'),
   addProfile: (agent: AgentId, name: string, firstName?: string) => request<Profile>('POST', '/profiles', { agent, name, firstName }),
   updateProfile: (id: string, patch: { name?: string; autoSwitch?: boolean; makeDefault?: true }) => request<Profile>('PATCH', `/profiles/${id}`, patch),
   removeProfile: (id: string) => request<void>('DELETE', `/profiles/${id}`),

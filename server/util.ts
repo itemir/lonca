@@ -43,7 +43,17 @@ export class KeyedQueue {
   }
 }
 
-export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** Waits, or less if what it's waiting for is called off. */
+export const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
+  if (signal?.aborted) return resolve();
+  const done = () => {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', done);
+    resolve();
+  };
+  const timer = setTimeout(done, ms);
+  signal?.addEventListener('abort', done, { once: true });
+});
 
 /**
  * Deletes a tree an agent could have made read-only, which would otherwise stop the delete

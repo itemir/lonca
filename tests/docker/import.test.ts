@@ -108,8 +108,17 @@ it('imports a private HTTPS GitHub repository with the saved token and keeps it 
 
 it('ends an import’s Git, and the token it holds, when Lonca shuts down', async () => {
   const lonca = new Lonca({ port: 48308, instance: 'import-stop-test', firstWorkspacePort: 51700 });
-  // A private address that never answers keeps the import going.
-  const remote = 'https://10.255.255.2/nobody/stop-test.git';
+  // A server that takes the connection and never answers keeps the import going. It's on this
+  // computer, since a network can answer for an address that wouldn't, as a proxy or firewall does,
+  // and then Git ends before the test sees it.
+  const connections = new Set<net.Socket>();
+  const silent = net.createServer((socket) => {
+    connections.add(socket);
+    socket.on('close', () => connections.delete(socket));
+  });
+  await new Promise<void>((resolve) => silent.listen(0, '127.0.0.1', resolve));
+  const remote = `https://127.0.0.1:${(silent.address() as net.AddressInfo).port}/nobody/stop-test.git`;
+  lonca.env = { NO_PROXY: '127.0.0.1', no_proxy: '127.0.0.1' };
   const running = () => {
     try {
       return execFileSync('pgrep', ['-f', remote.replace(/\./g, '\\.')], { encoding: 'utf8' }).trim() !== '';
@@ -120,10 +129,13 @@ it('ends an import’s Git, and the token it holds, when Lonca shuts down', asyn
   try {
     await lonca.start();
     await lonca.api('POST', '/projects', { url: remote });
-    await until('the import’s Git', running, 15000);
+    // Git's own setup has the address too, so wait until it has reached the server.
+    await until('the import’s Git', () => connections.size > 0 && running(), 15000);
     await lonca.stop();
     await until('Git to end', () => !running(), 5000);
   } finally {
     await lonca.destroy();
+    for (const socket of connections) socket.destroy();
+    await new Promise<void>((resolve) => silent.close(() => resolve()));
   }
 });

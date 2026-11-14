@@ -2200,6 +2200,18 @@ a.home-row:hover { background: var(--panel); }
 .sign-in-hint { margin: 0; padding: 0 14px 11px; color: var(--text-3); font-size: 12.5px; }
 .sign-in-switch input { flex: none; margin: 2px 0 0; accent-color: var(--accent); }
 .add-sign-in { display: inline-flex; align-items: center; gap: 5px; margin: 2px 0 2px 2px; color: var(--text-2); font-size: 13px; }
+/* Slack: the steps to make its app, and pairing. */
+.slack-intro { margin: -4px 0 12px; }
+.slack-steps { margin: 0 0 12px; padding-left: 20px; color: var(--text-2); font-size: 13px; line-height: 1.5; }
+.slack-steps li + li { margin-top: 6px; }
+.slack-steps code { color: var(--text-2); }
+.slack-manifest { position: relative; margin-bottom: 8px; }
+.slack-manifest .isolation-command { max-height: 220px; overflow: auto; padding-right: 64px; }
+.slack-manifest .button { position: absolute; top: 6px; right: 6px; }
+.slack-pairing, .slack-paired { margin-bottom: 8px; }
+.slack-pairing .field-help { margin-bottom: 6px; }
+.slack-tokens { margin-top: 4px; }
+
 .isolation-command {
   margin: 8px 0 0;
   padding: 8px 10px;
